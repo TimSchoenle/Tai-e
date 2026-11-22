@@ -355,7 +355,7 @@ public class DefaultSolver implements Solver {
         if (!diff.isEmpty()) {
             pointerFlowGraph.getOutEdgesOf(pointer).forEach(edge -> {
                 Pointer target = edge.target();
-                edge.getTransfers().forEach(transfer ->
+                edge.forEachTransfer(transfer ->
                         addPointsTo(target, transfer.apply(edge, diff)));
             });
         }
