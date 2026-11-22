@@ -42,6 +42,7 @@ import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.plugin.util.CSObjs;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.ir.exp.InvokeDynamic;
+import pascal.taie.ir.exp.InvokeInstanceExp;
 import pascal.taie.ir.exp.MethodHandle;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.proginfo.MethodRef;
@@ -61,6 +62,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public class LambdaAnalysis implements Plugin {
@@ -96,6 +98,26 @@ public class LambdaAnalysis implements Plugin {
      * this information will be used to build lambda call edges.
      */
     private final MultiMap<CSVar, InstanceInvoInfo> invoInfos = Maps.newMultiMap();
+
+    /**
+     * Map from each receiver variable of {@link #invoInfos} to its points-to
+     * set grouped by object type, so that a lambda object reaching another
+     * invocation site on that variable does not regroup the whole set.
+     * Created from the variable's points-to set at its first lambda
+     * invocation and extended by every new points-to set of the variable
+     * ({@link #onNewPointsToSet}). The solver changes a variable's points-to
+     * set only when it propagates a work-list entry, and notifies
+     * {@link #onNewPointsToSet} of the difference before it takes the next
+     * entry; in between it only processes the variable's own loads, stores
+     * and calls. So outside that window the grouping holds exactly the
+     * objects of the points-to set. Inside it (an invocation whose receiver
+     * variable is the base variable being propagated) the grouping may lack
+     * the difference, which the following {@link #onNewPointsToSet} then
+     * hands to every invocation on the variable, including the new one;
+     * a grouping created inside the window may list those objects twice,
+     * which repeats facts but loses none.
+     */
+    private final Map<CSVar, Map<Type, List<CSObj>>> recvByType = Maps.newMap();
 
     /**
      * System property that turns on {@link GroupingVerifier}.
@@ -225,7 +247,12 @@ public class LambdaAnalysis implements Plugin {
                 }
                 CSVar csRecvVar = csManager.getCSVar(recvCtx, recvVar);
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
-                addLambdaCallEdges(csCallSite, recvObjs, groupByType(recvObjs),
+                Map<Type, List<CSObj>> recvObjsByType = recvByType.computeIfAbsent(
+                        csRecvVar, v -> groupByType(recvObjs));
+                if (verifier != null) {
+                    verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
+                }
+                addLambdaCallEdges(csCallSite, recvObjs, recvObjsByType,
                         targetRef, indy, indyCtx);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
@@ -243,6 +270,18 @@ public class LambdaAnalysis implements Plugin {
      */
     private static MethodHandle getMethodHandle(InvokeDynamic indy) {
         return (MethodHandle) indy.getBootstrapArgs().get(1);
+    }
+
+    /**
+     * @return the context-sensitive base variable of {@code invoke}, or null
+     * if {@code invoke} is not an instance invocation. Used by the verify
+     * mode only.
+     */
+    @Nullable
+    private CSVar baseVarOf(Context context, Invoke invoke) {
+        return invoke.getInvokeExp() instanceof InvokeInstanceExp exp
+                ? csManager.getCSVar(context, exp.getBase())
+                : null;
     }
 
     /**
@@ -381,6 +420,7 @@ public class LambdaAnalysis implements Plugin {
         if (verifier != null) {
             verifier.checkState("finish");
         }
+        recvByType.clear();
     }
 
     /**
@@ -416,8 +456,25 @@ public class LambdaAnalysis implements Plugin {
 
         private long checkedFacts;
 
+        /**
+         * Whether the next grouped call may lack the difference of the
+         * points-to set being propagated (see {@link #recvByType}): its
+         * facts must then be a subset of the per-object ones; the missing
+         * ones are covered by the state checks. Set right before that call
+         * and reset by {@link #checkGrouping}.
+         */
+        private boolean partial;
+
+        private long partialCalls;
+
+        private long partialMissing;
+
         private GroupingVerifier(boolean stateChecks) {
             this.stateChecks = stateChecks;
+        }
+
+        private void setPartial(boolean partial) {
+            this.partial = partial;
         }
 
         private void checkGrouping(
@@ -445,11 +502,20 @@ public class LambdaAnalysis implements Plugin {
                 }
                 receivers.forEach(recv -> grouped.add(new ThisFact(csCallee, recv)));
             });
-            if (!original.equals(grouped) || !originalEdges.equals(groupedEdges)) {
+            boolean same = partial
+                    ? original.containsAll(grouped) && originalEdges.containsAll(groupedEdges)
+                    : original.equals(grouped) && originalEdges.equals(groupedEdges);
+            if (!same) {
                 throw new AnalysisException("[spd] lambda verify: grouped facts differ at "
-                        + csCallSite + ": per-object " + original.size() + "/"
-                        + originalEdges.size() + ", grouped " + grouped.size() + "/"
-                        + groupedEdges.size());
+                        + csCallSite + " (partial=" + partial + "): per-object "
+                        + original.size() + "/" + originalEdges.size() + ", grouped "
+                        + grouped.size() + "/" + groupedEdges.size());
+            }
+            if (partial) {
+                ++partialCalls;
+                partialMissing += original.size() - grouped.size()
+                        + originalEdges.size() - groupedEdges.size();
+                partial = false;
             }
             ++calls;
             facts += original.size() + originalEdges.size();
@@ -484,8 +550,18 @@ public class LambdaAnalysis implements Plugin {
         }
 
         private String counts() {
-            return "calls=" + calls + " facts=" + facts + " stateChecks=" + stateChecks
-                    + " checkedFacts=" + checkedFacts;
+            long cachedObjs = 0;
+            long cachedTypes = 0;
+            for (Map<Type, List<CSObj>> byType : recvByType.values()) {
+                cachedTypes += byType.size();
+                for (List<CSObj> objs : byType.values()) {
+                    cachedObjs += objs.size();
+                }
+            }
+            return "calls=" + calls + " facts=" + facts + " partialCalls=" + partialCalls
+                    + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
+                    + " checkedFacts=" + checkedFacts + " cachedVars=" + recvByType.size()
+                    + " cachedTypes=" + cachedTypes + " cachedObjs=" + cachedObjs;
         }
     }
 
@@ -567,8 +643,13 @@ public class LambdaAnalysis implements Plugin {
             return;
         }
         // grouped once per new points-to set, shared by every lambda
-        // invocation on this receiver variable
+        // invocation on this receiver variable, and appended to the
+        // variable's cached grouping (present since its first invocation)
         Map<Type, List<CSObj>> ptsByType = groupByType(pts);
+        Map<Type, List<CSObj>> cached = Objects.requireNonNull(recvByType.get(csVar),
+                "no receiver grouping for a lambda receiver variable");
+        ptsByType.forEach((type, objs) ->
+                cached.computeIfAbsent(type, t -> new ArrayList<>()).addAll(objs));
         infos.forEach(info -> {
             // handle the case of that new objects reach base variable
             // of lambda invocation
