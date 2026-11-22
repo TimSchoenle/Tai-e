@@ -87,6 +87,12 @@ public interface Solver {
      */
     void solve();
 
+    /**
+     * @return whether the last {@link #solve()} stopped at its time limit
+     * with work left, so its result may be incomplete.
+     */
+    boolean isStoppedByTimeLimit();
+
     // ---------- side-effect APIs (begin) ----------
     // These side-effect APIs could be used by Plugins to update
     // points-to information.

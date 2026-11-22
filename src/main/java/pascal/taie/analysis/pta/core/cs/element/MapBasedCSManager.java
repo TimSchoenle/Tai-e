@@ -119,6 +119,11 @@ public class MapBasedCSManager implements CSManager {
     }
 
     @Override
+    public Stream<MockPointer> mockPointers() {
+        return ptrManager.mockPointers.values().stream();
+    }
+
+    @Override
     public CSObj getCSObj(Context heapContext, Obj obj) {
         return objManager.getCSObj(heapContext, obj);
     }

@@ -1,0 +1,26 @@
+Points-to sets of all variables
+[]:<ReflectiveArgTaint: void leak(java.lang.String)>/s -> [[]:MergedObj{<Merged java.lang.String>}, []:TaintObj{alloc=<ReflectiveArgTaint: void main(java.lang.String[])>[9@L11] %v10 = invokestatic SourceSink.source()/result,type=java.lang.String}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/$null -> []
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%c5 -> [[]:ConstantObj{java.lang.Class: java.lang.String.class}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%c6 -> [[]:ConstantObj{java.lang.String: "leak"}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%c7 -> [[]:ConstantObj{java.lang.Class: ReflectiveArgTaint.class}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%v10 -> [[]:MergedObj{<Merged java.lang.String>}, []:TaintObj{alloc=<ReflectiveArgTaint: void main(java.lang.String[])>[9@L11] %v10 = invokestatic SourceSink.source()/result,type=java.lang.String}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%v3 -> [[]:NewObj{<ReflectiveArgTaint: void main(java.lang.String[])>[4@L10] newarray java.lang.Class[%ci1]}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/%v9 -> [[]:NewObj{<ReflectiveArgTaint: void main(java.lang.String[])>[8@L11] newarray java.lang.Object[%ci1]}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/args -> [[]:EntryPointObj{alloc=MethodParam{<ReflectiveArgTaint: void main(java.lang.String[])>/0},type=java.lang.String[] in <ReflectiveArgTaint: void main(java.lang.String[])>}]
+[]:<ReflectiveArgTaint: void main(java.lang.String[])>/m -> [[]:ReflectionMetaObj{alloc=<ReflectiveArgTaint: void leak(java.lang.String)>,type=java.lang.reflect.Method}]
+[]:<SourceSink: java.lang.String source()>/%v0 -> [[]:MergedObj{<Merged java.lang.String>}]
+[]:<SourceSink: void sink(java.lang.String)>/s -> [[]:MergedObj{<Merged java.lang.String>}, []:TaintObj{alloc=<ReflectiveArgTaint: void main(java.lang.String[])>[9@L11] %v10 = invokestatic SourceSink.source()/result,type=java.lang.String}]
+
+Points-to sets of all static fields
+
+Points-to sets of all instance fields
+
+Points-to sets of all array indexes
+[]:EntryPointObj{alloc=MethodParam{<ReflectiveArgTaint: void main(java.lang.String[])>/0},type=java.lang.String[] in <ReflectiveArgTaint: void main(java.lang.String[])>}[*] -> [[]:EntryPointObj{alloc=MethodParam{<ReflectiveArgTaint: void main(java.lang.String[])>/0}[*],type=java.lang.String in <ReflectiveArgTaint: void main(java.lang.String[])>}]
+[]:NewObj{<ReflectiveArgTaint: void main(java.lang.String[])>[4@L10] newarray java.lang.Class[%ci1]}[*] -> [[]:ConstantObj{java.lang.Class: java.lang.String.class}]
+[]:NewObj{<ReflectiveArgTaint: void main(java.lang.String[])>[8@L11] newarray java.lang.Object[%ci1]}[*] -> [[]:MergedObj{<Merged java.lang.String>}, []:TaintObj{alloc=<ReflectiveArgTaint: void main(java.lang.String[])>[9@L11] %v10 = invokestatic SourceSink.source()/result,type=java.lang.String}]
+
+Detected 1 taint flow(s):
+TaintFlow{<ReflectiveArgTaint: void main(java.lang.String[])>[9@L11] %v10 = invokestatic SourceSink.source()/result -> <ReflectiveArgTaint: void leak(java.lang.String)>[0@L15] invokestatic SourceSink.sink(s)/0}
+

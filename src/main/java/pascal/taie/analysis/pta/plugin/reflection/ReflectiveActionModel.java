@@ -32,6 +32,8 @@ import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
 import pascal.taie.analysis.pta.core.cs.element.InstanceField;
+import pascal.taie.analysis.pta.core.cs.element.MockPointer;
+import pascal.taie.analysis.pta.core.cs.element.RelayDescriptor;
 import pascal.taie.analysis.pta.core.cs.element.StaticField;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.Obj;
@@ -47,6 +49,7 @@ import pascal.taie.ir.exp.NewArray;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.New;
+import pascal.taie.language.classes.ClassNames;
 import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
@@ -61,6 +64,7 @@ import pascal.taie.util.collection.MultiMap;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static pascal.taie.analysis.graph.flowgraph.FlowKind.INSTANCE_STORE;
@@ -96,9 +100,26 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
     private final TypeMatcher typeMatcher;
 
     /**
-     * Associates argument variable (Object[]) to reflective call edges.
+     * Descriptor of the relay pointers of reflective argument passing.
      */
-    private final MultiMap<CSVar, ReflectiveCallEdge> reflectiveArgs = Maps.newMultiMap();
+    private static final RelayDescriptor ARGS_RELAY_DESC = () -> "ReflectiveArgsRelay";
+
+    /**
+     * Associates argument variable (Object[]) to its relay pointer, which
+     * receives the elements of every array the variable points to and
+     * passes them to the parameters of every reflective callee of the
+     * calls that use the variable. One relay per (context, variable)
+     * replaces one edge per (array, callee parameter) pair: the
+     * parameters receive the same union of elements under the same type
+     * filter.
+     */
+    private final Map<CSVar, MockPointer> argsRelays = Maps.newMap();
+
+    /**
+     * Checks the relays against the edges they replace; present only when
+     * {@code -Dpx.reflargs.verify=true}.
+     */
+    private final @Nullable ReflectiveArgsVerifier verifier;
 
     /**
      * Set of invocations that are annotated by the reflection log.
@@ -117,6 +138,9 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         this.helper = helper;
         this.typeMatcher = typeMatcher;
         this.invokesWithLog = invokesWithLog;
+        this.verifier = ReflectiveArgsVerifier.isEnabled()
+                ? new ReflectiveArgsVerifier(solver, argsRelays)
+                : null;
     }
 
     @InvokeHandler(signature = "<java.lang.Class: java.lang.Object newInstance()>", argIndexes = {BASE})
@@ -385,9 +409,10 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             Var args = refEdge.getArgs();
             if (args != null) {
                 CSVar csArgs = csManager.getCSVar(callerCtx, args);
-                passReflectiveArgs(refEdge, solver.getPointsToSetOf(csArgs));
-                // record args for later-arrive array objects
-                reflectiveArgs.put(csArgs, refEdge);
+                passReflectiveArgs(refEdge, getArgsRelay(csArgs));
+                if (verifier != null) {
+                    verifier.addEdge(csArgs, refEdge);
+                }
             }
             // pass return value
             Invoke invoke = refEdge.getCallSite().getCallSite();
@@ -404,31 +429,75 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         }
     }
 
-    private void passReflectiveArgs(ReflectiveCallEdge edge, PointsToSet arrays) {
+    /**
+     * Returns the relay pointer of the given argument variable. A new relay
+     * receives the elements of the arrays the variable points to now;
+     * {@link #onNewPointsToSet} connects the arrays that arrive later.
+     */
+    private MockPointer getArgsRelay(CSVar csArgs) {
+        MockPointer relay = argsRelays.get(csArgs);
+        if (relay == null) {
+            relay = csManager.getMockPointer(ARGS_RELAY_DESC, csArgs,
+                    typeSystem.getClassType(ClassNames.OBJECT));
+            argsRelays.put(csArgs, relay);
+            connectArrays(relay, solver.getPointsToSetOf(csArgs));
+        }
+        return relay;
+    }
+
+    private void connectArrays(MockPointer relay, PointsToSet arrays) {
+        arrays.forEach(array -> solver.addPFGEdge(
+                csManager.getArrayIndex(array), relay, PARAMETER_PASSING));
+    }
+
+    private void passReflectiveArgs(ReflectiveCallEdge edge, MockPointer relay) {
         Context calleeCtx = edge.getCallee().getContext();
         JMethod callee = edge.getCallee().getMethod();
-        arrays.forEach(array -> {
-            ArrayIndex elems = csManager.getArrayIndex(array);
-            callee.getIR().getParams().forEach(param -> {
-                Type paramType = param.getType();
-                if (isConcerned(paramType)) {
-                    CSVar csParam = csManager.getCSVar(calleeCtx, param);
-                    solver.addPFGEdge(new PointerFlowEdge(
-                                    PARAMETER_PASSING, elems, csParam),
-                            paramType);
-                }
-            });
+        callee.getIR().getParams().forEach(param -> {
+            Type paramType = param.getType();
+            if (isConcerned(paramType)) {
+                CSVar csParam = csManager.getCSVar(calleeCtx, param);
+                solver.addPFGEdge(new PointerFlowEdge(
+                                PARAMETER_PASSING, relay, csParam),
+                        paramType);
+            }
         });
     }
 
-    private static boolean isConcerned(Type type) {
+    static boolean isConcerned(Type type) {
         return type instanceof ClassType || type instanceof ArrayType;
     }
 
     @Override
     public void onNewPointsToSet(CSVar csVar, PointsToSet pts) {
         super.onNewPointsToSet(csVar, pts);
-        reflectiveArgs.get(csVar).forEach(edge -> passReflectiveArgs(edge, pts));
+        MockPointer relay = argsRelays.get(csVar);
+        if (relay != null) {
+            connectArrays(relay, pts);
+        }
+        if (verifier != null) {
+            verifier.onProgress();
+        }
+    }
+
+    @Override
+    public void onPhaseFinish() {
+        if (verifier != null) {
+            // another plugin may still add work in its own onPhaseFinish
+            verifier.verify(false);
+        }
+    }
+
+    @Override
+    public void onFinish() {
+        if (verifier != null) {
+            if (solver.isStoppedByTimeLimit()) {
+                // work is left on the work list: only the running check applies
+                verifier.verify(false);
+            } else {
+                verifier.verify(true);
+            }
+        }
     }
 
     MultiMap<Invoke, Object> getAllTargets() {
