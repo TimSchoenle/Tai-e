@@ -491,7 +491,12 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
     @Override
     public void onFinish() {
         if (verifier != null) {
-            verifier.verify(true);
+            if (solver.isStoppedByTimeLimit()) {
+                // work is left on the work list: only the running check applies
+                verifier.verify(false);
+            } else {
+                verifier.verify(true);
+            }
         }
     }
 

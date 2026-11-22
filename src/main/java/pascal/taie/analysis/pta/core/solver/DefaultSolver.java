@@ -150,6 +150,11 @@ public class DefaultSolver implements Solver {
      */
     private volatile boolean isTimeout;
 
+    /**
+     * Whether the last analysis stopped at its time limit with work left.
+     */
+    private boolean stoppedByTimeLimit;
+
     private Plugin plugin;
 
     private WorkList workList;
@@ -257,6 +262,11 @@ public class DefaultSolver implements Solver {
         analyze();
     }
 
+    @Override
+    public boolean isStoppedByTimeLimit() {
+        return stoppedByTimeLimit;
+    }
+
     /**
      * Initializes pointer analysis.
      */
@@ -336,7 +346,8 @@ public class DefaultSolver implements Solver {
             }
             plugin.onPhaseFinish();
         }
-        if (!workList.isEmpty() && isTimeout) {
+        stoppedByTimeLimit = !workList.isEmpty() && isTimeout;
+        if (stoppedByTimeLimit) {
             logger.warn("Pointer analysis stops early as it reaches time limit ({} seconds)," +
                     " and the result may be unsound!", timeLimit);
         } else if (timeLimiter != null) { // finish normally but time limiter is still running
