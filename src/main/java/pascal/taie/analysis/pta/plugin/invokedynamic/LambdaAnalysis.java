@@ -42,6 +42,7 @@ import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.plugin.util.CSObjs;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.ir.exp.InvokeDynamic;
+import pascal.taie.ir.exp.InvokeInstanceExp;
 import pascal.taie.ir.exp.MethodHandle;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.proginfo.MethodRef;
@@ -56,9 +57,13 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 public class LambdaAnalysis implements Plugin {
 
@@ -94,6 +99,38 @@ public class LambdaAnalysis implements Plugin {
      */
     private final MultiMap<CSVar, InstanceInvoInfo> invoInfos = Maps.newMultiMap();
 
+    /**
+     * Map from each receiver variable of {@link #invoInfos} to its points-to
+     * set grouped by object type, so that a lambda object reaching another
+     * invocation site on that variable does not regroup the whole set.
+     * Created from the variable's points-to set at its first lambda
+     * invocation and extended by every new points-to set of the variable
+     * ({@link #onNewPointsToSet}). The solver changes a variable's points-to
+     * set only when it propagates a work-list entry, and notifies
+     * {@link #onNewPointsToSet} of the difference before it takes the next
+     * entry; in between it only processes the variable's own loads, stores
+     * and calls. So outside that window the grouping holds exactly the
+     * objects of the points-to set. Inside it (an invocation whose receiver
+     * variable is the base variable being propagated) the grouping may lack
+     * the difference, which the following {@link #onNewPointsToSet} then
+     * hands to every invocation on the variable, including the new one;
+     * a grouping created inside the window may list those objects twice,
+     * which repeats facts but loses none.
+     */
+    private final Map<CSVar, Map<Type, List<CSObj>>> recvByType = Maps.newMap();
+
+    /**
+     * System property that turns on {@link GroupingVerifier}.
+     */
+    private static final String VERIFY_PROPERTY = "spd.lambda.verify";
+
+    /**
+     * The verifier of {@link #addLambdaCallEdges}, or null when the verify
+     * mode is off.
+     */
+    @Nullable
+    private GroupingVerifier verifier;
+
     @Override
     public void setSolver(Solver solver) {
         this.solver = solver;
@@ -101,6 +138,10 @@ public class LambdaAnalysis implements Plugin {
         this.selector = solver.getContextSelector();
         this.hierarchy = solver.getHierarchy();
         this.csManager = solver.getCSManager();
+        if (Boolean.getBoolean(VERIFY_PROPERTY)) {
+            boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
+            verifier = new GroupingVerifier(noTimeLimit);
+        }
     }
 
     @Override
@@ -205,7 +246,13 @@ public class LambdaAnalysis implements Plugin {
                     recvCtx = context;
                 }
                 CSVar csRecvVar = csManager.getCSVar(recvCtx, recvVar);
-                addLambdaCallEdges(csCallSite, solver.getPointsToSetOf(csRecvVar),
+                PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
+                Map<Type, List<CSObj>> recvObjsByType = recvByType.computeIfAbsent(
+                        csRecvVar, v -> groupByType(recvObjs));
+                if (verifier != null) {
+                    verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
+                }
+                addLambdaCallEdges(csCallSite, recvObjs, recvObjsByType,
                         targetRef, indy, indyCtx);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
@@ -223,6 +270,18 @@ public class LambdaAnalysis implements Plugin {
      */
     private static MethodHandle getMethodHandle(InvokeDynamic indy) {
         return (MethodHandle) indy.getBootstrapArgs().get(1);
+    }
+
+    /**
+     * @return the context-sensitive base variable of {@code invoke}, or null
+     * if {@code invoke} is not an instance invocation. Used by the verify
+     * mode only.
+     */
+    @Nullable
+    private CSVar baseVarOf(Context context, Invoke invoke) {
+        return invoke.getInvokeExp() instanceof InvokeInstanceExp exp
+                ? csManager.getCSVar(context, exp.getBase())
+                : null;
     }
 
     /**
@@ -284,6 +343,19 @@ public class LambdaAnalysis implements Plugin {
     }
 
     /**
+     * @return the objects of {@code objs} grouped by their type, in
+     * first-seen order.
+     */
+    private static Map<Type, List<CSObj>> groupByType(PointsToSet objs) {
+        Map<Type, List<CSObj>> byType = new LinkedHashMap<>();
+        for (CSObj obj : objs) {
+            byType.computeIfAbsent(obj.getObject().getType(),
+                    t -> new ArrayList<>()).add(obj);
+        }
+        return byType;
+    }
+
+    /**
      * Adds the same facts as {@link #addLambdaCallEdge} for each receiver
      * object, with the receivers grouped by their context-sensitive callee
      * first: per callee, one points-to update of the callee's this variable
@@ -298,19 +370,31 @@ public class LambdaAnalysis implements Plugin {
      * order the order in which objects get their indices. Neither changes
      * the solver's fixpoint, which does not depend on propagation order as
      * long as the plugins are monotone and the time limit is not hit.
+     * <p>
+     * Dispatch depends only on the receiver's type and {@code targetRef}, so
+     * the receivers come grouped by type ({@code recvByType}, the objects of
+     * {@code recvObjs}) and each type is dispatched once. {@code recvObjs}
+     * itself is read only by the verify mode.
      */
     private void addLambdaCallEdges(
-            CSCallSite csCallSite, PointsToSet recvObjs, MethodRef targetRef,
+            CSCallSite csCallSite, PointsToSet recvObjs,
+            Map<Type, List<CSObj>> recvByType, MethodRef targetRef,
             InvokeDynamic indy, Context indyCtx) {
         Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
-        for (CSObj recvObj : recvObjs) {
-            JMethod callee = hierarchy.dispatch(recvObj.getObject().getType(), targetRef);
+        recvByType.forEach((type, objs) -> {
+            JMethod callee = hierarchy.dispatch(type, targetRef);
             if (callee == null) {
-                continue;
+                return;
             }
-            Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
-            receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
-                    m -> solver.makePointsToSet()).addObject(recvObj);
+            for (CSObj recvObj : objs) {
+                Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
+                receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
+                        m -> solver.makePointsToSet()).addObject(recvObj);
+            }
+        });
+        if (verifier != null) {
+            verifier.checkGrouping(csCallSite, recvObjs, targetRef, indy,
+                    receiversByCallee);
         }
         receiversByCallee.forEach((csCallee, receivers) -> {
             JMethod callee = csCallee.getMethod();
@@ -322,6 +406,163 @@ public class LambdaAnalysis implements Plugin {
                         csCallSite, csCallee, indy, indyCtx));
             }
         });
+    }
+
+    @Override
+    public void onPhaseFinish() {
+        if (verifier != null) {
+            verifier.checkState("phase end");
+        }
+    }
+
+    @Override
+    public void onFinish() {
+        if (verifier != null) {
+            verifier.checkState("finish");
+        }
+        recvByType.clear();
+    }
+
+    /**
+     * Verify mode of {@link #addLambdaCallEdges} (-Dspd.lambda.verify=true).
+     * Beside each grouped call, the per-object path of
+     * {@link #addLambdaCallEdge} is replayed without side effects: per
+     * receiver object it dispatches, selects the callee context and records
+     * the fact "receiver in this of the callee" and, if the arguments fit,
+     * the edge "call site to callee". (a) Per call, the facts and edges of
+     * the per-object path must equal those of the grouped path. (b) Every
+     * recorded fact and edge must hold in the solver state whenever the work
+     * list is empty (each phase end and the finish), unless a time limit is
+     * set (the solver may then stop with a non-empty work list). Any
+     * difference throws.
+     */
+    private final class GroupingVerifier {
+
+        private record ThisFact(CSMethod callee, CSObj recv) {
+        }
+
+        private record CallFact(CSCallSite callSite, CSMethod callee) {
+        }
+
+        private final boolean stateChecks;
+
+        private final Set<ThisFact> pendingThis = new HashSet<>();
+
+        private final Set<CallFact> pendingCalls = new HashSet<>();
+
+        private long calls;
+
+        private long facts;
+
+        private long checkedFacts;
+
+        /**
+         * Whether the next grouped call may lack the difference of the
+         * points-to set being propagated (see {@link #recvByType}): its
+         * facts must then be a subset of the per-object ones; the missing
+         * ones are covered by the state checks. Set right before that call
+         * and reset by {@link #checkGrouping}.
+         */
+        private boolean partial;
+
+        private long partialCalls;
+
+        private long partialMissing;
+
+        private GroupingVerifier(boolean stateChecks) {
+            this.stateChecks = stateChecks;
+        }
+
+        private void setPartial(boolean partial) {
+            this.partial = partial;
+        }
+
+        private void checkGrouping(
+                CSCallSite csCallSite, PointsToSet recvObjs, MethodRef targetRef,
+                InvokeDynamic indy, Map<CSMethod, PointsToSet> receiversByCallee) {
+            Set<ThisFact> original = new HashSet<>();
+            Set<CallFact> originalEdges = new HashSet<>();
+            for (CSObj recvObj : recvObjs) {
+                JMethod callee = hierarchy.dispatch(recvObj.getObject().getType(), targetRef);
+                if (callee == null) {
+                    continue;
+                }
+                Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
+                CSMethod csCallee = csManager.getCSMethod(calleeCtx, callee);
+                original.add(new ThisFact(csCallee, recvObj));
+                if (fitsParameterCount(csCallSite, indy, callee)) {
+                    originalEdges.add(new CallFact(csCallSite, csCallee));
+                }
+            }
+            Set<ThisFact> grouped = new HashSet<>();
+            Set<CallFact> groupedEdges = new HashSet<>();
+            receiversByCallee.forEach((csCallee, receivers) -> {
+                if (fitsParameterCount(csCallSite, indy, csCallee.getMethod())) {
+                    groupedEdges.add(new CallFact(csCallSite, csCallee));
+                }
+                receivers.forEach(recv -> grouped.add(new ThisFact(csCallee, recv)));
+            });
+            boolean same = partial
+                    ? original.containsAll(grouped) && originalEdges.containsAll(groupedEdges)
+                    : original.equals(grouped) && originalEdges.equals(groupedEdges);
+            if (!same) {
+                throw new AnalysisException("[spd] lambda verify: grouped facts differ at "
+                        + csCallSite + " (partial=" + partial + "): per-object "
+                        + original.size() + "/" + originalEdges.size() + ", grouped "
+                        + grouped.size() + "/" + groupedEdges.size());
+            }
+            if (partial) {
+                ++partialCalls;
+                partialMissing += original.size() - grouped.size()
+                        + originalEdges.size() - groupedEdges.size();
+                partial = false;
+            }
+            ++calls;
+            facts += original.size() + originalEdges.size();
+            if (stateChecks) {
+                pendingThis.addAll(original);
+                pendingCalls.addAll(originalEdges);
+            }
+            if (Long.bitCount(calls) == 1 && calls >= 1024) {
+                System.out.println("[spd] lambda verify progress " + counts());
+            }
+        }
+
+        private void checkState(String when) {
+            for (ThisFact f : pendingThis) {
+                CSVar thisVar = csManager.getCSVar(f.callee().getContext(),
+                        f.callee().getMethod().getIR().getThis());
+                if (!solver.getPointsToSetOf(thisVar).contains(f.recv())) {
+                    throw new AnalysisException("[spd] lambda verify: " + when + ": "
+                            + f.recv() + " missing in this of " + f.callee());
+                }
+            }
+            for (CallFact f : pendingCalls) {
+                if (!solver.getCallGraph().getCalleesOf(f.callSite()).contains(f.callee())) {
+                    throw new AnalysisException("[spd] lambda verify: " + when + ": edge "
+                            + f.callSite() + " -> " + f.callee() + " missing");
+                }
+            }
+            checkedFacts += pendingThis.size() + pendingCalls.size();
+            pendingThis.clear();
+            pendingCalls.clear();
+            System.out.println("[spd] lambda verify " + when + " OK " + counts());
+        }
+
+        private String counts() {
+            long cachedObjs = 0;
+            long cachedTypes = 0;
+            for (Map<Type, List<CSObj>> byType : recvByType.values()) {
+                cachedTypes += byType.size();
+                for (List<CSObj> objs : byType.values()) {
+                    cachedObjs += objs.size();
+                }
+            }
+            return "calls=" + calls + " facts=" + facts + " partialCalls=" + partialCalls
+                    + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
+                    + " checkedFacts=" + checkedFacts + " cachedVars=" + recvByType.size()
+                    + " cachedTypes=" + cachedTypes + " cachedObjs=" + cachedObjs;
+        }
     }
 
     @Override
@@ -397,12 +638,24 @@ public class LambdaAnalysis implements Plugin {
 
     @Override
     public void onNewPointsToSet(CSVar csVar, PointsToSet pts) {
-        invoInfos.get(csVar).forEach(info -> {
+        Set<InstanceInvoInfo> infos = invoInfos.get(csVar);
+        if (infos.isEmpty()) {
+            return;
+        }
+        // grouped once per new points-to set, shared by every lambda
+        // invocation on this receiver variable, and appended to the
+        // variable's cached grouping (present since its first invocation)
+        Map<Type, List<CSObj>> ptsByType = groupByType(pts);
+        Map<Type, List<CSObj>> cached = Objects.requireNonNull(recvByType.get(csVar),
+                "no receiver grouping for a lambda receiver variable");
+        ptsByType.forEach((type, objs) ->
+                cached.computeIfAbsent(type, t -> new ArrayList<>()).addAll(objs));
+        infos.forEach(info -> {
             // handle the case of that new objects reach base variable
             // of lambda invocation
             InvokeDynamic indy = info.getLambdaIndy();
             MethodRef targetRef = getMethodHandle(indy).getMethodRef();
-            addLambdaCallEdges(info.getCSCallSite(), pts,
+            addLambdaCallEdges(info.getCSCallSite(), pts, ptsByType,
                     targetRef, indy, info.getLambdaContext());
         });
     }
