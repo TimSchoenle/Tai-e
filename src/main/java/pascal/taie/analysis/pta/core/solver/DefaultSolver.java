@@ -134,6 +134,12 @@ public class DefaultSolver implements Solver {
     private final Map<Type, TypeFilter> typeFilters = Maps.newMap();
 
     /**
+     * Applies the transfers of out-edges to a propagated delta, each type
+     * filter once per delta.
+     */
+    private final DeltaTransfers deltaTransfers = new DeltaTransfers();
+
+    /**
      * Whether only analyzes application code.
      */
     private final boolean onlyApp;
@@ -360,11 +366,15 @@ public class DefaultSolver implements Solver {
         }
         PointsToSet diff = getPointsToSetOf(pointer).addAllDiff(pointsToSet);
         if (!diff.isEmpty()) {
-            pointerFlowGraph.getOutEdgesOf(pointer).forEach(edge -> {
-                Pointer target = edge.target();
-                edge.forEachTransfer(transfer ->
-                        addPointsTo(target, transfer.apply(edge, diff)));
-            });
+            try {
+                pointerFlowGraph.getOutEdgesOf(pointer).forEach(edge -> {
+                    Pointer target = edge.target();
+                    edge.forEachTransfer(transfer ->
+                            addPointsTo(target, deltaTransfers.apply(edge, transfer, diff)));
+                });
+            } finally {
+                deltaTransfers.finish(pointer, diff);
+            }
         }
         return diff;
     }
