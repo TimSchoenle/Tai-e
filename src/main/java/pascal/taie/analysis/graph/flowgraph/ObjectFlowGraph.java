@@ -29,6 +29,7 @@ import pascal.taie.analysis.pta.core.cs.element.CSVar;
 import pascal.taie.analysis.pta.core.cs.element.InstanceField;
 import pascal.taie.analysis.pta.core.cs.element.MockPointer;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.analysis.pta.core.cs.element.RelayDescriptor;
 import pascal.taie.analysis.pta.core.cs.element.StaticField;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.core.solver.PointerFlowGraph;
@@ -79,6 +80,14 @@ public class ObjectFlowGraph extends NodeManager
     }
 
     private void addPointerFlowEdge(PointerFlowEdge edge) {
+        if (edge.target() instanceof MockPointer relay
+                && relay.getDescriptor() instanceof RelayDescriptor) {
+            // A relay stands for the direct edges from its sources to its targets.
+            Node source = toNode(edge.source());
+            relay.getOutEdges().forEach(out -> addFlowEdge(
+                    new BasicFlowEdge(out.kind(), source, toNode(out.target()))));
+            return;
+        }
         if (edge.source() instanceof MockPointer ||
                 edge.target() instanceof MockPointer) {
             // MockPointer is an analysis-internal PFG placeholder and is not

@@ -128,6 +128,11 @@ public interface CSManager {
     Stream<Pointer> pointers();
 
     /**
+     * @return all analysis-internal mock pointers managed by this manager.
+     */
+    Stream<MockPointer> mockPointers();
+
+    /**
      * @return {@link Indexer} for {@link CSObj} maintained by this manager.
      * The indexer is useful for creating efficient points-to sets.
      */

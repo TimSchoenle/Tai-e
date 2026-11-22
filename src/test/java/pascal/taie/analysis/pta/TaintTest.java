@@ -54,6 +54,7 @@ public class TaintTest {
     @MultiStringsSource({"CycleTaint", TAINT_CONFIG})
     @MultiStringsSource({"ComplexTaint", TAINT_CONFIG})
     @MultiStringsSource({"SimpleTaint", TAINT_CONFIG})
+    @MultiStringsSource({"ReflectiveArgTaint", TAINT_CONFIG})
     @MultiStringsSource({"ArgToResult", TAINT_CONFIG})
     @MultiStringsSource({"BaseToResult", TAINT_CONFIG})
     @MultiStringsSource({"StringAppend", TAINT_CONFIG})

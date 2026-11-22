@@ -49,6 +49,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * Taint Analysis composites plugins {@link SourceHandler}, {@link TransferHandler}
@@ -119,7 +120,8 @@ public class TaintAnalysis extends CompositePlugin {
         clearPlugins();
         if (context != null) {
             TaintManager manager = context.manager();
-            solver.getCSManager().pointers().forEach(p -> {
+            CSManager csManager = solver.getCSManager();
+            Stream.concat(csManager.pointers(), csManager.mockPointers()).forEach(p -> {
                 PointsToSet pts = p.getPointsToSet();
                 if (pts != null) {
                     pts.removeIf(csObj -> manager.isTaint(csObj.getObject()));
