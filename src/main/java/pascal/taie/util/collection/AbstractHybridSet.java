@@ -69,8 +69,10 @@ public abstract class AbstractHybridSet<E> extends AbstractSetEx<E>
 
     /**
      * The set containing the elements. Null if the set is not used.
+     * Public so that hot callers (e.g., TypeFilter) can operate on the
+     * large set directly; callers must not replace it.
      */
-    protected Set<E> set;
+    public Set<E> set;
 
     /**
      * Whether the set implementation is the one for large set.
@@ -95,7 +97,7 @@ public abstract class AbstractHybridSet<E> extends AbstractSetEx<E>
      * When number of elements exceeds the threshold, set should be upgraded
      * to large set.
      */
-    protected int getThreshold() {
+    public int getThreshold() {
         return SMALL_SIZE;
     }
 

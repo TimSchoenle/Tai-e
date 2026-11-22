@@ -33,9 +33,13 @@ import java.util.stream.Stream;
 /**
  * Delegates points-to set to a concrete set implementation.
  */
-abstract class DelegatePointsToSet implements PointsToSet {
+public abstract class DelegatePointsToSet implements PointsToSet {
 
-    protected final SetEx<CSObj> set;
+    /**
+     * The set holding the objects. Public so that hot transfer functions
+     * (e.g., TypeFilter) can operate on the underlying bit set directly.
+     */
+    public final SetEx<CSObj> set;
 
     DelegatePointsToSet(SetEx<CSObj> set) {
         this.set = set;
