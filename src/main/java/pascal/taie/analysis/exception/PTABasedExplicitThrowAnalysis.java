@@ -45,6 +45,10 @@ class PTABasedExplicitThrowAnalysis implements ExplicitThrowAnalysis {
     PTABasedExplicitThrowAnalysis() {
         PointerAnalysisResult result = World.get().getResult(PointerAnalysis.ID);
         this.ptaThrowResult = result.getResult(ExceptionAnalysis.class.getName());
+        if (ptaThrowResult == null) {
+            throw new IllegalStateException("throw analysis algorithm pta needs"
+                    + " the pointer analysis option collect-throw-results:true");
+        }
     }
 
     @Override
