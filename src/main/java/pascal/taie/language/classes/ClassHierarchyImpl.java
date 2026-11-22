@@ -90,6 +90,12 @@ public class ClassHierarchyImpl implements ClassHierarchy {
      */
     private final Map<JClass, Set<JClass>> allSubclasses = Maps.newConcurrentMap();
 
+    /**
+     * Constant-time answer of {@link #isSubclass} over the classes added so far: built on the first query after a
+     * change, dropped by {@link #addClass}. Null while stale.
+     */
+    private transient volatile SubtypeIndex subtypeIndex;
+
     public ClassHierarchyImpl() {
     }
 
@@ -158,6 +164,7 @@ public class ClassHierarchyImpl implements ClassHierarchy {
         // invalidate global hierarchy information
         // TODO - make this elegant
         allSubclasses.clear();
+        subtypeIndex = null;
     }
 
     @Override
@@ -408,8 +415,244 @@ public class ClassHierarchyImpl implements ClassHierarchy {
             return true;
         } else if (superclass == getObjectClass()) {
             return true;
-        } else {
-            return getAllSubclassesOf(superclass).contains(subclass);
+        }
+        int indexed = subtypeIndex().isSubclass(superclass, subclass);
+        if (indexed != SubtypeIndex.NOT_COVERED) {
+            return indexed == SubtypeIndex.YES;
+        }
+        return getAllSubclassesOf(superclass).contains(subclass);
+    }
+
+    private SubtypeIndex subtypeIndex() {
+        SubtypeIndex index = subtypeIndex;
+        if (index == null) {
+            synchronized (this) {
+                index = subtypeIndex;
+                if (index == null) {
+                    index = SubtypeIndex.build(classes, directSubinterfaces, directImplementors, directSubclasses);
+                    subtypeIndex = index;
+                }
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Immutable subtype index answering exactly what {@code getAllSubclassesOf(sup).contains(sub)} answers for the
+     * classes it was built over. {@code getAllSubclassesOf} walks down from {@code sup}: from an interface through
+     * its direct subinterfaces and direct implementors, from any other class through its direct subclasses. The
+     * index stores the same graph walked upwards:
+     * <ul>
+     * <li>a non-interface {@code sup} only reaches non-interface classes through direct-subclass edges, and every
+     * class has at most one such parent, so these edges form a forest; {@code sub} is reached iff its pre-order
+     * number lies in the interval of {@code sup}'s subtree (two int compares);</li>
+     * <li>an interface {@code sup} reaches {@code sub} iff {@code sup} is in {@code sub}'s sorted set of interface
+     * ancestors, the union over its parents in that graph (binary search over a few entries).</li>
+     * </ul>
+     * A class outside the built range (index unset, out of range, or another object at its index) is
+     * {@link #NOT_COVERED}, and so is every pair when the graph has a cycle or a malformed edge: the caller then
+     * takes the original path.
+     */
+    private static final class SubtypeIndex {
+
+        static final int NOT_COVERED = -1;
+
+        static final int NO = 0;
+
+        static final int YES = 1;
+
+        private static final int[] NONE = new int[0];
+
+        private final JClass[] nodes;
+
+        private final int[] pre;
+
+        private final int[] end;
+
+        private final int[][] interfaceAncestors;
+
+        private SubtypeIndex(JClass[] nodes, int[] pre, int[] end, int[][] interfaceAncestors) {
+            this.nodes = nodes;
+            this.pre = pre;
+            this.end = end;
+            this.interfaceAncestors = interfaceAncestors;
+        }
+
+        private static SubtypeIndex unusable(String reason) {
+            logger.warn("subtype index not built ({}); isSubclass takes the original path", reason);
+            return new SubtypeIndex(new JClass[0], NONE, NONE, new int[0][]);
+        }
+
+        int isSubclass(JClass sup, JClass sub) {
+            int p = indexOf(sup);
+            int s = indexOf(sub);
+            if (p < 0 || s < 0) {
+                return NOT_COVERED;
+            }
+            if (sup.isInterface()) {
+                return java.util.Arrays.binarySearch(interfaceAncestors[s], p) >= 0 ? YES : NO;
+            }
+            int q = pre[s];
+            return q >= pre[p] && q < end[p] ? YES : NO;
+        }
+
+        private int indexOf(JClass c) {
+            int i = c.getIndex();
+            return i >= 0 && i < nodes.length && nodes[i] == c ? i : NOT_COVERED;
+        }
+
+        static SubtypeIndex build(List<JClass> classes, MultiMap<JClass, JClass> subinterfaces,
+                                  MultiMap<JClass, JClass> implementors, MultiMap<JClass, JClass> subclasses) {
+            long start = System.nanoTime();
+            int n = classes.size();
+            JClass[] nodes = classes.toArray(new JClass[0]);
+            for (int i = 0; i < n; i++) {
+                if (nodes[i].getIndex() != i) {
+                    return unusable("class " + nodes[i] + " has index " + nodes[i].getIndex() + ", position " + i);
+                }
+            }
+            SubtypeIndex shell = new SubtypeIndex(nodes, NONE, NONE, new int[0][]);
+            // children in the graph getAllSubclassesOf walks, deduplicated
+            int[][] children = new int[n][];
+            int[] parentCount = new int[n];
+            int[] stamp = new int[n];
+            int[] buffer = new int[n];
+            for (int k = 0; k < n; k++) {
+                JClass c = nodes[k];
+                int size = 0;
+                List<Collection<JClass>> edges = c.isInterface()
+                        ? List.of(subinterfaces.get(c), implementors.get(c))
+                        : List.of(subclasses.get(c));
+                for (Collection<JClass> group : edges) {
+                    for (JClass child : group) {
+                        int x = shell.indexOf(child);
+                        if (x < 0) {
+                            return unusable("child " + child + " of " + c + " is not an added class");
+                        }
+                        if (stamp[x] != k + 1) {
+                            stamp[x] = k + 1;
+                            buffer[size++] = x;
+                            parentCount[x]++;
+                        }
+                    }
+                }
+                children[k] = size == 0 ? NONE : java.util.Arrays.copyOf(buffer, size);
+            }
+            int[][] parents = new int[n][];
+            int[] fill = new int[n];
+            for (int x = 0; x < n; x++) {
+                parents[x] = parentCount[x] == 0 ? NONE : new int[parentCount[x]];
+            }
+            for (int k = 0; k < n; k++) {
+                for (int x : children[k]) {
+                    parents[x][fill[x]++] = k;
+                }
+            }
+            // topological order (parents first); a cycle leaves nodes unordered
+            int[] order = new int[n];
+            int head = 0;
+            int tail = 0;
+            int[] remaining = parentCount.clone();
+            for (int x = 0; x < n; x++) {
+                if (remaining[x] == 0) {
+                    order[tail++] = x;
+                }
+            }
+            while (head < tail) {
+                for (int x : children[order[head++]]) {
+                    if (--remaining[x] == 0) {
+                        order[tail++] = x;
+                    }
+                }
+            }
+            if (tail != n) {
+                return unusable((n - tail) + " classes on a cycle");
+            }
+            // interface ancestors: union over parents of (parent if it is an interface) and the parent's ancestors
+            int[][] ancestors = new int[n][];
+            java.util.Arrays.fill(stamp, 0);
+            int maxAncestors = 0;
+            for (int i = 0; i < n; i++) {
+                int x = order[i];
+                int[] ps = parents[x];
+                if (ps.length == 0) {
+                    ancestors[x] = NONE;
+                    continue;
+                }
+                if (ps.length == 1 && !nodes[ps[0]].isInterface()) {
+                    ancestors[x] = ancestors[ps[0]];
+                    continue;
+                }
+                int size = 0;
+                for (int p : ps) {
+                    if (nodes[p].isInterface() && stamp[p] != x + 1) {
+                        stamp[p] = x + 1;
+                        buffer[size++] = p;
+                    }
+                    for (int a : ancestors[p]) {
+                        if (stamp[a] != x + 1) {
+                            stamp[a] = x + 1;
+                            buffer[size++] = a;
+                        }
+                    }
+                }
+                int[] set = java.util.Arrays.copyOf(buffer, size);
+                java.util.Arrays.sort(set);
+                ancestors[x] = set;
+                maxAncestors = Math.max(maxAncestors, size);
+            }
+            // pre-order intervals over the forest of non-interface classes and their direct-subclass edges
+            int[] pre = new int[n];
+            int[] end = new int[n];
+            java.util.Arrays.fill(pre, -1);
+            int[] stack = new int[n];
+            int[] next = new int[n];
+            int counter = 0;
+            int forestNodes = 0;
+            for (int root = 0; root < n; root++) {
+                if (nodes[root].isInterface() || hasClassParent(nodes, parents[root])) {
+                    continue;
+                }
+                int depth = 0;
+                stack[0] = root;
+                next[0] = 0;
+                pre[root] = counter++;
+                while (depth >= 0) {
+                    int k = stack[depth];
+                    if (next[depth] < children[k].length) {
+                        int x = children[k][next[depth]++];
+                        if (pre[x] >= 0) {
+                            return unusable("class " + nodes[x] + " has two superclass parents");
+                        }
+                        pre[x] = counter++;
+                        stack[++depth] = x;
+                        next[depth] = 0;
+                    } else {
+                        end[k] = counter;
+                        depth--;
+                    }
+                }
+            }
+            for (int x = 0; x < n; x++) {
+                if (!nodes[x].isInterface()) {
+                    forestNodes++;
+                    if (pre[x] < 0) {
+                        return unusable("class " + nodes[x] + " is outside the subclass forest");
+                    }
+                }
+            }
+            logger.info("subtype index built: {} classes ({} in the subclass forest), max interface ancestors {},"
+                    + " {} ms", n, forestNodes, maxAncestors, (System.nanoTime() - start) / 1_000_000);
+            return new SubtypeIndex(nodes, pre, end, ancestors);
+        }
+
+        private static boolean hasClassParent(JClass[] nodes, int[] parents) {
+            for (int p : parents) {
+                if (!nodes[p].isInterface()) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
