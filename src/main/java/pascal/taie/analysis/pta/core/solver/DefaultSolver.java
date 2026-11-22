@@ -127,6 +127,13 @@ public class DefaultSolver implements Solver {
     private final PropagateTypes propTypes;
 
     /**
+     * One type filter per guard type: edges with the same guard type share
+     * the filter (a filter's behavior depends only on its type and this
+     * solver).
+     */
+    private final Map<Type, TypeFilter> typeFilters = Maps.newMap();
+
+    /**
      * Whether only analyzes application code.
      */
     private final boolean onlyApp;
@@ -810,6 +817,16 @@ public class DefaultSolver implements Solver {
     @Override
     public void addPointerFilter(Pointer pointer, Predicate<CSObj> filter) {
         pointer.addFilter(filter);
+    }
+
+    @Override
+    public void addPFGEdge(PointerFlowEdge edge, Type type) {
+        TypeFilter filter = typeFilters.get(type);
+        if (filter == null) {
+            filter = new TypeFilter(type, this);
+            typeFilters.put(type, filter);
+        }
+        addPFGEdge(edge, filter);
     }
 
     @Override
