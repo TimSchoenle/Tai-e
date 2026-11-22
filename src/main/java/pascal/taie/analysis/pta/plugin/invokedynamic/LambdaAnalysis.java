@@ -56,7 +56,9 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class LambdaAnalysis implements Plugin {
 
@@ -203,9 +205,8 @@ public class LambdaAnalysis implements Plugin {
                     recvCtx = context;
                 }
                 CSVar csRecvVar = csManager.getCSVar(recvCtx, recvVar);
-                solver.getPointsToSetOf(csRecvVar).forEach(recvObj ->
-                        addLambdaCallEdge(csCallSite, recvObj, targetRef,
-                                indy, indyCtx));
+                addLambdaCallEdges(csCallSite, solver.getPointsToSetOf(csRecvVar),
+                        targetRef, indy, indyCtx);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
                 invoInfos.put(csRecvVar,
@@ -280,6 +281,47 @@ public class LambdaAnalysis implements Plugin {
         LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite,
                 csManager.getCSMethod(calleeCtx, callee), indy, indyCtx);
         solver.addCallEdge(callEdge);
+    }
+
+    /**
+     * Adds the same facts as {@link #addLambdaCallEdge} for each receiver
+     * object, with the receivers grouped by their context-sensitive callee
+     * first: per callee, one points-to update of the callee's this variable
+     * with the whole group, and (if the arguments fit) one call edge, instead
+     * of one update and one equal edge per receiver object. The work list
+     * merges updates of one pointer and the call graph keeps equal edges
+     * once, so the points-to facts and call edges added are the same sets.
+     * What may differ is the order of work-list entries and, when a pending
+     * work-list entry merges a group with objects it already holds, the
+     * internal representation (small set or bit set, hence the iteration
+     * order) of the callee's this points-to set, and with the propagation
+     * order the order in which objects get their indices. Neither changes
+     * the solver's fixpoint, which does not depend on propagation order as
+     * long as the plugins are monotone and the time limit is not hit.
+     */
+    private void addLambdaCallEdges(
+            CSCallSite csCallSite, PointsToSet recvObjs, MethodRef targetRef,
+            InvokeDynamic indy, Context indyCtx) {
+        Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
+        for (CSObj recvObj : recvObjs) {
+            JMethod callee = hierarchy.dispatch(recvObj.getObject().getType(), targetRef);
+            if (callee == null) {
+                continue;
+            }
+            Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
+            receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
+                    m -> solver.makePointsToSet()).addObject(recvObj);
+        }
+        receiversByCallee.forEach((csCallee, receivers) -> {
+            JMethod callee = csCallee.getMethod();
+            // pass receiver objects to 'this' variable of callee
+            solver.addVarPointsTo(csCallee.getContext(),
+                    callee.getIR().getThis(), receivers);
+            if (fitsParameterCount(csCallSite, indy, callee)) {
+                solver.addCallEdge(new LambdaCallEdge(
+                        csCallSite, csCallee, indy, indyCtx));
+            }
+        });
     }
 
     @Override
@@ -360,9 +402,8 @@ public class LambdaAnalysis implements Plugin {
             // of lambda invocation
             InvokeDynamic indy = info.getLambdaIndy();
             MethodRef targetRef = getMethodHandle(indy).getMethodRef();
-            pts.forEach(recvObj ->
-                    addLambdaCallEdge(info.getCSCallSite(), recvObj,
-                            targetRef, indy, info.getLambdaContext()));
+            addLambdaCallEdges(info.getCSCallSite(), pts,
+                    targetRef, indy, info.getLambdaContext());
         });
     }
 }
