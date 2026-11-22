@@ -112,6 +112,17 @@ public class TypeFilter implements Transfer {
 
     private @Nullable Memo memo;
 
+    private long applications;
+
+    /**
+     * The delta that a solver is propagating and the result of this filter
+     * on it, or null outside a propagation that applied it; set and cleared
+     * by {@link DeltaTransfers}.
+     */
+    @Nullable PointsToSet deltaInput;
+
+    @Nullable PointsToSet deltaResult;
+
     public TypeFilter(Type type, Solver solver) {
         this.type = type;
         this.typeSystem = solver.getTypeSystem();
@@ -136,8 +147,16 @@ public class TypeFilter implements Transfer {
         memos = new HashMap<>();
     }
 
+    /**
+     * @return the number of applications of this filter so far.
+     */
+    long applications() {
+        return applications;
+    }
+
     @Override
     public PointsToSet apply(PointerFlowEdge edge, PointsToSet input) {
+        applications++;
         Memo m = memo;
         if (m == null) {
             m = memoFor(type, indexer);
@@ -170,16 +189,12 @@ public class TypeFilter implements Transfer {
 
     /**
      * @return the filtered set, or null if the copy of the input is not held
-     * in a bit set (the caller then filters object by object).
+     * in a bit set (the caller then filters object by object). If every
+     * object passes and the input is above the threshold, the result is the
+     * input itself (as for {@link Identity}): consumers only read it.
      */
     private @Nullable PointsToSet filterLarge(Memo m, PointsToSet input,
                                               GenericBitSet<CSObj> in, int threshold) {
-        PointsToSet result = input.copy();
-        if (!(result instanceof DelegatePointsToSet delegate
-                && delegate.set instanceof AbstractHybridSet<CSObj> hybrid
-                && hybrid.set instanceof GenericBitSet<CSObj> out)) {
-            return null;
-        }
         // read-only subset tests first: after warm-up most inputs are fully
         // known, and many pass entirely
         if (!m.known.containsAll(in)) {
@@ -189,8 +204,17 @@ public class TypeFilter implements Transfer {
                 }
             }
         }
+        GenericBitSet<CSObj> out = in;
+        PointsToSet result = input;
         if (!m.pass.containsAll(in)) {
-            out.retainAll(m.pass);
+            result = input.copy();
+            if (!(result instanceof DelegatePointsToSet delegate
+                    && delegate.set instanceof AbstractHybridSet<CSObj> hybrid
+                    && hybrid.set instanceof GenericBitSet<CSObj> copied)) {
+                return null;
+            }
+            copied.retainAll(m.pass);
+            out = copied;
         }
         if (out.size() > threshold) {
             return result;
@@ -242,7 +266,7 @@ public class TypeFilter implements Transfer {
      * @return 0 empty or singleton, 1 small set, 2 bit set, -1 another
      * points-to set implementation.
      */
-    private static int representation(PointsToSet pts) {
+    static int representation(PointsToSet pts) {
         if (!(pts instanceof DelegatePointsToSet delegate
                 && delegate.set instanceof AbstractHybridSet<CSObj> hybrid)) {
             return -1;
