@@ -123,7 +123,10 @@ publishing {
 }
 
 signing {
-    isRequired = !isSnapshot // Gradle Module Metadata currently does not support signing snapshots
+    // Gradle Module Metadata currently does not support signing snapshots.
+    // A release is signed when keys are given or when it goes to Sonatype; a keyless local
+    // build (publishToMavenLocal, as on JitPack) publishes it unsigned.
+    isRequired = !isSnapshot && (signingKey != null || mavenCentralUsername != null)
     useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
     sign(publishing.publications["mavenJava"])
 }

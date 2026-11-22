@@ -1,0 +1,7 @@
+# JitPack build of the px fork: publishes the main artifact to the local Maven repository,
+# without tests, so the java-benchmarks and android-benchmarks submodules are not needed.
+# The coordinate is set to the one JitPack serves (com.github.<user>:<repo>:<tag or commit>).
+jdk:
+  - openjdk17
+install:
+  - ./gradlew --no-daemon --no-configuration-cache --console=plain publishToMavenLocal -x test -PprojectGroupId="$GROUP" -PprojectArtifactId="$ARTIFACT" -PprojectVersion="$VERSION"
