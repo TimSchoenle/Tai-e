@@ -32,7 +32,9 @@ import pascal.taie.ir.exp.StringLiteral;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.New;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.language.type.ArrayType;
 import pascal.taie.language.type.ClassType;
+import pascal.taie.language.type.PrimitiveType;
 import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.Maps;
@@ -68,6 +70,16 @@ public abstract class AbstractHeapModel implements HeapModel {
     private final boolean isMergeStringBuilders;
 
     private final boolean isMergeExceptionObjects;
+
+    /**
+     * Whether the objects of all allocation sites ({@link New} statements)
+     * of one type are merged into one object. Objects that do not come from
+     * an allocation site, such as mock objects, are not affected. Arrays of
+     * a primitive element type stay per site: they hold no pointers, and
+     * reflection reads the constant length of their allocation site
+     * (the dimensions of {@code Array.newInstance}).
+     */
+    private final boolean isMergeNewObjects;
 
     private final TypeSystem typeSystem;
 
@@ -110,6 +122,14 @@ public abstract class AbstractHeapModel implements HeapModel {
         isMergeStringObjects = options.getBoolean("merge-string-objects");
         isMergeStringBuilders = options.getBoolean("merge-string-builders");
         isMergeExceptionObjects = options.getBoolean("merge-exception-objects");
+        isMergeNewObjects = options.getBoolean("merge-new-objects");
+        if (isMergeNewObjects && (!"ci".equals(options.getString("cs"))
+                || options.getString("advanced") != null)) {
+            // merged objects carry no heap context, and the advanced
+            // pre-analyses (Mahjong, Zipper, Scaler) read allocation sites
+            throw new ConfigException("merge-new-objects requires cs:ci"
+                    + " and no advanced analysis");
+        }
         typeSystem = World.get().getTypeSystem();
         string = typeSystem.stringType();
         stringBuilder = typeSystem.getClassType(STRING_BUILDER);
@@ -159,6 +179,10 @@ public abstract class AbstractHeapModel implements HeapModel {
         }
         if (isZeroLengthArrayAlloc(allocSite)) {
             return getZeroLengthArrayObj(type);
+        }
+        if (isMergeNewObjects && !(type instanceof ArrayType arrayType
+                && arrayType.elementType() instanceof PrimitiveType)) {
+            return getMergedObj(allocSite);
         }
 
         return doGetObj(allocSite);

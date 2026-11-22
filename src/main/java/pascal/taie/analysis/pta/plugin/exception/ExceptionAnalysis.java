@@ -95,7 +95,8 @@ public class ExceptionAnalysis implements Plugin {
         this.csManager = solver.getCSManager();
         this.typeSystem = solver.getTypeSystem();
         // use sparse bit set only when exception objects are NOT merged
-        boolean isSparse = !solver.getOptions().getBoolean("merge-exception-objects");
+        boolean isSparse = !solver.getOptions().getBoolean("merge-exception-objects")
+                && !solver.getOptions().getBoolean("merge-new-objects");
         this.setFactory = () -> new IndexerBitSet<>(csManager.getObjectIndexer(), isSparse);
     }
 

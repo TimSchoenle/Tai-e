@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.plugin.android.misc;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
+import pascal.taie.analysis.pta.core.heap.MergedObj;
 import pascal.taie.analysis.pta.core.heap.NewObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.core.solver.EmptyParamProvider;
@@ -206,9 +207,13 @@ public class OtherMiscModel extends AndroidMiscHandler {
     }, argIndexes = {0})
     public void addJavascriptInterface(Context context, Invoke invoke, PointsToSet argObjs) {
         CSVar interfaceVar = csManager.getCSVar(context, InvokeUtils.getVar(invoke, 0));
+        // with merge-new-objects, allocated interface objects are merged per type
+        boolean isMergeNewObjects = solver.getOptions().getBoolean("merge-new-objects");
         argObjs.forEach(argObj -> {
-            if (argObj.getObject() instanceof NewObj newObj
-                    && newObj.getType() instanceof ClassType classType) {
+            Obj obj = argObj.getObject();
+            if ((obj instanceof NewObj
+                    || (isMergeNewObjects && obj instanceof MergedObj))
+                    && obj.getType() instanceof ClassType classType) {
                 JClass jClass = classType.getJClass();
                 jClass.getDeclaredMethods().forEach(m -> {
                     if (!m.isAbstract() || m.isNative()) {

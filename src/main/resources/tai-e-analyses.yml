@@ -14,6 +14,10 @@
     merge-string-objects: true
     merge-string-builders: true
     merge-exception-objects: true
+    # merge-new-objects: merge the objects of all allocation sites (new
+    # statements) of one type into one object, primitive arrays excepted;
+    # requires cs: ci and advanced: null
+    merge-new-objects: false
     handle-invokedynamic: false
     propagate-types: [ reference ] # ,null,int,long,...(other primitive types)
     advanced: null # specify advanced analysis:
