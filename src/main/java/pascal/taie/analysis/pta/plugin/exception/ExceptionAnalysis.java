@@ -247,6 +247,10 @@ public class ExceptionAnalysis implements Plugin {
 
     @Override
     public void onFinish() {
+        if (!solver.getOptions().getBoolean("collect-throw-results")) {
+            clear();
+            return;
+        }
         // Collects context-sensitive throw results and stores them in
         // a context-insensitive manner.
         PTAThrowResult throwResult = new PTAThrowResult();

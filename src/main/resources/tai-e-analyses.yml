@@ -14,6 +14,8 @@
     merge-string-objects: true
     merge-string-builders: true
     merge-exception-objects: true
+    collect-throw-results: true # store per-method throw results after the
+    # solve (needed by throw analysis algorithm pta; false saves their memory)
     handle-invokedynamic: false
     propagate-types: [ reference ] # ,null,int,long,...(other primitive types)
     advanced: null # specify advanced analysis:
