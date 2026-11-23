@@ -395,6 +395,34 @@ class PointerOutEdgesTest {
     }
 
     @Test
+    void addEdgeKeepsOneEdgePerTargetForEveryKindButOther() {
+        TestPointer pointer = new TestPointer(TARGETS);
+        // more targets than a small successor set holds, with spread and extreme indexes
+        List<Pointer> targets = new ArrayList<>();
+        targets.add(new TestPointer(0));
+        targets.add(new TestPointer(Integer.MAX_VALUE - 1));
+        for (int i = 1; i <= 62; i++) {
+            targets.add(new TestPointer(i * 1_000_003));
+        }
+        for (Pointer target : targets) {
+            PointerFlowEdge first = new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, target);
+            assertSame(first, pointer.addEdge(first));
+        }
+        for (Pointer target : targets) {
+            assertNull(pointer.addEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, target)));
+            assertNull(pointer.addEdge(new PointerFlowEdge(FlowKind.CAST, pointer, target)));
+            assertNull(pointer.addEdge(
+                    new PointerFlowEdge(FlowKind.RETURN, pointer, target), Identity.get()));
+        }
+        assertEquals(targets.size(), pointer.getOutDegree());
+        List<Pointer> stored = new ArrayList<>();
+        for (PointerFlowEdge edge : pointer.getOutEdges()) {
+            stored.add(edge.target());
+        }
+        assertEquals(targets, stored);
+    }
+
+    @Test
     void anOtherEdgeEqualToAStoredEdgeReturnsAnEdgeThatKeepsItsTransfers() {
         TestPointer pointer = new TestPointer(TARGETS);
         pointer.addEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, TARGET[0]), Identity.get());
