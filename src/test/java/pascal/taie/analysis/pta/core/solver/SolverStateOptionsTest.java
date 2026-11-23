@@ -28,13 +28,20 @@ import pascal.taie.World;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.PointerAnalysis;
 import pascal.taie.analysis.pta.PointerAnalysisResult;
+import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.language.classes.ClassNames;
+import pascal.taie.language.type.Type;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -67,12 +74,18 @@ public class SolverStateOptionsTest {
     void keepsSolverStateByDefault() {
         run("plugins:[" + Probe.class.getName() + "];");
         Set<String> edges = callEdges();
+        List<String> pointers = Probe.pointerSummary;
+        List<String> filtered = Probe.refiltered;
         assertSame(Probe.workListAtStart, Probe.workListAtFinish);
         assertTrue(Probe.memoCount > 0, "no type filter memo to release");
         assertTrue(Probe.filtersWithMemo > 0, "no type filter holding a memo");
         assertNull(Probe.addEdgeFailure);
+        assertNull(Probe.mockAddEdgeFailure);
+        assertFalse(filtered.isEmpty(), "the reapplied type filters passed no object");
         run("release-solver-state:true;plugins:[" + Probe.class.getName() + "];");
         assertEquals(edges, callEdges());
+        assertEquals(pointers, Probe.pointerSummary);
+        assertEquals(filtered, Probe.refiltered);
     }
 
     @Test
@@ -85,6 +98,11 @@ public class SolverStateOptionsTest {
         assertEquals(0, Probe.filtersWithMemo);
         assertTrue(Probe.addEdgeFailure instanceof IllegalStateException,
                 "a new out edge was accepted after the release: " + Probe.addEdgeFailure);
+        assertTrue(Probe.mockAddEdgeFailure instanceof IllegalStateException,
+                "a mock pointer accepted a new out edge after the release: "
+                        + Probe.mockAddEdgeFailure);
+        assertTrue(Probe.memoRebuilt, "a reapplied type filter did not rebuild its memo");
+        assertEquals(Probe.filterCount, Probe.memosAfterReapply);
     }
 
     private static void run(String options) {
@@ -118,7 +136,9 @@ public class SolverStateOptionsTest {
     /**
      * Records, at onStart and at onFinish, the solver state that
      * {@code release-solver-state} releases, and tries to add a duplicate
-     * of an existing out edge at onFinish.
+     * of an existing out edge at onFinish. At onStart it adds an edge
+     * between two mock pointers; at onFinish it records a summary of every
+     * pointer and reapplies a type filter to a points-to set.
      */
     public static class Probe implements Plugin {
 
@@ -131,6 +151,18 @@ public class SolverStateOptionsTest {
         static int filtersWithMemo;
 
         static RuntimeException addEdgeFailure;
+
+        static RuntimeException mockAddEdgeFailure;
+
+        static List<String> pointerSummary;
+
+        static List<String> refiltered;
+
+        static boolean memoRebuilt;
+
+        static int memosAfterReapply;
+
+        static int filterCount;
 
         private Solver solver;
 
@@ -146,6 +178,19 @@ public class SolverStateOptionsTest {
             memoCount = -1;
             filtersWithMemo = -1;
             addEdgeFailure = null;
+            mockAddEdgeFailure = null;
+            pointerSummary = null;
+            refiltered = null;
+            memoRebuilt = false;
+            memosAfterReapply = -1;
+            filterCount = -1;
+            CSManager csManager = solver.getCSManager();
+            Type object = solver.getTypeSystem().getClassType(ClassNames.OBJECT);
+            Pointer from = csManager.getMockPointer(
+                    () -> "probe source", "probe source", object);
+            Pointer to = csManager.getMockPointer(
+                    () -> "probe target", "probe target", object);
+            solver.addPFGEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, from, to));
         }
 
         @Override
@@ -163,19 +208,66 @@ public class SolverStateOptionsTest {
             } catch (ReflectiveOperationException e) {
                 throw new AssertionError(e);
             }
+            CSManager csManager = solver.getCSManager();
+            pointerSummary = Stream.concat(csManager.pointers(), csManager.mockPointers())
+                    .map(p -> p + " out=" + p.getOutDegree()
+                            + " pts=" + p.getObjects().size())
+                    .sorted()
+                    .toList();
+            reapplyTypeFilters(csManager);
             // an edge of a kind other than OTHER: without the release, its
             // duplicate is refused and the graph stays unchanged
-            PointerFlowEdge existing = solver.getCSManager().pointers()
+            PointerFlowEdge existing = csManager.pointers()
                     .flatMap(p -> p.getOutEdges().stream())
                     .filter(e -> e.kind() != FlowKind.OTHER)
                     .findFirst()
                     .orElseThrow();
+            addEdgeFailure = addDuplicate(existing);
+            PointerFlowEdge mockEdge = csManager.mockPointers()
+                    .flatMap(p -> p.getOutEdges().stream())
+                    .findFirst()
+                    .orElseThrow();
+            mockAddEdgeFailure = addDuplicate(mockEdge);
+        }
+
+        /**
+         * Applies every type filter of the solver to the largest points-to
+         * set (ties by pointer name), and records the passed objects per
+         * guard type and whether every filter holds a memo again.
+         */
+        private void reapplyTypeFilters(CSManager csManager) {
+            try {
+                Pointer input = csManager.pointers()
+                        .min(Comparator.comparingInt((Pointer p) -> -p.getObjects().size())
+                                .thenComparing(Pointer::toString))
+                        .orElseThrow();
+                PointerFlowEdge edge = new PointerFlowEdge(FlowKind.OTHER, input, input);
+                List<String> passed = new ArrayList<>();
+                boolean allHoldMemo = true;
+                Map<?, ?> filters = (Map<?, ?>) readSolver("typeFilters");
+                for (Map.Entry<?, ?> entry : filters.entrySet()) {
+                    TypeFilter filter = (TypeFilter) entry.getValue();
+                    filter.apply(edge, input.getPointsToSet()).objects()
+                            .forEach(o -> passed.add(entry.getKey() + " passes " + o));
+                    allHoldMemo &= read(filter, "memo") != null;
+                }
+                filterCount = filters.size();
+                refiltered = passed.stream().sorted().toList();
+                memoRebuilt = allHoldMemo;
+                memosAfterReapply = ((Map<?, ?>) read(TypeFilter.class, "memos")).size();
+            } catch (ReflectiveOperationException e) {
+                throw new AssertionError(e);
+            }
+        }
+
+        private static RuntimeException addDuplicate(PointerFlowEdge existing) {
             Pointer source = existing.source();
             try {
                 source.addEdge(new PointerFlowEdge(
                         existing.kind(), source, existing.target()));
+                return null;
             } catch (RuntimeException e) {
-                addEdgeFailure = e;
+                return e;
             }
         }
 

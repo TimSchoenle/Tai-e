@@ -368,13 +368,15 @@ public class DefaultSolver implements Solver {
     /**
      * Releases the state that only the solve reads, before the plugins'
      * onFinish: the work list (empty at the fixed point; after a time-limit
-     * stop its entries would never be processed either), the pointers'
-     * out-edge dedup sets (the out edges stay; new edges are refused) and
-     * the type filter memos (pure caches, rebuilt by a later application).
+     * stop its entries would never be processed either), the out-edge
+     * dedup sets of all pointers, mock pointers included (the out edges
+     * stay; new edges are refused) and the type filter memos (pure caches,
+     * rebuilt by a later application).
      */
     private void releaseSolverState() {
         workList = new WorkList();
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
+        csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
         typeFilters.values().forEach(TypeFilter::releaseMemo);
         TypeFilter.clearMemos();
     }
