@@ -78,6 +78,15 @@ public interface Solver {
     PointsToSet getPointsToSetOf(Pointer pointer);
 
     /**
+     * Gives the pointer a points-to set that only it holds, so that the
+     * caller may change it in place, and returns that set. With the pta
+     * option {@code share-points-to-sets}, a shared set the pointer held is
+     * replaced by a mutable copy and the pointer's hold on it is released;
+     * otherwise this is {@link #getPointsToSetOf(Pointer)}.
+     */
+    PointsToSet unsharePointsToSetOf(Pointer pointer);
+
+    /**
      * Creates a new empty points-to set.
      */
     PointsToSet makePointsToSet();

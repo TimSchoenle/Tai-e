@@ -126,6 +126,30 @@ public final class PointsToSetInterner {
     }
 
     /**
+     * Gives the pointer a mutable copy of the shared set it holds and drops
+     * its hold on the shared set, which leaves the table once no pointer
+     * holds it. A later change through {@link #addAllDiff} shares the
+     * pointer's set again.
+     *
+     * @return the pointer's points-to set afterwards: the copy, or the set
+     * itself if it is not shared
+     * @throws IllegalArgumentException if the pointer has no points-to set
+     */
+    public PointsToSet unshare(Pointer pointer) {
+        PointsToSet held = pointer.getPointsToSet();
+        if (held == null) {
+            throw new IllegalArgumentException(pointer + " has no points-to set");
+        }
+        if (!held.isShared()) {
+            return held;
+        }
+        PointsToSet copy = held.copy();
+        pointer.setPointsToSet(copy);
+        release(held);
+        return copy;
+    }
+
+    /**
      * @return the number of shared sets in the table.
      */
     public int size() {

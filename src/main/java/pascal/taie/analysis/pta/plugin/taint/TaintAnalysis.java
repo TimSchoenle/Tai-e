@@ -125,11 +125,9 @@ public class TaintAnalysis extends CompositePlugin {
                 PointsToSet pts = p.getPointsToSet();
                 if (pts != null && pts.objects()
                         .anyMatch(csObj -> manager.isTaint(csObj.getObject()))) {
-                    if (pts.isShared()) {
-                        // a shared set is immutable: filter a copy of it
-                        pts = pts.copy();
-                        p.setPointsToSet(pts);
-                    }
+                    // a shared set is immutable: filter a copy that only
+                    // this pointer holds, releasing its hold on the shared set
+                    pts = solver.unsharePointsToSetOf(p);
                     pts.removeIf(csObj -> manager.isTaint(csObj.getObject()));
                 }
                 p.removeEdgesIf(TaintTransferEdge.class::isInstance);

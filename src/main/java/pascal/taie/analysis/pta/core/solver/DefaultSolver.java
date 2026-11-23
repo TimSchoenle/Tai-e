@@ -266,6 +266,12 @@ public class DefaultSolver implements Solver {
     }
 
     @Override
+    public PointsToSet unsharePointsToSetOf(Pointer pointer) {
+        PointsToSet pts = getPointsToSetOf(pointer);
+        return interner != null ? interner.unshare(pointer) : pts;
+    }
+
+    @Override
     public PointsToSet makePointsToSet() {
         return ptsFactory.make();
     }

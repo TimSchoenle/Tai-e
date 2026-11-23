@@ -37,6 +37,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -188,6 +189,29 @@ class PointsToSetInternerTest {
         assertTrue(diff.isEmpty());
         assertEquals(isLarge(reference), isLarge(p.getPointsToSet()));
         assertEquals(sequence(reference), sequence(p.getPointsToSet()));
+    }
+
+    @Test
+    void unsharingReleasesTheHeldSet() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        interner.addAllDiff(p1, small(1, 2));
+        interner.addAllDiff(p2, small(1, 2));
+        PointsToSet shared = p1.getPointsToSet();
+        int base = interner.size();
+
+        PointsToSet copy = interner.unshare(p1);
+        assertSame(copy, p1.getPointsToSet());
+        assertFalse(copy.isShared());
+        assertEquals(List.of(1, 2), sequence(copy));
+        copy.removeIf(o -> o.getIndex() == 1);
+        assertEquals(List.of(1, 2), sequence(shared), "the shared set changed");
+        assertEquals(base, interner.size(), "the set p2 holds left the table");
+
+        interner.unshare(p2);
+        assertEquals(base - 1, interner.size(), "a set no pointer holds stayed in the table");
+        assertNull(interner.find(small(1, 2)));
+        assertSame(copy, interner.unshare(p1), "an unshared set was copied again");
     }
 
     @Test
