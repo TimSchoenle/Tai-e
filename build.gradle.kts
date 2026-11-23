@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     application
     id("java.conventions")
@@ -135,10 +137,36 @@ tasks.register<Jar>("fatJar", Jar::class) {
     with(tasks["jar"] as CopySpec)
 }
 
+// The patched Soot/FlowDroid classes replace classes of the same name in the stock
+// soot and soot-infoflow-android jars. File dependencies are not published, so the
+// main jar carries them; a consumer must put this jar before the stock jars.
+val patchedClassJars = listOf("lib/sootclasses-modified.jar", "lib/flowdroidclasses-modified.jar")
+    .map { file(it) }
+
 tasks.jar {
     from("COPYING", "COPYING.LESSER")
+    patchedClassJars.forEach { from(zipTree(it)) }
     destinationDirectory.set(rootProject.layout.buildDirectory)
     archiveBaseName.set(projectArtifactId)
+    val builtJar = archiveFile
+    val patchedJars = patchedClassJars
+    doLast {
+        // Fails the build when the jar lacks a patched class or holds other bytes for it.
+        ZipFile(builtJar.get().asFile).use { out ->
+            patchedJars.forEach { lib ->
+                ZipFile(lib).use { src ->
+                    src.entries().asSequence().filter { !it.isDirectory }.forEach { e ->
+                        val copy = out.getEntry(e.name)
+                            ?: throw GradleException("${e.name} of ${lib.name} missing in the jar")
+                        val same = src.getInputStream(e).use { a ->
+                            out.getInputStream(copy).use { b -> a.readBytes().contentEquals(b.readBytes()) }
+                        }
+                        if (!same) throw GradleException("${e.name} differs from ${lib.name}")
+                    }
+                }
+            }
+        }
+    }
 }
 
 tasks.processResources {
