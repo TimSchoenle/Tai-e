@@ -960,6 +960,91 @@ public class SparseBitSet extends AbstractBitSet
         return copy;
     }
 
+    /**
+     * Packs the bits of this set into one array that holds only its non-zero
+     * words: for each block with a non-zero word, in ascending block order,
+     * a header {@code (blockIndex << 32) | wordMask} (bit {@code w3} of the
+     * mask set when word {@code w3} of the block is non-zero), followed by
+     * the non-zero words of the block in ascending order.
+     * {@link #ofPacked(long[])} restores an equal set.
+     *
+     * @return the packed words; empty when this set is empty
+     */
+    public long[] toPacked() {
+        int length = 0;
+        for (long[][] area : table) {
+            if (area != null) {
+                for (long[] block : area) {
+                    int words = block == null ? 0 : nonZeroWords(block);
+                    if (words != 0) {
+                        length += 1 + words;
+                    }
+                }
+            }
+        }
+        long[] packed = new long[length];
+        int at = 0;
+        for (int w1 = 0; w1 < table.length; ++w1) {
+            long[][] area = table[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                int header = at;
+                long mask = 0;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if (block[w3] != 0) {
+                        mask |= 1L << w3;
+                        packed[++at] = block[w3];
+                    }
+                }
+                if (mask != 0) {
+                    packed[header] = ((long) ((w1 << LEVEL2) + w2) << Integer.SIZE) | mask;
+                    ++at;
+                }
+            }
+        }
+        return packed;
+    }
+
+    /**
+     * Restores a set from the array written by {@link #toPacked()}.
+     *
+     * @param packed the packed words
+     * @return a new set equal to the packed one
+     */
+    public static SparseBitSet ofPacked(long[] packed) {
+        SparseBitSet set = new SparseBitSet();
+        int at = 0;
+        while (at < packed.length) {
+            long header = packed[at++];
+            int blockIndex = (int) (header >>> Integer.SIZE);
+            int mask = (int) header;
+            long[] block = set.getOrCreateBlock(blockIndex >> LEVEL2, blockIndex & MASK2);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) != 0) {
+                    block[w3] = packed[at++];
+                }
+            }
+        }
+        set.invalidateState();
+        return set;
+    }
+
+    private static int nonZeroWords(long[] block) {
+        int words = 0;
+        for (long word : block) {
+            if (word != 0) {
+                ++words;
+            }
+        }
+        return words;
+    }
+
     // ------------------------------------------------------------------------
     // utility methods and classes
     // ------------------------------------------------------------------------

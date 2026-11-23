@@ -27,6 +27,7 @@ import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.pts.PointsToSet;
+import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.util.collection.Maps;
 
 import java.util.ArrayDeque;
@@ -40,21 +41,37 @@ import java.util.Queue;
 final class WorkList {
 
     /**
-     * Pointer entries to be processed.
+     * Pointer entries to be processed. A pending delta is held either as
+     * a {@link PointsToSet} or, when it was a large set on arrival, as the
+     * packed words of {@link PointsToSetFactory#toPackedLarge}: a large
+     * delta usually holds few bits per bit set block, and many deltas wait
+     * at the same time. A packed delta that receives more objects is
+     * restored to a set, so merging works on sets as before.
      */
-    private final Map<Pointer, PointsToSet> pointerEntries = Maps.newLinkedHashMap();
+    private final Map<Pointer, Object> pointerEntries = Maps.newLinkedHashMap();
 
     /**
      * Call edges to be processed.
      */
     private final Queue<Edge<CSCallSite, CSMethod>> callEdges = new ArrayDeque<>();
 
+    private final PointsToSetFactory ptsFactory;
+
+    WorkList(PointsToSetFactory ptsFactory) {
+        this.ptsFactory = ptsFactory;
+    }
+
     void addEntry(Pointer pointer, PointsToSet pointsToSet) {
-        PointsToSet set = pointerEntries.get(pointer);
-        if (set != null) {
+        Object pending = pointerEntries.get(pointer);
+        if (pending instanceof PointsToSet set) {
             set.addAll(pointsToSet);
+        } else if (pending instanceof long[] packed) {
+            PointsToSet set = ptsFactory.ofPackedLarge(packed);
+            set.addAll(pointsToSet);
+            pointerEntries.put(pointer, set);
         } else {
-            pointerEntries.put(pointer, pointsToSet.copy());
+            long[] packed = ptsFactory.toPackedLarge(pointsToSet);
+            pointerEntries.put(pointer, packed != null ? packed : pointsToSet.copy());
         }
     }
 
@@ -71,7 +88,10 @@ final class WorkList {
             var it = pointerEntries.entrySet().iterator();
             var e = it.next();
             it.remove();
-            return new PointerEntry(e.getKey(), e.getValue());
+            PointsToSet set = e.getValue() instanceof long[] packed
+                    ? ptsFactory.ofPackedLarge(packed)
+                    : (PointsToSet) e.getValue();
+            return new PointerEntry(e.getKey(), set);
         } else {
             throw new NoSuchElementException();
         }

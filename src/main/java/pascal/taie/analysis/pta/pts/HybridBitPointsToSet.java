@@ -33,7 +33,7 @@ class HybridBitPointsToSet extends DelegatePointsToSet {
         this(new HybridBitSet<>(indexer, isSparse));
     }
 
-    private HybridBitPointsToSet(SetEx<CSObj> set) {
+    HybridBitPointsToSet(SetEx<CSObj> set) {
         super(set);
     }
 

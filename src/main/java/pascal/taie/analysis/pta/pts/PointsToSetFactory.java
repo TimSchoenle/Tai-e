@@ -22,8 +22,11 @@
 
 package pascal.taie.analysis.pta.pts;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.util.Indexer;
+import pascal.taie.util.collection.HybridBitSet;
+import pascal.taie.util.collection.SparseBitSet;
 
 import java.util.function.Supplier;
 
@@ -34,8 +37,35 @@ public class PointsToSetFactory {
 
     private final Supplier<PointsToSet> factory;
 
+    private final Indexer<CSObj> objIndexer;
+
     public PointsToSetFactory(Indexer<CSObj> objIndexer) {
+        this.objIndexer = objIndexer;
         factory = () -> new HybridBitPointsToSet(objIndexer, true);
+    }
+
+    /**
+     * Packs a large points-to set made by this factory into the words of
+     * {@link SparseBitSet#toPacked()}, a compact snapshot for sets that wait
+     * long before they are read.
+     *
+     * @return the packed words, or {@code null} when the set is small or not
+     * made by this factory
+     */
+    public long @Nullable [] toPackedLarge(PointsToSet pts) {
+        if (pts instanceof HybridBitPointsToSet hybrid
+                && hybrid.set instanceof HybridBitSet<CSObj> set) {
+            return set.toPackedLarge(objIndexer);
+        }
+        return null;
+    }
+
+    /**
+     * Restores the points-to set packed by {@link #toPackedLarge}: the result
+     * equals a copy of the packed set, iteration order included.
+     */
+    public PointsToSet ofPackedLarge(long[] packed) {
+        return new HybridBitPointsToSet(HybridBitSet.ofPackedLarge(objIndexer, packed));
     }
 
     public PointsToSet make() {

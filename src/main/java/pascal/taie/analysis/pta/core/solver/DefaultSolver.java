@@ -279,7 +279,7 @@ public class DefaultSolver implements Solver {
     private void initialize() {
         callGraph = new CSCallGraph(csManager);
         pointerFlowGraph = new PointerFlowGraph(csManager);
-        workList = new WorkList();
+        workList = new WorkList(ptsFactory);
         reachableMethods = Sets.newSet();
         initializedClasses = Sets.newSet();
         ignoredMethods = Sets.newSet();
