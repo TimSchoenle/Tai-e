@@ -32,6 +32,9 @@ import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.Sets;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -111,6 +114,52 @@ class TypeFilterModelTest {
                 for (int i = 0; i < applications; ++i) {
                     checkOne(types, guard, input, trial);
                 }
+            }
+            probeThrowingCheck(types, objects.get(0));
+        }
+
+        /**
+         * Filters one object (the object-by-object path) with a type system
+         * whose first check throws: the object must stay unchecked in the
+         * memo, so the next filter checks it again and lets it pass.
+         */
+        private void probeThrowingCheck(TypeSystem types, CSObj obj) {
+            TypeFilter.clearMemos();
+            Type guard = obj.getObject().getType();
+            boolean[] thrown = {false};
+            TypeSystem throwingOnce = (TypeSystem) Proxy.newProxyInstance(
+                    TypeSystem.class.getClassLoader(), new Class<?>[]{TypeSystem.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("isAssignable") && !thrown[0]) {
+                            thrown[0] = true;
+                            throw new IllegalStateException("check failed");
+                        }
+                        return invoke(method, types, args);
+                    });
+            Solver throwingSolver = (Solver) Proxy.newProxyInstance(
+                    Solver.class.getClassLoader(), new Class<?>[]{Solver.class},
+                    (proxy, method, args) -> method.getName().equals("getTypeSystem")
+                            ? throwingOnce : invoke(method, solver, args));
+            PointsToSet input = solver.makePointsToSet();
+            input.addObject(obj);
+            try {
+                new TypeFilter(guard, throwingSolver).apply(null, input);
+                FAILURES.add("the throwing check did not throw");
+            } catch (IllegalStateException expected) {
+                // the check failed; the object must stay unchecked
+            }
+            PointsToSet again = new TypeFilter(guard, solver).apply(null, input);
+            if (!again.contains(obj)) {
+                FAILURES.add("an object whose check threw was read as failing: " + obj);
+            }
+        }
+
+        private static Object invoke(Method method, Object target, Object[] args)
+                throws Throwable {
+            try {
+                return method.invoke(target, args);
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
             }
         }
 

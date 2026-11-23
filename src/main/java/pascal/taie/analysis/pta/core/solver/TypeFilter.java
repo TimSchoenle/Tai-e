@@ -239,8 +239,10 @@ public class TypeFilter implements Transfer {
         if (m.known.contains(o)) {
             return m.pass.contains(o);
         }
-        m.known.add(o);
+        // checked before it is marked known: a throwing check leaves the
+        // object unknown
         boolean ok = check(o);
+        m.known.add(o);
         if (ok) {
             m.pass.add(o);
         }

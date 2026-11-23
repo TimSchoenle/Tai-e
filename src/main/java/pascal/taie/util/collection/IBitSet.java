@@ -271,7 +271,10 @@ public interface IBitSet extends Copyable<IBitSet>, Serializable {
      * this set, and counts the bits of this set that the memo accepts. Each
      * bit of this set that is not in {@code known} is tested once, in
      * ascending order, and set in {@code known}, and also in {@code pass}
-     * if the predicate accepts it. This set is not changed.
+     * if the predicate accepts it. This set is not changed. A bit is set in
+     * {@code known} only after its test returned: if the predicate throws,
+     * that bit and every later bit stay unknown (an implementation may also
+     * leave a few earlier, already tested bits unknown).
      *
      * @param known the bits tested so far
      * @param pass  the tested bits that were accepted

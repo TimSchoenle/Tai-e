@@ -801,12 +801,14 @@ public class SparseBitSet extends AbstractBitSet
                     }
                     long unknown = knownBlock == null ? word : word & ~knownBlock[w3];
                     if (unknown != 0) {
+                        // tested before they are marked known: a throwing
+                        // test leaves the bits of this word unknown
+                        long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
                         if (knownBlock == null) {
                             knownBlock = k.getOrCreateBlock(w1, w2);
                         }
                         knownBlock[w3] |= unknown;
                         k.invalidateState();
-                        long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
                         if (accepted != 0) {
                             if (passBlock == null) {
                                 passBlock = p.getOrCreateBlock(w1, w2);

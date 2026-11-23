@@ -206,8 +206,11 @@ public abstract class AbstractBitSet implements IBitSet {
         int count = 0;
         for (int i = nextSetBit(0); i != -1; i = nextSetBit(i + 1)) {
             if (!known.get(i)) {
+                // tested before it is marked known: a throwing test
+                // leaves the bit unknown
+                boolean passes = test.test(i);
                 known.set(i);
-                if (test.test(i)) {
+                if (passes) {
                     pass.set(i);
                 }
             }

@@ -31,7 +31,10 @@ import java.util.Random;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link IBitSet#updateMemoAndCount} and {@link IBitSet#forEachAnd} against
@@ -78,6 +81,9 @@ class BitSetMemoTest {
             IBitSet in = of(input, inModel);
             IBitSet known = of(memo, knownModel);
             IBitSet pass = of(memo, passModel);
+            // computes and caches the sizes, which the update must invalidate
+            assertEquals(knownModel.cardinality(), known.cardinality(), "known size before, trial " + trial);
+            assertEquals(passModel.cardinality(), pass.cardinality(), "pass size before, trial " + trial);
 
             List<Integer> tested = new ArrayList<>();
             int count = in.updateMemoAndCount(known, pass, i -> {
@@ -110,6 +116,47 @@ class BitSetMemoTest {
             List<Integer> wantVisited = new ArrayList<>();
             passing.stream().forEach(wantVisited::add);
             assertEquals(wantVisited, visited, "intersection, trial " + trial);
+        }
+    }
+
+    /**
+     * A bit becomes known only once its test has returned: if the test
+     * throws, that bit (and every later one) stays unknown, so a later
+     * update tests it again instead of reading it as failed.
+     */
+    @Test
+    void aThrowingTestLeavesItsBitUnknown() {
+        List<List<Supplier<IBitSet>>> kinds = List.of(
+                List.of(SparseBitSet::new, SparseBitSet::new),
+                List.of(SparseBitSet::new, RegularBitSet::new),
+                List.of(RegularBitSet::new, SparseBitSet::new));
+        int failing = 70;
+        BitSet inModel = new BitSet();
+        for (int i : new int[]{3, 5, 69, failing, 71, 200_000}) {
+            inModel.set(i);
+        }
+        for (List<Supplier<IBitSet>> kind : kinds) {
+            IBitSet in = of(kind.get(0), inModel);
+            IBitSet known = kind.get(1).get();
+            IBitSet pass = kind.get(1).get();
+            RuntimeException thrown = new IllegalStateException("test failed");
+            RuntimeException caught = assertThrows(RuntimeException.class,
+                    () -> in.updateMemoAndCount(known, pass, i -> {
+                        if (i == failing) {
+                            throw thrown;
+                        }
+                        return true;
+                    }));
+            assertSame(thrown, caught);
+            BitSet knownAfter = toModel(known);
+            assertTrue(knownAfter.nextSetBit(failing) == -1,
+                    "bits known from the failing one on: " + knownAfter);
+            assertEquals(knownAfter, toModel(pass), "every known bit passed");
+
+            int count = in.updateMemoAndCount(known, pass, i -> i != failing);
+            assertEquals(inModel.cardinality() - 1, count);
+            assertEquals(inModel, toModel(known));
+            assertFalse(pass.get(failing));
         }
     }
 
