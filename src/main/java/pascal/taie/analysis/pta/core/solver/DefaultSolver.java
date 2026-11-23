@@ -374,7 +374,7 @@ public class DefaultSolver implements Solver {
      * rebuilt by a later application).
      */
     private void releaseSolverState() {
-        workList = new WorkList();
+        workList = new WorkList(ptsFactory);
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
         csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
         typeFilters.values().forEach(TypeFilter::releaseMemo);
