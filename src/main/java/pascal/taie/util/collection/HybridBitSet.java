@@ -23,6 +23,7 @@
 package pascal.taie.util.collection;
 
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import pascal.taie.util.Indexer;
 
 import java.io.Serializable;
@@ -155,5 +156,37 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
             copy.set = ((SetEx<E>) set).copy();
         }
         return copy;
+    }
+
+    /**
+     * Packs this set when it is a large sparse set of {@code expectedIndexer}:
+     * the set itself is sparse and both it and its bits use that indexer,
+     * the form {@link #ofPackedLarge} restores.
+     *
+     * @return the packed words of {@link SparseBitSet#toPacked()}, or
+     * {@code null} when this set is small, dense or of another indexer
+     */
+    public long @Nullable [] toPackedLarge(Indexer<E> expectedIndexer) {
+        if (isLargeSet && isSparse && indexer == expectedIndexer
+                && set instanceof IndexerBitSet<E> bits
+                && bits.getContext() == expectedIndexer
+                && bits.bitSet instanceof SparseBitSet sparse) {
+            return sparse.toPacked();
+        }
+        return null;
+    }
+
+    /**
+     * Restores a large sparse set from the words of {@link #toPackedLarge}:
+     * the result equals the packed set as a {@link #copy()} of it would,
+     * large set flag included.
+     */
+    public static <E> HybridBitSet<E> ofPackedLarge(Indexer<E> indexer, long[] packed) {
+        HybridBitSet<E> result = new HybridBitSet<>(indexer, true);
+        IndexerBitSet<E> bits = new IndexerBitSet<>(indexer, true);
+        bits.bitSet = SparseBitSet.ofPacked(packed);
+        result.set = bits;
+        result.isLargeSet = true;
+        return result;
     }
 }
