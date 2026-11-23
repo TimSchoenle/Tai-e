@@ -28,7 +28,11 @@ import pascal.taie.World;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.PointerAnalysis;
 import pascal.taie.analysis.pta.PointerAnalysisResult;
+import pascal.taie.analysis.graph.callgraph.Edge;
+import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
+import pascal.taie.analysis.pta.core.cs.element.CSMethod;
+import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.language.classes.ClassNames;
@@ -81,6 +85,10 @@ public class SolverStateOptionsTest {
         assertTrue(Probe.filtersWithMemo > 0, "no type filter holding a memo");
         assertNull(Probe.addEdgeFailure);
         assertNull(Probe.mockAddEdgeFailure);
+        assertNull(Probe.lateEdgeFailure);
+        assertNull(Probe.latePointsToFailure);
+        assertNull(Probe.lateCallEdgeFailure);
+        assertNull(Probe.lateMethodFailure);
         assertFalse(filtered.isEmpty(), "the reapplied type filters passed no object");
         run("release-solver-state:true;plugins:[" + Probe.class.getName() + "];");
         assertEquals(edges, callEdges());
@@ -101,6 +109,23 @@ public class SolverStateOptionsTest {
         assertTrue(Probe.mockAddEdgeFailure instanceof IllegalStateException,
                 "a mock pointer accepted a new out edge after the release: "
                         + Probe.mockAddEdgeFailure);
+        assertTrue(Probe.lateEdgeFailure instanceof IllegalStateException,
+                "the solver accepted an edge between pointers created after the release: "
+                        + Probe.lateEdgeFailure);
+        assertTrue(Probe.latePointsToFailure instanceof IllegalStateException,
+                "the released work list accepted a points-to entry: "
+                        + Probe.latePointsToFailure);
+        assertTrue(Probe.lateCallEdgeFailure instanceof IllegalStateException,
+                "the released work list accepted a call edge: "
+                        + Probe.lateCallEdgeFailure);
+        assertTrue(Probe.lateMethodFailure instanceof IllegalStateException,
+                "the solver accepted a method after the release: "
+                        + Probe.lateMethodFailure);
+        for (RuntimeException e : List.of(Probe.lateEdgeFailure, Probe.latePointsToFailure,
+                Probe.lateCallEdgeFailure, Probe.lateMethodFailure)) {
+            assertTrue(e.getMessage().startsWith("the solver state was released"),
+                    "not the release refusal: " + e);
+        }
         assertTrue(Probe.memoRebuilt, "a reapplied type filter did not rebuild its memo");
         assertEquals(Probe.filterCount, Probe.memosAfterReapply);
     }
@@ -154,6 +179,14 @@ public class SolverStateOptionsTest {
 
         static RuntimeException mockAddEdgeFailure;
 
+        static RuntimeException lateEdgeFailure;
+
+        static RuntimeException latePointsToFailure;
+
+        static RuntimeException lateCallEdgeFailure;
+
+        static RuntimeException lateMethodFailure;
+
         static List<String> pointerSummary;
 
         static List<String> refiltered;
@@ -179,6 +212,10 @@ public class SolverStateOptionsTest {
             filtersWithMemo = -1;
             addEdgeFailure = null;
             mockAddEdgeFailure = null;
+            lateEdgeFailure = null;
+            latePointsToFailure = null;
+            lateCallEdgeFailure = null;
+            lateMethodFailure = null;
             pointerSummary = null;
             refiltered = null;
             memoRebuilt = false;
@@ -228,6 +265,39 @@ public class SolverStateOptionsTest {
                     .findFirst()
                     .orElseThrow();
             mockAddEdgeFailure = addDuplicate(mockEdge);
+            addLateWork(csManager);
+        }
+
+        /**
+         * Gives the solver new work after its fixed point: an edge between
+         * two pointers created now (their out-edge dedup state was never
+         * released), a points-to entry and a call edge.
+         */
+        private void addLateWork(CSManager csManager) {
+            Type object = solver.getTypeSystem().getClassType(ClassNames.OBJECT);
+            Pointer from = csManager.getMockPointer(
+                    () -> "late source", "late source", object);
+            Pointer to = csManager.getMockPointer(
+                    () -> "late target", "late target", object);
+            lateEdgeFailure = attempt(() -> solver.addPFGEdge(
+                    new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, from, to)));
+            CSObj obj = csManager.getObjects().iterator().next();
+            latePointsToFailure = attempt(() -> solver.addPointsTo(to, obj));
+            Edge<CSCallSite, CSMethod> callEdge = solver.getCallGraph().edges()
+                    .findFirst().orElseThrow();
+            lateCallEdgeFailure = attempt(() -> solver.addCallEdge(callEdge));
+            CSMethod reachable = solver.getCallGraph().reachableMethods()
+                    .findFirst().orElseThrow();
+            lateMethodFailure = attempt(() -> solver.addCSMethod(reachable));
+        }
+
+        private static RuntimeException attempt(Runnable work) {
+            try {
+                work.run();
+                return null;
+            } catch (RuntimeException e) {
+                return e;
+            }
         }
 
         /**

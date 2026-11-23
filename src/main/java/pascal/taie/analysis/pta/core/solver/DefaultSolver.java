@@ -174,6 +174,13 @@ public class DefaultSolver implements Solver {
 
     private WorkList workList;
 
+    /**
+     * Whether {@link #releaseSolverState()} ran: from then on the solver
+     * refuses new work (points-to entries, call edges, pointer flow edges),
+     * which it would never process.
+     */
+    private boolean solverStateReleased;
+
     private CSCallGraph callGraph;
 
     private PointerFlowGraph pointerFlowGraph;
@@ -291,6 +298,7 @@ public class DefaultSolver implements Solver {
         callGraph = new CSCallGraph(csManager);
         pointerFlowGraph = new PointerFlowGraph(csManager);
         workList = new WorkList(ptsFactory);
+        solverStateReleased = false;
         reachableMethods = Sets.newSet();
         initializedClasses = Sets.newSet();
         ignoredMethods = Sets.newSet();
@@ -382,9 +390,11 @@ public class DefaultSolver implements Solver {
      * stop its entries would never be processed either), the out-edge
      * dedup sets of all pointers, mock pointers included (the out edges
      * stay; new edges are refused) and the type filter memos (pure caches,
-     * rebuilt by a later application).
+     * rebuilt by a later application). New work is refused afterwards,
+     * also for pointers created later, whose dedup state is live.
      */
     private void releaseSolverState() {
+        solverStateReleased = true;
         workList = new WorkList(ptsFactory);
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
         csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
@@ -835,7 +845,19 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPointsTo(Pointer pointer, PointsToSet pts) {
+        checkAcceptsWork();
         workList.addEntry(pointer, pts);
+    }
+
+    /**
+     * @throws IllegalStateException if {@link #releaseSolverState()} ran:
+     *                               the solver would never process new work
+     */
+    private void checkAcceptsWork() {
+        if (solverStateReleased) {
+            throw new IllegalStateException("the solver state was released"
+                    + " after the fixed point; new work would never be processed");
+        }
     }
 
     @Override
@@ -872,6 +894,7 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPFGEdge(PointerFlowEdge edge, Type type) {
+        checkAcceptsWork();
         TypeFilter filter = typeFilters.get(type);
         if (filter == null) {
             filter = new TypeFilter(type, this);
@@ -882,6 +905,7 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPFGEdge(PointerFlowEdge edge, Transfer transfer) {
+        checkAcceptsWork();
         edge = pointerFlowGraph.addEdge(edge, transfer);
         if (edge != null) {
             PointsToSet targetSet = transfer.apply(
@@ -894,6 +918,7 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addEntryPoint(EntryPoint entryPoint) {
+        checkAcceptsWork();
         Context entryCtx = contextSelector.getEmptyContext();
         JMethod entryMethod = entryPoint.method();
         CSMethod csEntryMethod = csManager.getCSMethod(entryCtx, entryMethod);
@@ -932,11 +957,13 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addCallEdge(Edge<CSCallSite, CSMethod> edge) {
+        checkAcceptsWork();
         workList.addEntry(edge);
     }
 
     @Override
     public void addCSMethod(CSMethod csMethod) {
+        checkAcceptsWork();
         if (callGraph.addReachableMethod(csMethod)) {
             // process new reachable context-sensitive method
             JMethod method = csMethod.getMethod();
@@ -951,6 +978,7 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addStmts(CSMethod csMethod, Collection<Stmt> stmts) {
+        checkAcceptsWork();
         stmtProcessor.process(csMethod, stmts);
     }
 
@@ -964,6 +992,7 @@ public class DefaultSolver implements Solver {
         if (cls == null || initializedClasses.contains(cls)) {
             return;
         }
+        checkAcceptsWork();
         // initialize super class
         JClass superclass = cls.getSuperClass();
         if (superclass != null) {

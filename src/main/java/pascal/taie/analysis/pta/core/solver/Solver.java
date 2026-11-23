@@ -102,7 +102,21 @@ public interface Solver {
     // These side-effect APIs could be used by Plugins to update
     // points-to information.
 
-    // APIs for adding points-to relations
+    /**
+     * Adds the points-to relation to the work list.
+     *
+     * @throws IllegalStateException with the pta option
+     *                               {@code release-solver-state}, after the
+     *                               fixed point (in {@code onFinish}): the
+     *                               work would never be processed. The same
+     *                               holds for the other side-effect APIs that
+     *                               add work: the addPointsTo and
+     *                               addVarPointsTo overloads, addPFGEdge,
+     *                               {@link #addEntryPoint}, {@link #addCallEdge},
+     *                               {@link #addCSMethod}, {@link #addStmts} and
+     *                               {@link #initializeClass} of a class not
+     *                               yet initialized.
+     */
     void addPointsTo(Pointer pointer, PointsToSet pts);
 
     void addPointsTo(Pointer pointer, CSObj csObj);
