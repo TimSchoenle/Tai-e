@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
+import pascal.taie.analysis.pta.core.solver.Transfer;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.Indexable;
@@ -95,6 +96,53 @@ public interface Pointer extends Indexable {
      * </ul>
      */
     PointerFlowEdge addEdge(PointerFlowEdge edge);
+
+    /**
+     * Adds a pointer flow edge with a transfer as
+     * {@link #addEdge(PointerFlowEdge)} followed by
+     * {@link PointerFlowEdge#addTransfer(Transfer)} on the returned edge.
+     * An implementation may store the edge without the edge object: the
+     * caller must not change the given edge after this call (a transfer
+     * added to it later may not reach the PFG), and {@link #getOutEdges()}
+     * then returns a new, equal edge object for it on each call.
+     *
+     * @return an edge holding the transfer, equal to the edge in the PFG,
+     * if the transfer is new on that edge; otherwise {@code null}.
+     */
+    default @Nullable PointerFlowEdge addEdge(PointerFlowEdge edge, Transfer transfer) {
+        PointerFlowEdge added = addEdge(edge);
+        return added != null && added.addTransfer(transfer) ? added : null;
+    }
+
+    /**
+     * Applies the action to each transfer of each out edge of this pointer,
+     * in the order of {@link #getOutEdges()} and of
+     * {@link PointerFlowEdge#forEachTransfer} per edge.
+     */
+    default void forEachOutTransfer(TransferAction action) {
+        for (PointerFlowEdge edge : getOutEdges()) {
+            Pointer target = edge.target();
+            edge.forEachTransfer(transfer -> action.accept(edge, target, transfer));
+        }
+    }
+
+    /**
+     * An action on one transfer of an out edge.
+     */
+    @FunctionalInterface
+    interface TransferAction {
+
+        /**
+         * @param edge     the edge, or {@code null} for an edge stored
+         *                 without an edge object, whose transfer is
+         *                 {@link pascal.taie.analysis.pta.core.solver.Identity}
+         *                 or a {@link pascal.taie.analysis.pta.core.solver.TypeFilter}
+         *                 (neither reads the edge)
+         * @param target   the target of the edge
+         * @param transfer the transfer
+         */
+        void accept(@Nullable PointerFlowEdge edge, Pointer target, Transfer transfer);
+    }
 
     /**
      * Removes out edges of this pointer if they satisfy the filter.
