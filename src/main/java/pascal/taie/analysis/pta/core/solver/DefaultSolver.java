@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.solver;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pascal.taie.World;
@@ -50,6 +51,7 @@ import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
+import pascal.taie.analysis.pta.pts.PointsToSetInterner;
 import pascal.taie.config.AnalysisOptions;
 import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.CastExp;
@@ -124,6 +126,13 @@ public class DefaultSolver implements Solver {
 
     private final PointsToSetFactory ptsFactory;
 
+    /**
+     * Shares equal points-to sets between pointers; null unless the option
+     * {@code share-points-to-sets} is true.
+     */
+    @Nullable
+    private final PointsToSetInterner interner;
+
     private final PropagateTypes propTypes;
 
     /**
@@ -195,6 +204,8 @@ public class DefaultSolver implements Solver {
         hierarchy = World.get().getClassHierarchy();
         typeSystem = World.get().getTypeSystem();
         ptsFactory = new PointsToSetFactory(csManager.getObjectIndexer());
+        interner = options.getBoolean("share-points-to-sets")
+                ? new PointsToSetInterner(ptsFactory) : null;
         propTypes = new PropagateTypes(
                 (List<String>) options.get("propagate-types"),
                 typeSystem);
@@ -241,7 +252,7 @@ public class DefaultSolver implements Solver {
     public PointsToSet getPointsToSetOf(Pointer pointer) {
         PointsToSet pts = pointer.getPointsToSet();
         if (pts == null) {
-            pts = ptsFactory.make();
+            pts = interner != null ? interner.holdEmpty() : ptsFactory.make();
             pointer.setPointsToSet(pts);
         }
         return pts;
@@ -375,7 +386,10 @@ public class DefaultSolver implements Solver {
                     .filter(o -> filters.stream().allMatch(f -> f.test(o)))
                     .collect(ptsFactory::make, PointsToSet::addObject, PointsToSet::addAll);
         }
-        PointsToSet diff = getPointsToSetOf(pointer).addAllDiff(pointsToSet);
+        PointsToSetInterner sharing = interner;
+        PointsToSet diff = sharing != null
+                ? sharing.addAllDiff(pointer, pointsToSet)
+                : getPointsToSetOf(pointer).addAllDiff(pointsToSet);
         if (!diff.isEmpty()) {
             try {
                 pointer.forEachOutTransfer((edge, target, transfer) ->

@@ -23,6 +23,7 @@
 package pascal.taie.analysis.pta.pts;
 
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.SetEx;
 
 import java.util.Collections;
@@ -41,17 +42,70 @@ public abstract class DelegatePointsToSet implements PointsToSet {
      */
     public final SetEx<CSObj> set;
 
+    /**
+     * -1 while this set is mutable; once it is shared through a
+     * {@link PointsToSetInterner}, the number of pointers holding it.
+     * A shared set is never mutated again.
+     */
+    int holders = -1;
+
+    /**
+     * The {@link #sequenceHash()} of this set, valid once it is shared.
+     */
+    int internHash;
+
     DelegatePointsToSet(SetEx<CSObj> set) {
         this.set = set;
     }
 
     @Override
+    public boolean isShared() {
+        return holders >= 0;
+    }
+
+    private void checkMutable() {
+        if (holders >= 0) {
+            throw new IllegalStateException("shared points-to set is immutable");
+        }
+    }
+
+    int sequenceHash() {
+        return hybrid().sequenceHash();
+    }
+
+    boolean sameSequence(DelegatePointsToSet other) {
+        return hybrid().sameSequence(other.hybrid());
+    }
+
+    boolean isLarge() {
+        return hybrid().isLarge();
+    }
+
+    /**
+     * @return true if {@code addAllDiff(pts)} would leave this set unchanged
+     * in its form and elements.
+     */
+    boolean addAllDiffKeeps(DelegatePointsToSet pts) {
+        return hybrid().addAllDiffKeeps(pts.hybrid());
+    }
+
+    private HybridBitSet<CSObj> hybrid() {
+        if (set instanceof HybridBitSet<CSObj> hybrid) {
+            return hybrid;
+        }
+        throw new UnsupportedOperationException(
+                "only hybrid bit points-to sets can be shared: " + getClass());
+    }
+
+    @Override
     public boolean addObject(CSObj obj) {
+        checkMutable();
         return set.add(obj);
     }
 
     @Override
     public boolean addAll(PointsToSet pts) {
+        checkMutable();
         if (pts instanceof DelegatePointsToSet other) {
             return set.addAll(other.set);
         } else {
@@ -65,6 +119,7 @@ public abstract class DelegatePointsToSet implements PointsToSet {
 
     @Override
     public void removeIf(Predicate<CSObj> filter) {
+        checkMutable();
         set.removeIf(filter);
     }
 
@@ -100,6 +155,7 @@ public abstract class DelegatePointsToSet implements PointsToSet {
 
     @Override
     public PointsToSet addAllDiff(PointsToSet pts) {
+        checkMutable();
         Set<CSObj> otherSet = pts instanceof DelegatePointsToSet other ?
                 other.set : pts.getObjects();
         return newSet(set.addAllDiff(otherSet));

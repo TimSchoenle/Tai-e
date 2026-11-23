@@ -27,6 +27,7 @@ import pascal.taie.util.Indexer;
 
 import java.io.Serializable;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.Set;
 
 /**
@@ -155,5 +156,100 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
             copy.set = ((SetEx<E>) set).copy();
         }
         return copy;
+    }
+
+    /**
+     * @return true if {@link #addAllDiff(Collection) addAllDiff(c)} would
+     * leave this set unchanged in its form and elements.
+     */
+    public boolean addAllDiffKeeps(HybridBitSet<? extends E> c) {
+        if (c.isLargeSet) {
+            // a large c turns this set large (see addAllDiff)
+            return isLargeSet && containsAll(c);
+        }
+        if (c.isEmpty()) {
+            return true;
+        }
+        if (!isLargeSet && set != null && set.size() + 1 > getThreshold()) {
+            // add upgrades a full small set before it looks for the element
+            return false;
+        }
+        return containsAll(c);
+    }
+
+    /**
+     * @return true if this set is in its large (bit set) form.
+     */
+    public boolean isLarge() {
+        return isLargeSet;
+    }
+
+    /**
+     * Hash of {@link #sameSequence(HybridBitSet)}: of the form of this set
+     * and of its elements in iteration order.
+     */
+    public int sequenceHash() {
+        int form = form();
+        int hash = form;
+        if (form == FORM_SINGLETON) {
+            hash = 31 * hash + indexer.getIndex(singleton);
+        } else if (form == FORM_SMALL) {
+            for (E e : set) {
+                hash = 31 * hash + indexer.getIndex(e);
+            }
+        } else if (form == FORM_LARGE) {
+            hash = 31 * hash + set.hashCode();
+        }
+        return hash;
+    }
+
+    /**
+     * Compares the form (empty, singleton, small or large) and the elements
+     * in iteration order. Two sets that are the same by this comparison
+     * iterate in the same order and stay so under the same operations.
+     */
+    public boolean sameSequence(HybridBitSet<?> other) {
+        int form = form();
+        if (form != other.form() || indexer != other.indexer) {
+            return false;
+        }
+        return switch (form) {
+            case FORM_SINGLETON -> singleton.equals(other.singleton);
+            case FORM_SMALL -> sameOrder(set, other.set);
+            case FORM_LARGE -> ((GenericBitSet<E>) set).sameBits((GenericBitSet<?>) other.set);
+            default -> true;
+        };
+    }
+
+    private static final int FORM_EMPTY = 0;
+
+    private static final int FORM_SINGLETON = 1;
+
+    private static final int FORM_SMALL = 2;
+
+    private static final int FORM_LARGE = 3;
+
+    private int form() {
+        if (singleton != null) {
+            return FORM_SINGLETON;
+        } else if (set == null) {
+            return FORM_EMPTY;
+        } else {
+            return isLargeSet ? FORM_LARGE : FORM_SMALL;
+        }
+    }
+
+    private static boolean sameOrder(Set<?> a, Set<?> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        Iterator<?> ia = a.iterator();
+        Iterator<?> ib = b.iterator();
+        while (ia.hasNext()) {
+            if (!ia.next().equals(ib.next())) {
+                return false;
+            }
+        }
+        return true;
     }
 }

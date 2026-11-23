@@ -93,6 +93,15 @@ public interface PointsToSet extends Iterable<CSObj>, Copyable<PointsToSet> {
      */
     Stream<CSObj> objects();
 
+    /**
+     * @return true if this set is shared by several pointers (see the pta
+     * option {@code share-points-to-sets}); a shared set is immutable, and
+     * its mutators throw {@link IllegalStateException}.
+     */
+    default boolean isShared() {
+        return false;
+    }
+
     @Override
     default Iterator<CSObj> iterator() {
         return getObjects().iterator();

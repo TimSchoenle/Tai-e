@@ -215,6 +215,14 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
         return Hashes.hash(getContext(), bitSet);
     }
 
+    /**
+     * @return true if {@code other} has the same context and holds exactly
+     * the same bits as this set.
+     */
+    public boolean sameBits(GenericBitSet<?> other) {
+        return getContext() == other.getContext() && bitSet.equals(other.bitSet);
+    }
+
     @Override
     public SetEx<E> copy() {
         GenericBitSet<E> copy = newSet();
