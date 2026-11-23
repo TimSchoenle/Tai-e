@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.solver;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
@@ -56,6 +57,17 @@ public class PointerFlowGraph implements Graph<Pointer> {
      */
     public PointerFlowEdge addEdge(PointerFlowEdge edge) {
         return edge.source().addEdge(edge);
+    }
+
+    /**
+     * Adds a pointer flow edge with a transfer, see
+     * {@link Pointer#addEdge(PointerFlowEdge, Transfer)}.
+     *
+     * @return an edge holding the transfer if the transfer is new on the
+     * edge in the PFG; otherwise {@code null}.
+     */
+    public @Nullable PointerFlowEdge addEdge(PointerFlowEdge edge, Transfer transfer) {
+        return edge.source().addEdge(edge, transfer);
     }
 
     @Override

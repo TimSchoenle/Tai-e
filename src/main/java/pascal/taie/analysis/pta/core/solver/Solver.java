@@ -181,6 +181,9 @@ public interface Solver {
 
     /**
      * Adds a pointer flow edge (with edge transfer) to the PFG.
+     * The edge must not be changed after this call: the PFG may keep it
+     * without the edge object (see
+     * {@link Pointer#addEdge(PointerFlowEdge, Transfer)}).
      */
     void addPFGEdge(PointerFlowEdge edge, Transfer transfer);
 

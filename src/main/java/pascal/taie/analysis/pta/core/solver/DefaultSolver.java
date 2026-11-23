@@ -378,11 +378,8 @@ public class DefaultSolver implements Solver {
         PointsToSet diff = getPointsToSetOf(pointer).addAllDiff(pointsToSet);
         if (!diff.isEmpty()) {
             try {
-                pointerFlowGraph.getOutEdgesOf(pointer).forEach(edge -> {
-                    Pointer target = edge.target();
-                    edge.forEachTransfer(transfer ->
-                            addPointsTo(target, deltaTransfers.apply(edge, transfer, diff)));
-                });
+                pointer.forEachOutTransfer((edge, target, transfer) ->
+                        addPointsTo(target, deltaTransfers.apply(edge, transfer, diff)));
             } finally {
                 deltaTransfers.finish(pointer, diff);
             }
@@ -852,8 +849,8 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPFGEdge(PointerFlowEdge edge, Transfer transfer) {
-        edge = pointerFlowGraph.addEdge(edge);
-        if (edge != null && edge.addTransfer(transfer)) {
+        edge = pointerFlowGraph.addEdge(edge, transfer);
+        if (edge != null) {
             PointsToSet targetSet = transfer.apply(
                     edge, getPointsToSetOf(edge.source()));
             if (!targetSet.isEmpty()) {
