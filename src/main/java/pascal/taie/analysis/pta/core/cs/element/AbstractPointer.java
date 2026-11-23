@@ -26,7 +26,7 @@ import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.util.collection.ArraySet;
-import pascal.taie.util.collection.HybridIndexableSet;
+import pascal.taie.util.collection.IntArraySets;
 import pascal.taie.util.collection.Sets;
 
 import java.util.ArrayList;
@@ -41,7 +41,11 @@ abstract class AbstractPointer implements Pointer {
 
     private final int index;
 
-    private final Set<Pointer> successors = new HybridIndexableSet<>(true);
+    /**
+     * Indexes of the targets of the out-edges, an {@link IntArraySets} set
+     * ({@code null} while empty); it only dedupes {@link #addEdge}.
+     */
+    private int[] successors;
 
     private final ArrayList<PointerFlowEdge> outEdges = new ArrayList<>(4);
 
@@ -93,7 +97,9 @@ abstract class AbstractPointer implements Pointer {
     @Override
     public PointerFlowEdge addEdge(PointerFlowEdge edge) {
         assert edge.source() == this;
-        if (successors.add(edge.target())) {
+        int[] added = IntArraySets.add(successors, edge.target().getIndex());
+        if (added != null) {
+            successors = added;
             outEdges.add(edge);
             return edge;
         } else if (edge.kind() == FlowKind.OTHER) {
