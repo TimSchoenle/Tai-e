@@ -66,6 +66,13 @@ public final class Tests {
     private static final boolean DUMP_IR = false;
 
     /**
+     * Whether pointer analysis tests run with shared points-to sets
+     * (system property {@code taie.test.share-points-to-sets}).
+     */
+    private static final boolean SHARE_POINTS_TO_SETS =
+            Boolean.getBoolean("taie.test.share-points-to-sets");
+
+    /**
      * Whether dump control-flow graphs or not.
      */
     private static final boolean DUMP_CFG = false;
@@ -200,6 +207,9 @@ public final class Tests {
                 "implicit-entries:false",
                 "only-app:true",
                 "distinguish-string-constants:all"));
+        if (SHARE_POINTS_TO_SETS) {
+            ptaArgs.add("share-points-to-sets:true");
+        }
         if (processResult) {
             ptaArgs.add(GENERATE_EXPECTED_RESULTS
                     ? "dump:true"

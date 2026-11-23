@@ -16,6 +16,8 @@
     merge-exception-objects: true
     collect-throw-results: true # store per-method throw results after the
     # solve (needed by throw analysis algorithm pta; false saves their memory)
+    share-points-to-sets: false # share equal points-to sets between pointers
+    # (immutable sets, copy on write; same results, less memory)
     handle-invokedynamic: false
     propagate-types: [ reference ] # ,null,int,long,...(other primitive types)
     advanced: null # specify advanced analysis:

@@ -47,6 +47,10 @@ public interface Pointer extends Indexable {
      * We recommend use {@link #getObjects()} and {@link #objects()}
      * for accessing the objects pointed by this pointer after
      * the pointer analysis finishes.
+     * <p>
+     * With the pta option {@code share-points-to-sets}, the set is an
+     * immutable snapshot shared with other pointers (see
+     * {@link pascal.taie.analysis.pta.core.solver.Solver#getPointsToSetOf}).
      *
      * @return the points-to set associated with this pointer.
      */

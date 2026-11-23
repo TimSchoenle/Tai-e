@@ -123,7 +123,13 @@ public class TaintAnalysis extends CompositePlugin {
             CSManager csManager = solver.getCSManager();
             Stream.concat(csManager.pointers(), csManager.mockPointers()).forEach(p -> {
                 PointsToSet pts = p.getPointsToSet();
-                if (pts != null) {
+                if (pts != null && pts.objects()
+                        .anyMatch(csObj -> manager.isTaint(csObj.getObject()))) {
+                    if (pts.isShared()) {
+                        // a shared set is immutable: filter a copy of it
+                        pts = pts.copy();
+                        p.setPointsToSet(pts);
+                    }
                     pts.removeIf(csObj -> manager.isTaint(csObj.getObject()));
                 }
                 p.removeEdgesIf(TaintTransferEdge.class::isInstance);

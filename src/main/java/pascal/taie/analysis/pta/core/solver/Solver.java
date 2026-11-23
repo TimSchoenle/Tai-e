@@ -69,6 +69,11 @@ public interface Solver {
      * Returns the points-to set of given pointer. If the pointer has not
      * been associated with a points-to set, this method will create a
      * new set and associate it with the pointer.
+     * <p>
+     * With the pta option {@code share-points-to-sets}, the returned set is
+     * an immutable snapshot shared with other pointers: it does not follow
+     * later changes of the pointer's points-to set, and its mutators throw
+     * {@link IllegalStateException}.
      */
     PointsToSet getPointsToSetOf(Pointer pointer);
 
