@@ -159,14 +159,17 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
-     * Packs this set when it is a large sparse set of {@code expectedIndexer}.
+     * Packs this set when it is a large sparse set of {@code expectedIndexer}:
+     * the set itself is sparse and both it and its bits use that indexer,
+     * the form {@link #ofPackedLarge} restores.
      *
      * @return the packed words of {@link SparseBitSet#toPacked()}, or
      * {@code null} when this set is small, dense or of another indexer
      */
     public long @Nullable [] toPackedLarge(Indexer<E> expectedIndexer) {
-        if (isLargeSet && indexer == expectedIndexer
+        if (isLargeSet && isSparse && indexer == expectedIndexer
                 && set instanceof IndexerBitSet<E> bits
+                && bits.getContext() == expectedIndexer
                 && bits.bitSet instanceof SparseBitSet sparse) {
             return sparse.toPacked();
         }

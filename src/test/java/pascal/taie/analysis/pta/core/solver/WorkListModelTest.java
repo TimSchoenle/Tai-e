@@ -94,6 +94,11 @@ class WorkListModelTest {
 
     private static PointsToSetFactory factory;
 
+    private static FarIndexer farIndexer;
+
+    /** A factory whose indexer spreads the objects over several areas. */
+    private static PointsToSetFactory farFactory;
+
     @BeforeAll
     static void analyse() {
         pointers.clear();
@@ -110,10 +115,39 @@ class WorkListModelTest {
         lowest = objects.remove(0);
         secondLowest = objects.remove(0);
         factory = new PointsToSetFactory(indexer);
+        farIndexer = new FarIndexer();
+        farFactory = new PointsToSetFactory(farIndexer);
     }
 
     @Test
     void randomSequencesMatchTheCopyingWorkList() {
+        assertSequencesMatch(factory);
+    }
+
+    /**
+     * The same sequences with the objects indexed far apart: a large delta
+     * then spans several areas and blocks, near the largest index too.
+     */
+    @Test
+    void multiAreaSequencesMatchTheCopyingWorkList() {
+        assertSequencesMatch(farFactory);
+        PointsToSet all = farFactory.make();
+        objects.forEach(all::addObject);
+        long[] words = farFactory.toPackedLarge(all);
+        assertNotNull(words);
+        // one header per block and one word per non-zero word
+        Set<Integer> blocks = Sets.newSet();
+        Set<Integer> nonZeroWords = Sets.newSet();
+        objects.forEach(o -> {
+            blocks.add(farIndexer.getIndex(o) >>> 9);
+            nonZeroWords.add(farIndexer.getIndex(o) >>> 6);
+        });
+        assertTrue(blocks.size() > objects.size() / 2, "blocks: " + blocks.size());
+        assertEquals(blocks.size() + nonZeroWords.size(), words.length);
+        assertEquals(order(all), order(farFactory.ofPackedLarge(words)));
+    }
+
+    private static void assertSequencesMatch(PointsToSetFactory factory) {
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
             WorkList workList = new WorkList(factory);
@@ -122,7 +156,7 @@ class WorkListModelTest {
             for (int step = 0; step < steps; ++step) {
                 if (random.nextInt(10) < 7) {
                     Pointer pointer = pointers.get(random.nextInt(Math.min(pointers.size(), 12)));
-                    PointsToSet delta = randomSet(random);
+                    PointsToSet delta = randomSet(factory, random);
                     workList.addEntry(pointer, delta);
                     model.addEntry(pointer, delta);
                     if (random.nextBoolean()) {
@@ -146,7 +180,7 @@ class WorkListModelTest {
         Random random = new Random(1);
         int packed = 0;
         for (int i = 0; i < 200; ++i) {
-            PointsToSet set = randomSet(random);
+            PointsToSet set = randomSet(factory, random);
             List<CSObj> before = order(set);
             long[] words = factory.toPackedLarge(set);
             assertEquals(words != null, formProbe(set).get(0) == lowest, "set " + before);
@@ -183,7 +217,7 @@ class WorkListModelTest {
         return order(copy);
     }
 
-    private static PointsToSet randomSet(Random random) {
+    private static PointsToSet randomSet(PointsToSetFactory factory, Random random) {
         PointsToSet set = factory.make();
         int kind = random.nextInt(5);
         if (kind == 0 || kind == 1) {
@@ -206,6 +240,47 @@ class WorkListModelTest {
             set.removeIf(o -> random.nextInt(10) < 3);
         }
         return set;
+    }
+
+    /**
+     * Indexes the two form probe objects 0 and 1, and the other objects in
+     * turn far apart in the first areas, an area apart, and just below the
+     * largest index.
+     */
+    private static final class FarIndexer implements Indexer<CSObj> {
+
+        private final Map<CSObj, Integer> indexes = Maps.newMap();
+
+        private final Map<Integer, CSObj> objectsByIndex = Maps.newMap();
+
+        FarIndexer() {
+            assertTrue(objects.size() < 20_000, "too many objects: " + objects.size());
+            put(lowest, 0);
+            put(secondLowest, 1);
+            for (int i = 0; i < objects.size(); ++i) {
+                int index = switch (i % 3) {
+                    case 0 -> 1024 + i * 70_001;
+                    case 1 -> (i + 2) << 16;
+                    default -> Integer.MAX_VALUE - 1 - i * 1024;
+                };
+                put(objects.get(i), index);
+            }
+        }
+
+        private void put(CSObj obj, int index) {
+            assertTrue(objectsByIndex.put(index, obj) == null, "index used twice: " + index);
+            indexes.put(obj, index);
+        }
+
+        @Override
+        public int getIndex(CSObj o) {
+            return indexes.get(o);
+        }
+
+        @Override
+        public CSObj getObject(int index) {
+            return objectsByIndex.get(index);
+        }
     }
 
     /** The work list as it was: every pending delta a copied points-to set. */
