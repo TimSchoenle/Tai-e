@@ -25,6 +25,8 @@ package pascal.taie.util.collection;
 import pascal.taie.util.Copyable;
 
 import java.io.Serializable;
+import java.util.function.IntConsumer;
+import java.util.function.IntPredicate;
 
 /**
  * Interface for different bit set implementations.
@@ -263,6 +265,32 @@ public interface IBitSet extends Copyable<IBitSet>, Serializable {
      * @param set a bit set
      */
     void setTo(IBitSet set);
+
+    /**
+     * Brings a memo of a predicate on bit indexes up to date for the bits of
+     * this set, and counts the bits of this set that the memo accepts. Each
+     * bit of this set that is not in {@code known} is tested once, in
+     * ascending order, and set in {@code known}, and also in {@code pass}
+     * if the predicate accepts it. This set is not changed.
+     *
+     * @param known the bits tested so far
+     * @param pass  the tested bits that were accepted
+     * @param test  the predicate; it must not change any of the three sets
+     * @return the number of bits of this set that are in {@code pass}
+     * after the update
+     * @throws IllegalArgumentException if two of this set, {@code known}
+     *                                  and {@code pass} are the same set
+     */
+    int updateMemoAndCount(IBitSet known, IBitSet pass, IntPredicate test);
+
+    /**
+     * Performs the action on every bit that is set in both this set and
+     * the given set, in ascending order. Neither set is changed.
+     *
+     * @param set    a bit set
+     * @param action the action; it must not change either set
+     */
+    void forEachAnd(IBitSet set, IntConsumer action);
 
     /**
      * Sets all of the bits in this BitSet to {@code false}.
