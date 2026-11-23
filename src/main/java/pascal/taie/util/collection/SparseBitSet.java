@@ -758,39 +758,11 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.or(set);
         }
-        return iterateBlocks(this, other, new OrAction(this));
-    }
-
-    private static class OrAction extends ChangeAction {
-
-        private OrAction(SparseBitSet self) {
-            super(self);
+        boolean changed = orTable(other.table, null);
+        if (changed) {
+            invalidateState();
         }
-
-        @Override
-        boolean accept(int w1, int w2, long[] selfBlock, long[] iteratedBlock) {
-            boolean isZero = true;
-            boolean changed = false;
-            for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                long iteratedWord = iteratedBlock[w3];
-                if (iteratedWord != 0) {
-                    isZero = false;
-                    if (selfBlock == null) {
-                        selfBlock = self.getOrCreateBlock(w1, w2);
-                    }
-                    long selfWord = selfBlock[w3];
-                    long newWord = selfWord | iteratedWord;
-                    if (selfWord != newWord) {
-                        selfBlock[w3] = newWord;
-                        changed = true;
-                    }
-                } else if (selfBlock != null && selfBlock[w3] != 0) {
-                    isZero = false;
-                }
-            }
-            this.changed |= changed;
-            return isZero;
-        }
+        return changed;
     }
 
     @Override
@@ -801,64 +773,80 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.orDiff(set);
         }
-        return iterateBlocks(this, other, new OrDiffAction(this));
+        SparseBitSet diff = new SparseBitSet();
+        if (orTable(other.table, diff)) {
+            invalidateState();
+            diff.invalidateState();
+        }
+        return diff;
     }
 
-    private static class OrDiffAction extends BlockAction<IBitSet> {
-
-        private SparseBitSet diff;
-
-        private boolean changed;
-
-        private OrDiffAction(SparseBitSet self) {
-            super(self);
-        }
-
-        @Override
-        void start(SparseBitSet iterated) {
-            diff = new SparseBitSet();
-            changed = false;
-        }
-
-        @Override
-        boolean accept(int w1, int w2, long[] selfBlock, long[] iteratedBlock) {
-            boolean isZero = true;
-            boolean changed = false;
-            for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                long iteratedWord = iteratedBlock[w3];
-                if (iteratedWord != 0) {
-                    isZero = false;
-                    if (selfBlock == null) {
-                        selfBlock = self.getOrCreateBlock(w1, w2);
+    /**
+     * Ors the blocks of {@code source} into this set, area by area: each area
+     * of this set (and of {@code diff}) is fetched or created once, a block of
+     * {@code source} whose words are all zero is skipped without touching this
+     * set, and a block is allocated only when it receives a non-zero word.
+     * The caller invalidates the states.
+     *
+     * @param source the table of the set to or into this set
+     * @param diff   if not {@code null}, a fresh set that receives the bits
+     *               this call adds to this set
+     * @return {@code true} if this set changed
+     */
+    private boolean orTable(long[][][] source, @Nullable SparseBitSet diff) {
+        boolean changed = false;
+        for (int w1 = 0; w1 < source.length; ++w1) {
+            long[][] sourceArea = source[w1];
+            if (sourceArea == null) {
+                continue;
+            }
+            long[][] selfArea = w1 < table.length ? table[w1] : null;
+            long[][] diffArea = null;
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] sourceBlock = sourceArea[w2];
+                if (sourceBlock == null) {
+                    continue;
+                }
+                long[] selfBlock = selfArea != null ? selfArea[w2] : null;
+                if (selfBlock == null) {
+                    if (!isNonZeroBlock(sourceBlock)) {
+                        continue;
                     }
+                    if (selfArea == null) {
+                        selfArea = getOrCreateArea(w1);
+                    }
+                    selfArea[w2] = sourceBlock.clone();
+                    changed = true;
+                    if (diff != null) {
+                        if (diffArea == null) {
+                            diffArea = diff.getOrCreateArea(w1);
+                        }
+                        diffArea[w2] = sourceBlock.clone();
+                    }
+                    continue;
+                }
+                long[] diffBlock = null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long sourceWord = sourceBlock[w3];
                     long selfWord = selfBlock[w3];
-                    long newWord = selfWord | iteratedWord;
-                    if (selfWord != newWord) {
+                    long newWord = selfWord | sourceWord;
+                    if (newWord != selfWord) {
                         selfBlock[w3] = newWord;
                         changed = true;
-                        long[] diffBlock = diff.getOrCreateBlock(w1, w2);
-                        diffBlock[w3] = iteratedWord & ~selfWord;
+                        if (diff != null) {
+                            if (diffBlock == null) {
+                                if (diffArea == null) {
+                                    diffArea = diff.getOrCreateArea(w1);
+                                }
+                                diffBlock = diffArea[w2] = new long[LENGTH3];
+                            }
+                            diffBlock[w3] = sourceWord & ~selfWord;
+                        }
                     }
-                } else if (selfBlock != null && selfBlock[w3] != 0) {
-                    isZero = false;
                 }
             }
-            this.changed |= changed;
-            return isZero;
         }
-
-        @Override
-        void finish() {
-            if (changed) {
-                self.invalidateState();
-                diff.invalidateState();
-            }
-        }
-
-        @Override
-        IBitSet getResult() {
-            return diff;
-        }
+        return changed;
     }
 
     @Override
@@ -1019,6 +1007,20 @@ public class SparseBitSet extends AbstractBitSet
      * the block, and resize table and create new area, if necessary.
      */
     private long[] getOrCreateBlock(int w1, int w2) {
+        long[][] area = getOrCreateArea(w1);
+        long[] block;
+        if ((block = area[w2]) == null) {
+            block = area[w2] = new long[LENGTH3];
+        }
+        return block;
+    }
+
+    /**
+     * Retrieves the area of specified position in the table of this set.
+     * If the area is absent (i.e., {@code null}), this method will create
+     * the area, and resize table, if necessary.
+     */
+    private long[][] getOrCreateArea(int w1) {
         if (w1 >= table.length) {
             resize(bitIndex(w1, /* only the highest one bit matters */ 0, 0));
         }
@@ -1026,11 +1028,7 @@ public class SparseBitSet extends AbstractBitSet
         if ((area = table[w1]) == null) {
             area = table[w1] = new long[LENGTH2][];
         }
-        long[] block;
-        if ((block = area[w2]) == null) {
-            block = area[w2] = new long[LENGTH3];
-        }
-        return block;
+        return area;
     }
 
     /**
