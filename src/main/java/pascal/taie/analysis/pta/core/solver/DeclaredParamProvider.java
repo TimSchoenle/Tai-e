@@ -26,6 +26,7 @@ import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.ArrayType;
@@ -123,7 +124,8 @@ public class DeclaredParamProvider implements ParamProvider {
             int level = pair.second();
             if (level < k) {
                 Type type = base.getType();
-                if (type instanceof ClassType cType) {
+                if (type instanceof ClassType cType && cType.getJClass() != null) {
+                    // a class missing from the class path declares no known fields
                     for (JField field : cType.getJClass().getDeclaredFields()) {
                         Type fieldType = field.getType();
                         if (isInstantiable(fieldType)) {
@@ -148,9 +150,16 @@ public class DeclaredParamProvider implements ParamProvider {
         }
     }
 
+    /**
+     * A class type whose class is missing from the class path is not known
+     * to be abstract, so it counts as instantiable and keeps its mock object.
+     */
     private static boolean isInstantiable(Type type) {
-        return (type instanceof ClassType cType && !cType.getJClass().isAbstract())
-                || type instanceof ArrayType;
+        if (type instanceof ClassType cType) {
+            JClass jclass = cType.getJClass();
+            return jclass == null || !jclass.isAbstract();
+        }
+        return type instanceof ArrayType;
     }
 
     @Override
