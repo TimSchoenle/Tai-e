@@ -204,7 +204,7 @@ public class LambdaAnalysis implements Plugin {
             // TODO: use more information to filter out mismatches?
             return;
         }
-        Context indyCtx = recv.getContext();
+        Context indyCtx = capturedArgsContext(indy, recv.getContext());
         CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
         MethodHandle mh = getMethodHandle(indy);
         final MethodRef targetRef = mh.getMethodRef();
@@ -263,6 +263,20 @@ public class LambdaAnalysis implements Plugin {
                     addLambdaCallEdge(csCallSite, null, targetRef, indy, indyCtx);
             default -> throw new AnalysisException(mh.getKind() + " is not supported");
         }
+    }
+
+    /**
+     * @return the context under which the lambda call edges of {@code indy}
+     * read its captured variables: the lambda object's heap context
+     * {@code lambdaObjCtx} (the context of the method that created it), or
+     * the empty context when {@code indy} captures no variable. The captured
+     * variables are the only facts read under this context
+     * ({@link #onNewCallEdge}), and it is part of a lambda call edge's
+     * identity, so without captures the edges of one call site and callee
+     * no longer differ per context of the creating method.
+     */
+    private Context capturedArgsContext(InvokeDynamic indy, Context lambdaObjCtx) {
+        return indy.getArgs().isEmpty() ? selector.getEmptyContext() : lambdaObjCtx;
     }
 
     /**
