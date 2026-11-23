@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.solver;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.pts.PointsToSet;
@@ -97,8 +98,11 @@ final class DeltaTransfers {
     /**
      * Applies the transfer of the edge to the delta, reusing the result of a
      * type filter already applied to it since the last {@link #finish}.
+     *
+     * @param edge the edge, or null for an edge stored without an edge
+     *             object (its transfer does not read the edge)
      */
-    PointsToSet apply(PointerFlowEdge edge, Transfer transfer, PointsToSet delta) {
+    PointsToSet apply(@Nullable PointerFlowEdge edge, Transfer transfer, PointsToSet delta) {
         if (VERIFY) {
             transfers++;
         }
@@ -154,7 +158,7 @@ final class DeltaTransfers {
         }
     }
 
-    private static void verify(TypeFilter filter, PointerFlowEdge edge,
+    private static void verify(TypeFilter filter, @Nullable PointerFlowEdge edge,
                                PointsToSet delta, PointsToSet shared) {
         PointsToSet expected = filter.apply(edge, delta);
         List<CSObj> want = new ArrayList<>(expected.getObjects());

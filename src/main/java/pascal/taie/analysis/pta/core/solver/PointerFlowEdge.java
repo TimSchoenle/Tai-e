@@ -143,6 +143,13 @@ public class PointerFlowEdge implements Edge<Pointer> {
     }
 
     /**
+     * @return true if this edge holds a transfer.
+     */
+    public boolean hasTransfers() {
+        return first != null;
+    }
+
+    /**
      * Applies the action to each transfer of this edge, in the order of
      * {@link #getTransfers()}, without allocating a view.
      */
