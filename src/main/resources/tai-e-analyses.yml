@@ -22,6 +22,13 @@
     # zipper | zipper-e | zipper-e=PV
     # scaler | scaler=TST
     # mahjong | collection
+    log-statistics: true # whether log the pointer analysis statistics after
+    # the solve (false skips them: their context-insensitive var points-to
+    # sizes build and cache a set per variable, slow on large programs)
+    release-solver-state: false # whether release, after the fixed point and
+    # before the plugins' onFinish, the solver state that only serves the
+    # solve (work list, out-edge dedup sets, type filter memos); the result
+    # stays readable, new pointer flow edges are refused afterwards
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format
