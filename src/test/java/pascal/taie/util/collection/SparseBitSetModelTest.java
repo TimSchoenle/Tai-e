@@ -34,7 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Checks {@link SparseBitSet} against {@link java.util.BitSet} over random
  * operation sequences: single-bit updates, union, difference, intersection,
- * union-with-difference, containment, intersection tests and iteration in both
+ * union-with-difference, symmetric difference, difference with a set of
+ * another class, containment, intersection tests and iteration in both
  * directions. Indexes are drawn sparse and dense, from small ranges and from
  * ranges that span many blocks and areas, so block and area boundaries are hit.
  */
@@ -61,7 +62,7 @@ class SparseBitSetModelTest {
                 SparseBitSet so = sparse[1 - target];
                 BitSet mo = model[1 - target];
                 String at = "sequence " + sequence + " step " + step;
-                switch (random.nextInt(10)) {
+                switch (random.nextInt(13)) {
                     case 0, 1, 2 -> {
                         int count = 1 + random.nextInt(40);
                         for (int i = 0; i < count; i++) {
@@ -106,6 +107,26 @@ class SparseBitSetModelTest {
                         assertEquals(missing.isEmpty(), s.contains(so), at + " contains");
                         assertEquals(m.intersects(mo), s.intersects(so), at + " intersects");
                     }
+                    case 9 -> {
+                        BitSet expected = (BitSet) m.clone();
+                        expected.xor(mo);
+                        assertEquals(!expected.equals(m), s.xor(so), at + " xor");
+                        m.xor(mo);
+                    }
+                    case 10 -> {
+                        int index = nextIndex(random, range);
+                        s.flip(index);
+                        m.flip(index);
+                    }
+                    case 11 -> {
+                        // the argument is not a SparseBitSet: the generic path
+                        RegularBitSet other = new RegularBitSet();
+                        mo.stream().forEach(other::set);
+                        BitSet expected = (BitSet) m.clone();
+                        expected.andNot(mo);
+                        assertEquals(!expected.equals(m), s.andNot(other), at + " andNot regular");
+                        m.andNot(mo);
+                    }
                     default -> {
                         SparseBitSet copy = new SparseBitSet();
                         copy.setTo(s);
@@ -116,6 +137,23 @@ class SparseBitSetModelTest {
                 probe(random, range, m, s, at);
             }
         }
+    }
+
+    @Test
+    void sizeCountsTheBitsOfTheBlocksInUse() {
+        // a block holds 8 words of 64 bits
+        int block = 8 * Long.SIZE;
+        SparseBitSet s = new SparseBitSet();
+        assertEquals(0, s.size());
+        s.set(0);
+        assertEquals(block, s.size());
+        s.set(block - 1);
+        assertEquals(block, s.size());
+        s.set(block);
+        assertEquals(2 * block, s.size());
+        // a block in another area
+        s.set(1 << 20);
+        assertEquals(3 * block, s.size());
     }
 
     @Test
