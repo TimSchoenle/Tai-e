@@ -14,6 +14,10 @@
     merge-string-objects: true
     merge-string-builders: true
     merge-exception-objects: true
+    merge-library-objects: false # merge the objects allocated in classes
+    # outside the application class path (-acp) by type; allocation sites in
+    # the classes on -acp and their nested classes stay distinct (a source
+    # file on -acp stands for the class its file name names); needs -acp
     collect-throw-results: true # store per-method throw results after the
     # solve (needed by throw analysis algorithm pta; false saves their memory)
     handle-invokedynamic: false
