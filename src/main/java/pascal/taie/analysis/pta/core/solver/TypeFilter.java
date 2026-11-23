@@ -140,11 +140,20 @@ public class TypeFilter implements Transfer {
 
     /**
      * Drops the memos (and with them the last solver's objects) when the
-     * world is reset.
+     * world is reset, or when a solver releases its state after its fixed
+     * point (the memos only cache {@link #passes}; a later application
+     * builds them again).
      */
-    private static synchronized void clearMemos() {
+    static synchronized void clearMemos() {
         memoIndexer = null;
         memos = new HashMap<>();
+    }
+
+    /**
+     * Drops this filter's reference to its memo, see {@link #clearMemos()}.
+     */
+    void releaseMemo() {
+        memo = null;
     }
 
     /**

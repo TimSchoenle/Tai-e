@@ -165,6 +165,15 @@ public interface Pointer extends Indexable {
     int getOutDegree();
 
     /**
+     * Releases the state that only deduplicates new out edges, after the
+     * solver has reached its fixed point. The out edges stay readable; a
+     * pointer that releases such state refuses new out edges afterwards
+     * with an {@link IllegalStateException}. The default keeps the state.
+     */
+    default void releaseEdgeDedup() {
+    }
+
+    /**
      * @return the type of this pointer
      */
     Type getType();

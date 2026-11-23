@@ -104,7 +104,9 @@ public class ResultProcessor implements Plugin {
 
     public static void process(AnalysisOptions options,
                                PointerAnalysisResult result) {
-        logStatistics(result);
+        if (options.getBoolean("log-statistics")) {
+            logStatistics(result);
+        }
 
         boolean taintEnabled = options.getString("taint-config") != null
                 || !((List<String>) options.get("taint-config-providers")).isEmpty();

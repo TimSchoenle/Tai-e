@@ -55,6 +55,12 @@ abstract class AbstractPointer implements Pointer {
     private int[] successors;
 
     /**
+     * Marks {@link #successors} as released by {@link #releaseEdgeDedup()};
+     * never passed to {@link IntArraySets}.
+     */
+    private static final int[] RELEASED = new int[0];
+
+    /**
      * Slots per out edge in {@link #edges}.
      */
     private static final int SLOTS = 3;
@@ -119,7 +125,7 @@ abstract class AbstractPointer implements Pointer {
     @Override
     public PointerFlowEdge addEdge(PointerFlowEdge edge) {
         assert edge.source() == this;
-        int[] added = IntArraySets.add(successors, edge.target().getIndex());
+        int[] added = IntArraySets.add(liveSuccessors(), edge.target().getIndex());
         if (added != null) {
             successors = added;
             append(edge, null, null);
@@ -168,7 +174,7 @@ abstract class AbstractPointer implements Pointer {
             return Pointer.super.addEdge(edge, transfer);
         }
         assert edge.source() == this;
-        int[] added = IntArraySets.add(successors, edge.target().getIndex());
+        int[] added = IntArraySets.add(liveSuccessors(), edge.target().getIndex());
         if (added == null) {
             return null;
         }
@@ -176,6 +182,27 @@ abstract class AbstractPointer implements Pointer {
         append(edge.target(), transfer, edge.kind());
         edge.addTransfer(transfer);
         return edge;
+    }
+
+    /**
+     * @return {@link #successors}
+     * @throws IllegalStateException if {@link #releaseEdgeDedup()} released it
+     */
+    private int[] liveSuccessors() {
+        int[] set = successors;
+        if (set == RELEASED) {
+            throw new IllegalStateException("the out-edge dedup state of "
+                    + this + " was released after the fixed point");
+        }
+        return set;
+    }
+
+    /**
+     * Drops {@link #successors}; the out edges in {@link #edges} stay.
+     */
+    @Override
+    public void releaseEdgeDedup() {
+        successors = RELEASED;
     }
 
     /**
