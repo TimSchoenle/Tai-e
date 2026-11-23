@@ -22,6 +22,9 @@
 
 package pascal.taie.util.collection;
 
+import java.util.function.IntConsumer;
+import java.util.function.IntPredicate;
+
 /**
  * Provides common functionality for {@link IBitSet} implementations.
  * <p>
@@ -195,6 +198,44 @@ public abstract class AbstractBitSet implements IBitSet {
     public void setTo(IBitSet set) {
         clear();
         or(set);
+    }
+
+    @Override
+    public int updateMemoAndCount(IBitSet known, IBitSet pass, IntPredicate test) {
+        checkMemoSets(known, pass);
+        int count = 0;
+        for (int i = nextSetBit(0); i != -1; i = nextSetBit(i + 1)) {
+            if (!known.get(i)) {
+                known.set(i);
+                if (test.test(i)) {
+                    pass.set(i);
+                }
+            }
+            if (pass.get(i)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Checks that this set and the memo sets of
+     * {@link #updateMemoAndCount} are three different sets.
+     */
+    protected void checkMemoSets(IBitSet known, IBitSet pass) {
+        if (known == this || pass == this || known == pass) {
+            throw new IllegalArgumentException(
+                    "the input and the memo sets must be different sets");
+        }
+    }
+
+    @Override
+    public void forEachAnd(IBitSet set, IntConsumer action) {
+        for (int i = nextSetBit(0); i != -1; i = nextSetBit(i + 1)) {
+            if (set.get(i)) {
+                action.accept(i);
+            }
+        }
     }
 
     /**

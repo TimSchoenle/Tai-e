@@ -39,6 +39,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -52,8 +53,10 @@ import java.util.function.Supplier;
  * remembers which objects were already checked (known) and which passed
  * (pass), both bit sets over the solver's object index, so each
  * (guard type, object) pair is checked at most once per solver. An input
- * held in a bit set is filtered by bit operations: its unchecked objects
- * are checked once, then the result is the input AND pass. A smaller input
+ * held in a bit set is filtered word by word: in one pass over its words
+ * only the bits of input AND NOT known are checked (and added to the memo)
+ * and the bits of input AND pass are counted; the result is the input AND
+ * pass (the input itself if all pass). A smaller input
  * is filtered object by object through the same memo. The memos of the
  * last solver are kept until the next solver replaces them or the world is
  * reset (a pointer analysis run as an analysis of the world keeps its
@@ -109,6 +112,11 @@ public class TypeFilter implements Transfer {
     private final Supplier<PointsToSet> ptsFactory;
 
     private final Indexer<CSObj> indexer;
+
+    /**
+     * {@link #check} as a predicate, created once per filter.
+     */
+    private final Predicate<CSObj> checker = this::check;
 
     private @Nullable Memo memo;
 
@@ -204,34 +212,26 @@ public class TypeFilter implements Transfer {
      */
     private @Nullable PointsToSet filterLarge(Memo m, PointsToSet input,
                                               GenericBitSet<CSObj> in, int threshold) {
-        // read-only subset tests first: after warm-up most inputs are fully
-        // known, and many pass entirely
-        if (!m.known.containsAll(in)) {
-            for (CSObj o : m.known.addAllDiff(in)) {
-                if (check(o)) {
-                    m.pass.add(o);
-                }
+        // one pass over the words of the input: only its unchecked objects
+        // are checked (and added to the memo), the passing ones are counted
+        int passing = in.updateMemoAndCount(m.known, m.pass, checker);
+        if (passing > threshold) {
+            if (passing == in.size()) {
+                return input;
             }
-        }
-        GenericBitSet<CSObj> out = in;
-        PointsToSet result = input;
-        if (!m.pass.containsAll(in)) {
-            result = input.copy();
+            PointsToSet result = input.copy();
             if (!(result instanceof DelegatePointsToSet delegate
                     && delegate.set instanceof AbstractHybridSet<CSObj> hybrid
                     && hybrid.set instanceof GenericBitSet<CSObj> copied)) {
                 return null;
             }
             copied.retainAll(m.pass);
-            out = copied;
-        }
-        if (out.size() > threshold) {
             return result;
         }
+        // a small result is collected from the words of input AND pass,
+        // without copying the input
         PointsToSet small = ptsFactory.get();
-        for (CSObj o : out) {
-            small.addObject(o);
-        }
+        in.forEachIntersection(m.pass, small::addObject);
         return small;
     }
 

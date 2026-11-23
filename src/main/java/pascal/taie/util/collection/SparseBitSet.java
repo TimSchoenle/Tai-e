@@ -29,6 +29,8 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serial;
 import java.io.Serializable;
+import java.util.function.IntConsumer;
+import java.util.function.IntPredicate;
 
 /**
  * Sparse bit set. This implementation groups bits into blocks, and it could
@@ -759,6 +761,115 @@ public class SparseBitSet extends AbstractBitSet
             return super.or(set);
         }
         return iterateBlocks(this, other, new OrAction(this));
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * With sparse memo sets this works on words: per word of this set, only
+     * the bits that are not yet known are tested, and the accepted bits
+     * are counted with {@link Long#bitCount}.
+     */
+    @Override
+    public int updateMemoAndCount(IBitSet known, IBitSet pass, IntPredicate test) {
+        if (!(known instanceof SparseBitSet k && pass instanceof SparseBitSet p)) {
+            return super.updateMemoAndCount(known, pass, test);
+        }
+        checkMemoSets(known, pass);
+        long[][][] selfTable = table;
+        int count = 0;
+        for (int w1 = 0; w1 < selfTable.length; ++w1) {
+            long[][] area = selfTable[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                long[] knownBlock = getBlock(k.table, w1, w2);
+                long[] passBlock = getBlock(p.table, w1, w2);
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long word = block[w3];
+                    if (word == 0) {
+                        continue;
+                    }
+                    long unknown = knownBlock == null ? word : word & ~knownBlock[w3];
+                    if (unknown != 0) {
+                        if (knownBlock == null) {
+                            knownBlock = k.getOrCreateBlock(w1, w2);
+                        }
+                        knownBlock[w3] |= unknown;
+                        k.invalidateState();
+                        long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
+                        if (accepted != 0) {
+                            if (passBlock == null) {
+                                passBlock = p.getOrCreateBlock(w1, w2);
+                            }
+                            passBlock[w3] |= accepted;
+                            p.invalidateState();
+                        }
+                    }
+                    if (passBlock != null) {
+                        count += Long.bitCount(word & passBlock[w3]);
+                    }
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * @return the bits of {@code word} whose indexes (from {@code base})
+     * the predicate accepts, testing them in ascending order.
+     */
+    private static long testBits(long word, int base, IntPredicate test) {
+        long accepted = 0;
+        for (long rest = word; rest != 0; rest &= rest - 1) {
+            int bit = Long.numberOfTrailingZeros(rest);
+            if (test.test(base + bit)) {
+                accepted |= 1L << bit;
+            }
+        }
+        return accepted;
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * With a sparse argument this visits only the blocks present in both
+     * sets and the words of their intersection.
+     */
+    @Override
+    public void forEachAnd(IBitSet set, IntConsumer action) {
+        if (!(set instanceof SparseBitSet other)) {
+            super.forEachAnd(set, action);
+            return;
+        }
+        long[][][] selfTable = table;
+        long[][][] otherTable = other.table;
+        int areas = Math.min(selfTable.length, otherTable.length);
+        for (int w1 = 0; w1 < areas; ++w1) {
+            long[][] area = selfTable[w1];
+            long[][] otherArea = otherTable[w1];
+            if (area == null || otherArea == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                long[] otherBlock = otherArea[w2];
+                if (block == null || otherBlock == null) {
+                    continue;
+                }
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    int base = bitIndex(w1, w2, w3);
+                    for (long rest = block[w3] & otherBlock[w3]; rest != 0; rest &= rest - 1) {
+                        action.accept(base + Long.numberOfTrailingZeros(rest));
+                    }
+                }
+            }
+        }
     }
 
     private static class OrAction extends ChangeAction {
