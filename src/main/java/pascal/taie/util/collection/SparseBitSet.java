@@ -61,14 +61,19 @@ public class SparseBitSet extends AbstractBitSet
     private static final int INDEX_SIZE = Integer.SIZE - 1;
 
     /**
-     * LEVEL3 is the number of bits of the level3 address.
+     * LEVEL3 is the number of bits of the level3 address: a block holds
+     * 2^LEVEL3 words (8 words, 512 bits). Small blocks keep sets small when
+     * many blocks hold only a few bits; the price is a larger area array, so a
+     * set with a single block in an area costs more than with large blocks.
      */
-    private static final int LEVEL3 = 5; // Do not change!
+    private static final int LEVEL3 = 3;
 
     /**
-     * LEVEL2 is the number of bits of the level2 address.
+     * LEVEL2 is the number of bits of the level2 address: an area holds
+     * 2^LEVEL2 blocks. LEVEL2 + LEVEL3 fixes the span of one area (1024 words)
+     * and with it the size of the level1 table.
      */
-    private static final int LEVEL2 = 5; // Do not change!
+    private static final int LEVEL2 = 7;
 
     /**
      * LEVEL1 is the number of bits of the level1 address.
@@ -231,7 +236,7 @@ public class SparseBitSet extends AbstractBitSet
             invalidateState();
             return true;
         }
-        return true;
+        return false;
     }
 
     @Override
