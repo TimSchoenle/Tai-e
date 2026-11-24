@@ -44,7 +44,7 @@ public final class OpenHashSet<E> extends AbstractSet<E> {
      * small-set threshold of {@link AbstractHybridSet}, so a set of at most
      * this many elements iterates in the order the hybrid set does.
      */
-    static final int SMALL_LIMIT = 8;
+    public static final int SMALL_LIMIT = 8;
 
     private static final Object[] EMPTY = {};
 

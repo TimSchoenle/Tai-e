@@ -22,10 +22,10 @@
 
 package pascal.taie.analysis.pta.core.cs.element;
 
+import pascal.taie.analysis.graph.callgraph.CallGraphs;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.util.collection.OpenHashSet;
 import pascal.taie.util.collection.SetEx;
 
 import java.util.Collections;
@@ -46,7 +46,7 @@ public class CSCallSite extends AbstractCSElement {
     /**
      * Call edges from this call site.
      */
-    private final Set<Edge<CSCallSite, CSMethod>> edges = new OpenHashSet<>();
+    private final CallSiteEdges edges;
 
     /**
      * Exceptions that the exception analysis found this call site may
@@ -58,6 +58,8 @@ public class CSCallSite extends AbstractCSElement {
         super(context);
         this.callSite = callSite;
         this.container = container;
+        this.edges = new CallSiteEdges(this,
+                callSite == null ? null : CallGraphs.findCallKind(callSite));
     }
 
     /**
@@ -75,8 +77,29 @@ public class CSCallSite extends AbstractCSElement {
         return edges.add(edge);
     }
 
+    /**
+     * @return a live, unmodifiable view of the call edges from this call
+     * site. A plain edge (of class {@link Edge}, of this call site's own
+     * kind) is held without its object and rebuilt on each read, so the
+     * view returns equal, but not the same, edge objects across reads.
+     */
     public Set<Edge<CSCallSite, CSMethod>> getEdges() {
         return Collections.unmodifiableSet(edges);
+    }
+
+    /**
+     * @return whether {@code edge} is a plain edge of this call site, which
+     * {@link CSMethod} holds as the call site alone.
+     */
+    boolean isPlainEdge(Edge<CSCallSite, CSMethod> edge) {
+        return edges.isPlain(edge);
+    }
+
+    /**
+     * @return a new plain edge from this call site to {@code callee}.
+     */
+    Edge<CSCallSite, CSMethod> plainEdgeTo(CSMethod callee) {
+        return edges.plainEdge(callee);
     }
 
     /**

@@ -62,6 +62,19 @@ public final class CallGraphs {
     }
 
     public static CallKind getCallKind(Invoke invoke) {
+        CallKind kind = findCallKind(invoke);
+        if (kind == null) {
+            throw new AnalysisException("Cannot handle Invoke: " + invoke);
+        }
+        return kind;
+    }
+
+    /**
+     * @return the kind of the call edges at {@code invoke}, as
+     * {@link #getCallKind(Invoke)} gives it, or null if its invoke
+     * expression has none of the known kinds.
+     */
+    public static @Nullable CallKind findCallKind(Invoke invoke) {
         InvokeExp invokeExp = invoke.getInvokeExp();
         if (invokeExp instanceof InvokeVirtual) {
             return CallKind.VIRTUAL;
@@ -74,7 +87,7 @@ public final class CallGraphs {
         } else if (invokeExp instanceof InvokeDynamic) {
             return CallKind.DYNAMIC;
         }
-        throw new AnalysisException("Cannot handle Invoke: " + invoke);
+        return null;
     }
 
     public static @Nullable JMethod resolveCallee(Type type, Invoke callSite) {
