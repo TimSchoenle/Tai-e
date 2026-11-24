@@ -128,6 +128,17 @@ public class CSMethodThrowResult {
     }
 
     /**
+     * @return whether {@code callSite} already may throw all
+     * {@code exceptions} (its set from {@link #propagate(CSCallSite, Set)});
+     * changes no element (a sparse set may drop all-zero blocks), so
+     * threads may call it while nothing adds to that set.
+     */
+    static boolean throwsAll(CSCallSite callSite, Set<CSObj> exceptions) {
+        SetEx<CSObj> thrown = callSite.getThrownExceptions();
+        return thrown != null && thrown.containsAll(exceptions);
+    }
+
+    /**
      * Adds the exceptions to those that the method does not catch.
      *
      * @return the exceptions that are new to the uncaught set; a shared
