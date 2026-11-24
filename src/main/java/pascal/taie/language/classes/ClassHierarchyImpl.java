@@ -81,9 +81,23 @@ public class ClassHierarchyImpl implements ClassHierarchy {
     private final MultiMap<JClass, JClass> directInnerClasses = Maps.newMultiMap();
 
     /**
-     * Cache results of method dispatch.
+     * Value of {@link #dispatchTable} for a dispatch that found no method;
+     * an enum constant, so that it keeps its identity when the hierarchy is
+     * serialized with the world cache.
      */
-    private final TwoKeyMap<JClass, Subsignature, JMethod> dispatchTable = Maps.newTwoKeyMap();
+    private enum DispatchMiss {
+        INSTANCE
+    }
+
+    private static final Object DISPATCH_MISS = DispatchMiss.INSTANCE;
+
+    /**
+     * Cache results of method dispatch: the dispatched {@link JMethod}, or
+     * {@link #DISPATCH_MISS} when the lookup found none. The lookup walks
+     * only the receiver class's fixed superclasses and superinterfaces, so
+     * a miss stays a miss like a hit stays a hit.
+     */
+    private final TwoKeyMap<JClass, Subsignature, Object> dispatchTable = Maps.newTwoKeyMap();
 
     /**
      * Cache results of {@link #getAllSubclassesOf(JClass)}.
@@ -340,17 +354,27 @@ public class ClassHierarchyImpl implements ClassHierarchy {
             return null;
         }
         Subsignature subsignature = methodRef.getSubsignature();
-        JMethod target = dispatchTable.get(receiverClass, subsignature);
-        if (target == null) {
-            target = lookupMethod(receiverClass, subsignature, false);
+        Object cached = dispatchTable.get(receiverClass, subsignature);
+        if (cached == null) {
+            JMethod target = lookupDispatchTarget(receiverClass, subsignature);
             if (target != null) {
                 dispatchTable.put(receiverClass, subsignature, target);
             } else {
+                dispatchTable.put(receiverClass, subsignature, DISPATCH_MISS);
                 logger.debug("Failed to dispatch {} on {}",
                         subsignature, receiverClass);
             }
+            return target;
         }
-        return target;
+        return cached == DISPATCH_MISS ? null : (JMethod) cached;
+    }
+
+    /**
+     * The uncached lookup behind {@link #dispatch(JClass, MethodRef)},
+     * package-private so that a test can count the lookups.
+     */
+    @Nullable JMethod lookupDispatchTarget(JClass receiverClass, Subsignature subsignature) {
+        return lookupMethod(receiverClass, subsignature, false);
     }
 
     private JMethod lookupMethod(JClass jclass, Subsignature subsignature,

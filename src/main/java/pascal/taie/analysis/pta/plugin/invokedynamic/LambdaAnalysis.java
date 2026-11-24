@@ -251,12 +251,13 @@ public class LambdaAnalysis implements Plugin {
                 if (verifier != null) {
                     verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
                 }
-                addLambdaCallEdges(csCallSite, recvObjs, recvObjsByType,
-                        targetRef, indy, indyCtx);
+                InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, indy, indyCtx,
+                        targetRef, argsToStatic(csCallSite, indy),
+                        argsToInstance(csCallSite, indy));
+                addLambdaCallEdges(info, recvObjs, recvObjsByType);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
-                invoInfos.put(csRecvVar,
-                        new InstanceInvoInfo(csCallSite, indy, indyCtx));
+                invoInfos.put(csRecvVar, info);
             }
             case REF_invokeStatic -> // targetRef is static method
                     addLambdaCallEdge(csCallSite, null, targetRef, indy, indyCtx);
@@ -301,25 +302,46 @@ public class LambdaAnalysis implements Plugin {
      * Whether the arguments transferred by this edge fit into {@code callee}'s
      * parameters, using the same shifts as {@link #onNewCallEdge}.
      */
-    private boolean fitsParameterCount(
+    private static boolean fitsParameterCount(
             CSCallSite csCallSite, InvokeDynamic indy, JMethod callee) {
+        return fitsParameterCount(callee, argsToStatic(csCallSite, indy),
+                argsToInstance(csCallSite, indy));
+    }
+
+    /**
+     * {@link #fitsParameterCount(CSCallSite, InvokeDynamic, JMethod)} with
+     * the transferred argument counts of the edge's call site and
+     * invokedynamic computed in advance.
+     */
+    private static boolean fitsParameterCount(
+            JMethod callee, int argsToStatic, int argsToInstance) {
         if (callee.isAbstract()) {
             return false;
         }
+        int transferred = callee.isStatic() || callee.isConstructor()
+                ? argsToStatic : argsToInstance;
+        return transferred <= callee.getParamCount();
+    }
+
+    /**
+     * @return the number of arguments an edge transfers into the parameters
+     * of a static method or constructor: with no receiver, every captured
+     * variable and actual argument is a parameter.
+     */
+    private static int argsToStatic(CSCallSite csCallSite, InvokeDynamic indy) {
+        return indy.getArgs().size()
+                + csCallSite.getCallSite().getInvokeExp().getArgCount();
+    }
+
+    /**
+     * @return the number of arguments an edge transfers into the parameters
+     * of an instance method: all but the receiver, which is the first
+     * captured variable or, without captures, the first actual argument.
+     */
+    private static int argsToInstance(CSCallSite csCallSite, InvokeDynamic indy) {
         int captured = indy.getArgs().size();
         int actual = csCallSite.getCallSite().getInvokeExp().getArgCount();
-        int transferred;
-        if (callee.isStatic() || callee.isConstructor()) {
-            // No receiver: every captured variable and actual argument is a parameter.
-            transferred = captured + actual;
-        } else if (captured == 0) {
-            // The first actual argument is the receiver.
-            transferred = Math.max(0, actual - 1);
-        } else {
-            // The first captured variable is the receiver.
-            transferred = (captured - 1) + actual;
-        }
-        return transferred <= callee.getParamCount();
+        return captured == 0 ? Math.max(0, actual - 1) : (captured - 1) + actual;
     }
 
     private void addLambdaCallEdge(
@@ -389,9 +411,11 @@ public class LambdaAnalysis implements Plugin {
      * itself is read only by the verify mode.
      */
     private void addLambdaCallEdges(
-            CSCallSite csCallSite, PointsToSet recvObjs,
-            ReceiverGroups<Type, CSObj> recvByType, MethodRef targetRef,
-            InvokeDynamic indy, Context indyCtx) {
+            InstanceInvoInfo info, PointsToSet recvObjs,
+            ReceiverGroups<Type, CSObj> recvByType) {
+        CSCallSite csCallSite = info.getCSCallSite();
+        MethodRef targetRef = info.getTargetRef();
+        InvokeDynamic indy = info.getLambdaIndy();
         Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
         recvByType.forEachGroup(new ReceiverGroups.Visitor<Type, CSObj, JMethod>() {
             @Override
@@ -416,9 +440,10 @@ public class LambdaAnalysis implements Plugin {
             // pass receiver objects to 'this' variable of callee
             solver.addVarPointsTo(csCallee.getContext(),
                     callee.getIR().getThis(), receivers);
-            if (fitsParameterCount(csCallSite, indy, callee)) {
+            if (fitsParameterCount(callee, info.getArgsToStatic(),
+                    info.getArgsToInstance())) {
                 solver.addCallEdge(new LambdaCallEdge(
-                        csCallSite, csCallee, indy, indyCtx));
+                        csCallSite, csCallee, indy, info.getLambdaContext()));
             }
         });
     }
@@ -686,13 +711,8 @@ public class LambdaAnalysis implements Plugin {
         ReceiverGroups<Type, CSObj> cached = Objects.requireNonNull(recvByType.get(csVar),
                 "no receiver grouping for a lambda receiver variable");
         cached.appendAll(ptsByType);
-        infos.forEach(info -> {
-            // handle the case of that new objects reach base variable
-            // of lambda invocation
-            InvokeDynamic indy = info.getLambdaIndy();
-            MethodRef targetRef = getMethodHandle(indy).getMethodRef();
-            addLambdaCallEdges(info.getCSCallSite(), pts, ptsByType,
-                    targetRef, indy, info.getLambdaContext());
-        });
+        // handle the case of that new objects reach base variable
+        // of lambda invocation
+        infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType));
     }
 }

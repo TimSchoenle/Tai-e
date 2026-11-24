@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.plugin.invokedynamic;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.ir.exp.InvokeDynamic;
+import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.util.Hashes;
 
 class InstanceInvoInfo {
@@ -35,12 +36,51 @@ class InstanceInvoInfo {
 
     private final Context lambdaContext;
 
+    /**
+     * The target method reference of the method handle of {@link #lambdaIndy}.
+     */
+    private final MethodRef targetRef;
+
+    /**
+     * Number of arguments a call edge of this invocation transfers into
+     * the parameters of a static method or constructor.
+     */
+    private final int argsToStatic;
+
+    /**
+     * Number of arguments a call edge of this invocation transfers into
+     * the parameters of an instance method.
+     */
+    private final int argsToInstance;
+
+    /**
+     * The derived fields are functions of {@code csCallSite} and
+     * {@code lambdaIndy}, so they take no part in equality.
+     */
     InstanceInvoInfo(CSCallSite csCallSite,
                      InvokeDynamic lambdaIndy,
-                     Context lambdaContext) {
+                     Context lambdaContext,
+                     MethodRef targetRef,
+                     int argsToStatic,
+                     int argsToInstance) {
         this.csCallSite = csCallSite;
         this.lambdaIndy = lambdaIndy;
         this.lambdaContext = lambdaContext;
+        this.targetRef = targetRef;
+        this.argsToStatic = argsToStatic;
+        this.argsToInstance = argsToInstance;
+    }
+
+    MethodRef getTargetRef() {
+        return targetRef;
+    }
+
+    int getArgsToStatic() {
+        return argsToStatic;
+    }
+
+    int getArgsToInstance() {
+        return argsToInstance;
     }
 
     CSCallSite getCSCallSite() {
