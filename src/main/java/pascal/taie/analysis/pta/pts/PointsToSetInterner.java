@@ -51,6 +51,26 @@ public final class PointsToSetInterner {
 
     private int size;
 
+    /**
+     * Changes of a pointer's set through {@link #addAllDiff}, by the number
+     * of pointers holding the set before the change.
+     */
+    private long unsharedWrites;
+
+    private long soleWrites;
+
+    private long twoHolderWrites;
+
+    private long manyHolderWrites;
+
+    /**
+     * Changes made on a copy of the held set, and those of them whose copy
+     * gave way to an equal shared set.
+     */
+    private long copies;
+
+    private long copyHits;
+
     public PointsToSetInterner(PointsToSetFactory factory) {
         this(factory, INITIAL_CAPACITY);
     }
@@ -105,14 +125,29 @@ public final class PointsToSetInterner {
         if (covers(held, pts)) {
             return empty;
         }
+        countWrite(held);
         // the empty set, pinned at one, counts at least two once held
         if (held instanceof DelegatePointsToSet sole && sole.holders == 1) {
             return addAllDiffInPlace(pointer, sole, pts);
         }
         PointsToSet next = held.copy();
         PointsToSet diff = next.addAllDiff(pts);
+        ++copies;
         pointer.setPointsToSet(replace(held, next));
         return diff;
+    }
+
+    private void countWrite(PointsToSet held) {
+        int holders = held instanceof DelegatePointsToSet delegate ? delegate.holders : -1;
+        if (holders < 1) {
+            ++unsharedWrites;
+        } else if (holders == 1) {
+            ++soleWrites;
+        } else if (holders == 2) {
+            ++twoHolderWrites;
+        } else {
+            ++manyHolderWrites;
+        }
     }
 
     /**
@@ -144,6 +179,9 @@ public final class PointsToSetInterner {
      */
     private PointsToSet replace(PointsToSet old, PointsToSet next) {
         DelegatePointsToSet shared = intern(asDelegate(next));
+        if (shared != next) {
+            ++copyHits;
+        }
         if (shared != old) {
             ++shared.holders;
             release(old);
@@ -187,6 +225,34 @@ public final class PointsToSetInterner {
      */
     public int capacity() {
         return table.length;
+    }
+
+    /**
+     * @return the counts of the changes made through {@link #addAllDiff}
+     * so far.
+     */
+    public Counters counters() {
+        return new Counters(unsharedWrites, soleWrites, twoHolderWrites,
+                manyHolderWrites, copies, copyHits);
+    }
+
+    /**
+     * Counts of the changes that {@link #addAllDiff} made to a pointer's
+     * set (calls that left the set unchanged are not counted). The holder
+     * count of the shared empty set includes its pin, so the first change of
+     * a pointer that holds it alone counts as held by two.
+     *
+     * @param unsharedWrites   changes of a set that is not shared
+     * @param soleWrites       changes of a shared set held by the pointer
+     *                         alone, made in place
+     * @param twoHolderWrites  changes of a shared set held by two
+     * @param manyHolderWrites changes of a shared set held by three or more
+     * @param copies           changes made on a copy of the held set
+     * @param copyHits         copies that gave way to an equal shared set
+     */
+    public record Counters(long unsharedWrites, long soleWrites,
+                           long twoHolderWrites, long manyHolderWrites,
+                           long copies, long copyHits) {
     }
 
     private static DelegatePointsToSet asDelegate(PointsToSet set) {

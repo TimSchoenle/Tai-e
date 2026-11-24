@@ -316,6 +316,36 @@ class PointsToSetInternerTest {
         assertEquals(2, interner.size());
     }
 
+    @Test
+    void countersCountEachChangeByHolderCount() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        Pointer p4 = TestElements.pointer(4);
+        Pointer p5 = TestElements.pointer(5);
+        // from the empty set (its pin counts as a holder): copy, new set
+        interner.addAllDiff(p1, small(1, 2));
+        // copy, which gives way to the set p1 holds
+        interner.addAllDiff(p2, small(1, 2));
+        // two holders: copy, new set
+        interner.addAllDiff(p1, small(3));
+        // sole holder: in place
+        interner.addAllDiff(p1, small(4));
+        // two copies from the empty set, both giving way to {1, 2}
+        interner.addAllDiff(p3, small(1, 2));
+        interner.addAllDiff(p4, small(1, 2));
+        // no change: not counted
+        interner.addAllDiff(p2, small(1, 2));
+        // three holders: copy, new set
+        interner.addAllDiff(p2, small(5));
+        // from the empty set, then from an unshared set: two copies, new sets
+        interner.addAllDiff(p5, small(7));
+        interner.unshare(p5);
+        interner.addAllDiff(p5, small(8));
+        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3),
+                interner.counters());
+    }
+
     /**
      * Random sequences of changes on several pointers, against a copying
      * interner kept here: after each step every pointer's set has the same
