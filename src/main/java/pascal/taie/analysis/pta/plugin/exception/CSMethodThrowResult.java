@@ -22,12 +22,15 @@
 
 package pascal.taie.analysis.pta.plugin.exception;
 
+import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.ir.proginfo.ExceptionEntry;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.SetEx;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -40,10 +43,71 @@ public class CSMethodThrowResult {
 
     private final SetEx<CSObj> uncaughtExceptions;
 
-    CSMethodThrowResult(Supplier<SetEx<CSObj>> setFactory) {
+    /**
+     * The exception entries of the method; null when it has none.
+     */
+    private final Catchers catchers;
+
+    /**
+     * The exception entries that may catch what each statement of a method
+     * throws, indexed by statement index.
+     *
+     * @param stmts   the statements of the method's IR
+     * @param byIndex for each statement index, the entries that cover the
+     *                statement, in the order of the exception table, or
+     *                null if none does
+     */
+    record Catchers(List<Stmt> stmts, ExceptionEntry[][] byIndex) {
+
+        /**
+         * @return the entries that cover {@code stmt}, or null if none does
+         * or {@code stmt} is not a statement of the method's IR (such as a
+         * synthetic call site)
+         */
+        ExceptionEntry[] of(Stmt stmt) {
+            int index = stmt.getIndex();
+            if (index < 0 || index >= byIndex.length) {
+                return null;
+            }
+            ExceptionEntry[] entries = byIndex[index];
+            return entries != null && stmts.get(index) == stmt ? entries : null;
+        }
+    }
+
+    CSMethodThrowResult(Supplier<SetEx<CSObj>> setFactory, Catchers catchers) {
         this.setFactory = setFactory;
+        this.catchers = catchers;
         explicitExceptions = Maps.newHybridMap();
         uncaughtExceptions = setFactory.get();
+    }
+
+    /**
+     * @return the exception entries that may catch what {@code stmt}
+     * throws, in the order of the method's exception table, or null if
+     * none does
+     */
+    ExceptionEntry[] catchersOf(Stmt stmt) {
+        return catchers == null ? null : catchers.of(stmt);
+    }
+
+    /**
+     * Adds the exceptions to those that {@code callSite}, a call site of
+     * this result's method, may throw; the set lives on the call site, so
+     * that a later visit reads it without a map probe.
+     *
+     * @return the exceptions that are new to the call site; a shared
+     * empty set when none is new
+     */
+    Set<CSObj> propagate(CSCallSite callSite, Set<CSObj> exceptions) {
+        SetEx<CSObj> thrown = callSite.getThrownExceptions();
+        if (thrown == null) {
+            thrown = setFactory.get();
+            callSite.setThrownExceptions(thrown);
+            explicitExceptions.put(callSite.getCallSite(), thrown);
+        } else if (thrown.containsAll(exceptions)) {
+            return Set.of();
+        }
+        return thrown.addAllDiff(exceptions);
     }
 
     /**

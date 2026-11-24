@@ -31,9 +31,30 @@ package pascal.taie.analysis.pta.core.solver;
  */
 public final class ProgressCounters {
 
+    private static final Runnable NO_CHECK = () -> {
+    };
+
     private long pendingEntries;
 
     private long waves;
+
+    private long entriesDrained;
+
+    private long edgesVisited;
+
+    private long emptyDiffs;
+
+    /**
+     * Runs the solver's progress check; a no-op for solvers without a
+     * progress line.
+     */
+    private Runnable progressCheck = NO_CHECK;
+
+    /**
+     * {@link #progressCheck} runs when the drained-entry count has none of
+     * these bits set.
+     */
+    private long checkMask = -1;
 
     /**
      * Sets the number of entries a plugin currently holds pending.
@@ -50,11 +71,63 @@ public final class ProgressCounters {
     }
 
     /**
+     * Counts one entry a plugin drained from its own work list, with
+     * {@code pending} entries left; at the solver's check mask it also
+     * records {@code pending} and runs the solver's progress check, so a
+     * long plugin drain still logs progress lines.
+     */
+    public void drainEntry(long pending) {
+        if ((++entriesDrained & checkMask) == 0) {
+            pendingEntries = pending;
+            progressCheck.run();
+        }
+    }
+
+    /**
+     * Counts one call edge a plugin visited.
+     */
+    public void visitEdge() {
+        ++edgesVisited;
+    }
+
+    /**
+     * Counts one drained entry that brought nothing new.
+     */
+    public void addEmptyDiff() {
+        ++emptyDiffs;
+    }
+
+    /**
+     * Installs the solver's progress check, run by {@link #drainEntry(long)}
+     * when the drained-entry count has none of the bits of
+     * {@code checkMask} set.
+     */
+    void setProgressCheck(Runnable progressCheck, long checkMask) {
+        this.progressCheck = progressCheck;
+        this.checkMask = checkMask;
+    }
+
+    /**
      * Clears the counters; the solver calls it when a solve starts.
      */
     void reset() {
         pendingEntries = 0;
         waves = 0;
+        entriesDrained = 0;
+        edgesVisited = 0;
+        emptyDiffs = 0;
+    }
+
+    public long getEntriesDrained() {
+        return entriesDrained;
+    }
+
+    public long getEdgesVisited() {
+        return edgesVisited;
+    }
+
+    public long getEmptyDiffs() {
+        return emptyDiffs;
     }
 
     public long getPendingEntries() {

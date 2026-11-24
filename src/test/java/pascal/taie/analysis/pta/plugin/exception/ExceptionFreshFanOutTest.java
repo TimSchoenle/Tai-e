@@ -24,10 +24,12 @@ package pascal.taie.analysis.pta.plugin.exception;
 
 import org.junit.jupiter.api.Test;
 import pascal.taie.analysis.Tests;
+import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 
 import java.util.List;
+import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -77,8 +79,8 @@ public class ExceptionFreshFanOutTest {
             emptyDiffs = ExceptionAnalysisAccess.of(solver).emptyDiffs;
             mainUncaught = solver.getCallGraph().reachableMethods()
                     .filter(m -> m.getMethod().getName().equals("main"))
-                    .flatMap(m -> m.<CSMethodThrowResult>getResult(
-                            ExceptionAnalysis.class.getName()).stream())
+                    .map(CSMethod::getThrowResult)
+                    .filter(Objects::nonNull)
                     .flatMap(r -> r.mayThrowUncaught().stream())
                     .map(o -> o.getObject().getType().getName())
                     .toList();

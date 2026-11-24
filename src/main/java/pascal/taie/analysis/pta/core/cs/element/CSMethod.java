@@ -24,6 +24,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
+import pascal.taie.analysis.pta.plugin.exception.CSMethodThrowResult;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.util.AbstractResultHolder;
 import pascal.taie.util.ResultHolder;
@@ -47,6 +48,12 @@ public class CSMethod extends AbstractCSElement {
     private final ArrayList<Edge<CSCallSite, CSMethod>> edges = new ArrayList<>(4);
 
     private final ResultHolder resultHolder = new AbstractResultHolder() {};
+
+    /**
+     * The exception analysis's result on this CS method; null until that
+     * analysis first propagates an exception here.
+     */
+    private CSMethodThrowResult throwResult;
 
     CSMethod(JMethod method, Context context) {
         super(context);
@@ -97,6 +104,22 @@ public class CSMethod extends AbstractCSElement {
 
     public <R> Optional<R> getResult(String id) {
         return Optional.ofNullable(resultHolder.getResult(id));
+    }
+
+    /**
+     * @return the exception analysis's result on this CS method, or null
+     * if that analysis propagated no exception here yet.
+     */
+    public CSMethodThrowResult getThrowResult() {
+        return throwResult;
+    }
+
+    /**
+     * Sets the exception analysis's result on this CS method; for that
+     * analysis, once per CS method.
+     */
+    public void setThrowResult(CSMethodThrowResult throwResult) {
+        this.throwResult = throwResult;
     }
 
     @Override

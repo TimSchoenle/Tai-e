@@ -171,7 +171,7 @@ public class ExceptionWorkOrderTest {
                     .toList();
             methods = again.stream().map(CSMethod::toString).toList();
             methodsWithResult = again.stream()
-                    .filter(m -> m.getResult(ExceptionAnalysis.class.getName()).isPresent())
+                    .filter(m -> m.getThrowResult() != null)
                     .map(CSMethod::toString)
                     .toList();
         }

@@ -128,7 +128,8 @@ public class DefaultSolver implements Solver {
             + " heap_used_mb={}";
 
     private static final String PROGRESS_EXT_FORMAT = PROGRESS_FORMAT
-            + " ext_pending={} ext_waves={}";
+            + " ext_pending={} ext_waves={} ext_drained={} ext_edges={}"
+            + " ext_empty_diffs={}";
 
     private final AnalysisOptions options;
 
@@ -274,6 +275,7 @@ public class DefaultSolver implements Solver {
                     "progress-interval must be >= 0, given: " + progressInterval);
         }
         progressIntervalNanos = progressInterval * NANOS_PER_SECOND;
+        progressCounters.setProgressCheck(this::checkProgressIfOn, progressCheckMask);
     }
 
     @Override
@@ -350,6 +352,7 @@ public class DefaultSolver implements Solver {
         }
         progressCheckMask = checkMask;
         progressIntervalNanos = intervalNanos;
+        progressCounters.setProgressCheck(this::checkProgressIfOn, checkMask);
     }
 
     @Override
@@ -514,7 +517,8 @@ public class DefaultSolver implements Solver {
         long elapsedS = (now - solveStartNanos) / NANOS_PER_SECOND;
         long extPending = progressCounters.getPendingEntries();
         long extWaves = progressCounters.getWaves();
-        if (extPending == 0 && extWaves == 0) {
+        long extDrained = progressCounters.getEntriesDrained();
+        if (extPending == 0 && extWaves == 0 && extDrained == 0) {
             logger.info(PROGRESS_FORMAT,
                     elapsedS, iterations, workList.pointerEntryCount(),
                     workList.callEdgeCount(), callGraph.getNumberOfMethods(),
@@ -526,7 +530,20 @@ public class DefaultSolver implements Solver {
                     workList.callEdgeCount(), callGraph.getNumberOfMethods(),
                     reachableMethods.size(), csCallEdges,
                     csManager.getNumberOfPointers(), heapUsedMb,
-                    extPending, extWaves);
+                    extPending, extWaves, extDrained,
+                    progressCounters.getEdgesVisited(),
+                    progressCounters.getEmptyDiffs());
+        }
+    }
+
+    /**
+     * The progress check that plugins run during their own drains
+     * ({@link ProgressCounters#drainEntry(long)}): a no-op when the progress
+     * line is off.
+     */
+    private void checkProgressIfOn() {
+        if (progressIntervalNanos != 0) {
+            checkProgress();
         }
     }
 

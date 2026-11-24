@@ -35,17 +35,17 @@ import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
 import pascal.taie.analysis.pta.core.cs.element.MapBasedCSManager;
-import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.core.solver.ProgressCounters;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
+import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.proginfo.ExceptionEntry;
-import pascal.taie.ir.stmt.Catch;
-import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.Throw;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.IndexerBitSet;
 import pascal.taie.util.collection.Maps;
@@ -57,7 +57,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -89,14 +88,9 @@ public class ExceptionAnalysis implements Plugin {
     private boolean onlyApp;
 
     /**
-     * The key of the {@link CSMethodThrowResult} of each CS method.
+     * The solver's progress counters, which this analysis bumps.
      */
-    private String resultKey;
-
-    /**
-     * Creates the {@link CSMethodThrowResult} of a CS method.
-     */
-    private Supplier<CSMethodThrowResult> resultFactory;
+    private ProgressCounters progress;
 
     /**
      * Map from thrown variables to the corresponding throw statements.
@@ -104,10 +98,30 @@ public class ExceptionAnalysis implements Plugin {
     private MultiMap<Var, Throw> var2Throws = Maps.newMultiMap();
 
     /**
-     * Map from each method to the result of catch analysis on it.
+     * Map from each method with exception entries to the result of catch
+     * analysis on it: the entries that may catch what each statement
+     * throws, indexed by statement index. Read once per CS method, when
+     * its {@link CSMethodThrowResult} is created.
      */
-    private Map<JMethod, Map<Stmt, List<ExceptionEntry>>> catchers =
-            Maps.newMap(1024);
+    private Map<JMethod, CSMethodThrowResult.Catchers> catchers = Maps.newMap(1024);
+
+    /**
+     * Number of map probes on the propagation path: the explicit-exception
+     * probes of throw statements and the catcher probes made when a
+     * {@link CSMethodThrowResult} is created.
+     */
+    long mapProbes;
+
+    /**
+     * Number of propagations of a non-empty exception set to a statement.
+     */
+    long visits;
+
+    /**
+     * Number of call edges whose callee's uncaught set was read when the
+     * edge was added.
+     */
+    long callEdgeReads;
 
     /**
      * Work-list of exception entries to be propagated.
@@ -134,13 +148,20 @@ public class ExceptionAnalysis implements Plugin {
     /**
      * Work-list items.
      */
-    private sealed interface Work permits Entry, Wave {
+    private sealed interface Work permits Entry, CallEntry, Wave {
     }
 
     /**
      * Exceptions that {@code stmt} of {@code csMethod} may throw.
      */
     private record Entry(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions)
+            implements Work {
+    }
+
+    /**
+     * Exceptions that {@code callSite} may throw.
+     */
+    private record CallEntry(CSCallSite callSite, Set<CSObj> exceptions)
             implements Work {
     }
 
@@ -196,10 +217,12 @@ public class ExceptionAnalysis implements Plugin {
         this.exceptionIndexer = new ExceptionObjIndexer();
         this.setFactory = () -> new IndexerBitSet<>(exceptionIndexer, isSparse);
         this.onlyApp = solver.getOptions().getBoolean("only-app");
-        this.resultKey = getClass().getName();
-        this.resultFactory = () -> new CSMethodThrowResult(setFactory);
+        this.progress = solver.getProgressCounters();
         this.emptyDiffs = 0;
         this.maxWorkListSize = 0;
+        this.mapProbes = 0;
+        this.visits = 0;
+        this.callEdgeReads = 0;
     }
 
     /**
@@ -210,8 +233,29 @@ public class ExceptionAnalysis implements Plugin {
      */
     @Override
     public void onNewMethod(JMethod method) {
-        catchers.put(method,
-                CatchAnalysis.getPotentialCatchers(method.getIR()));
+        IR ir = method.getIR();
+        Map<Stmt, List<ExceptionEntry>> potential = CatchAnalysis.getPotentialCatchers(ir);
+        if (!potential.isEmpty()) {
+            ExceptionEntry[][] byIndex = new ExceptionEntry[ir.getStmts().size()][];
+            potential.forEach((stmt, entries) ->
+                    byIndex[stmt.getIndex()] = entries.toArray(new ExceptionEntry[0]));
+            catchers.put(method, new CSMethodThrowResult.Catchers(ir.getStmts(), byIndex));
+        }
+    }
+
+    /**
+     * @return the {@link CSMethodThrowResult} of {@code csMethod}, created
+     * on the first call.
+     */
+    private CSMethodThrowResult throwResultOf(CSMethod csMethod) {
+        CSMethodThrowResult result = csMethod.getThrowResult();
+        if (result == null) {
+            ++mapProbes;
+            result = new CSMethodThrowResult(setFactory,
+                    catchers.get(csMethod.getMethod()));
+            csMethod.setThrowResult(result);
+        }
+        return result;
     }
 
     /**
@@ -263,18 +307,16 @@ public class ExceptionAnalysis implements Plugin {
     @Override
     public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (propagatesExceptions(edge)) {
-            CSMethod callee = edge.getCallee();
-            Optional<CSMethodThrowResult> csResult = callee.getResult(resultKey);
-            if (csResult.isPresent()) {
+            CSMethodThrowResult csResult = edge.getCallee().getThrowResult();
+            if (csResult != null) {
+                ++callEdgeReads;
                 // the live set, as the unmodifiable view passed before:
                 // it is only read, and the work-list is empty, so this
                 // entry is drained first, before addUncaughtExceptions
                 // can grow the set
-                Set<CSObj> exceptions = csResult.get().uncaughtSet();
+                Set<CSObj> exceptions = csResult.uncaughtSet();
                 if (!exceptions.isEmpty()) {
-                    CSMethod caller = edge.getCallSite().getContainer();
-                    Invoke invoke = edge.getCallSite().getCallSite();
-                    workList.add(new Entry(caller, invoke, exceptions));
+                    workList.add(new CallEntry(edge.getCallSite(), exceptions));
                     propagateExceptions();
                 }
             }
@@ -292,6 +334,7 @@ public class ExceptionAnalysis implements Plugin {
         int peak = 0;
         while (!workList.isEmpty()) {
             peak = Math.max(peak, workList.size());
+            progress.drainEntry(workList.size());
             Work head = workList.peek();
             if (head instanceof Wave wave) {
                 // the wave stays at the head until its last edge is taken,
@@ -302,16 +345,19 @@ public class ExceptionAnalysis implements Plugin {
                     workList.poll();
                 }
                 if (edge != null) {
-                    CSCallSite callSite = edge.getCallSite();
-                    propagate(callSite.getContainer(), callSite.getCallSite(),
-                            wave.exceptions);
+                    progress.visitEdge();
+                    propagate(edge.getCallSite(), wave.exceptions);
                 }
+            } else if (head instanceof CallEntry callEntry) {
+                workList.poll();
+                propagate(callEntry.callSite(), callEntry.exceptions());
             } else {
                 workList.poll();
                 Entry entry = (Entry) head;
                 propagate(entry.csMethod(), entry.stmt(), entry.exceptions());
             }
         }
+        progress.setPendingEntries(0);
         maxWorkListSize = Math.max(maxWorkListSize, peak);
         if (peak > TRIM_ABOVE) {
             workList = new ArrayDeque<>();
@@ -323,20 +369,57 @@ public class ExceptionAnalysis implements Plugin {
      * throw, and queues a wave of those that the method newly does not catch.
      */
     private void propagate(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
+        if (skips(csMethod, exceptions)) {
+            return;
+        }
+        CSMethodThrowResult result = throwResultOf(csMethod);
+        ++mapProbes;
+        handleNew(csMethod, result, stmt, result.propagate(stmt, exceptions));
+    }
+
+    /**
+     * Adds the exceptions to those that {@code callSite} may throw, and
+     * queues a wave of those that its container newly does not catch.
+     */
+    private void propagate(CSCallSite callSite, Set<CSObj> exceptions) {
+        CSMethod csMethod = callSite.getContainer();
+        if (skips(csMethod, exceptions)) {
+            return;
+        }
+        CSMethodThrowResult result = throwResultOf(csMethod);
+        handleNew(csMethod, result, callSite.getCallSite(),
+                result.propagate(callSite, exceptions));
+    }
+
+    /**
+     * @return whether a propagation of {@code exceptions} into
+     * {@code csMethod} does nothing; otherwise counts it as a visit.
+     */
+    private boolean skips(CSMethod csMethod, Set<CSObj> exceptions) {
         // Temporary fix: skip non-application methods when only-app is enabled.
         if (onlyApp && !csMethod.getMethod().isApplication()) {
-            return;
+            return true;
         }
         if (exceptions.isEmpty()) {
-            return;
+            return true;
         }
-        CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
-        Set<CSObj> diff = result.propagate(stmt, exceptions);
+        ++visits;
+        return false;
+    }
+
+    /**
+     * Passes the exceptions {@code diff} new to {@code stmt} of
+     * {@code csMethod} to its handlers, and queues a wave of those that the
+     * method newly does not catch.
+     */
+    private void handleNew(CSMethod csMethod, CSMethodThrowResult result,
+                           Stmt stmt, Set<CSObj> diff) {
         if (diff.isEmpty()) {
             emptyDiffs++;
+            progress.addEmptyDiff();
             return;
         }
-        Set<CSObj> uncaught = analyzeIntraUncaught(stmt, diff, csMethod);
+        Set<CSObj> uncaught = analyzeIntraUncaught(stmt, diff, csMethod, result);
         // only the exceptions new to the uncaught set go out: every
         // other one went out over each edge into csMethod when it
         // entered the set, or with the whole set when the edge was
@@ -346,6 +429,7 @@ public class ExceptionAnalysis implements Plugin {
                 : result.addUncaughtExceptions(uncaught);
         if (!fresh.isEmpty() && csMethod.getEdgeCount() > 0) {
             workList.add(new Wave(csMethod, fresh));
+            progress.addWave();
         }
     }
 
@@ -367,49 +451,67 @@ public class ExceptionAnalysis implements Plugin {
      * @param currentStmt   the statements that throws exceptions
      * @param newExceptions the new-found exceptions thrown by currentStmt
      * @param csMethod      the csMethod containing currentStmt
-     * @return the exceptions thrown by currentStmt but not caught by csMethod
+     * @param result        the throw result of csMethod
+     * @return the exceptions thrown by currentStmt but not caught by
+     * csMethod: {@code newExceptions} itself when no handler catches any
      */
     private Set<CSObj> analyzeIntraUncaught(
             Stmt currentStmt,
             Set<CSObj> newExceptions,
-            CSMethod csMethod) {
-        List<ExceptionEntry> entries = catchers.getOrDefault(csMethod.getMethod(), Map.of())
-                .get(currentStmt);
-        if (entries != null) {
-            Context ctx = csMethod.getContext();
-            Iterable<CSObj> toCheck = inGlobalIndexOrder(newExceptions);
-            for (ExceptionEntry entry : entries) {
-                SetEx<CSObj> uncaughtExceptions = setFactory.get();
-                for (CSObj newException : toCheck) {
-                    Obj exObj = newException.getObject();
-                    if (typeSystem.isSubtype(entry.catchType(), exObj.getType())) {
-                        Catch catchStmt = entry.handler();
-                        Var exceptionRef = catchStmt.getExceptionRef();
-                        solver.addVarPointsTo(ctx, exceptionRef, newException);
-                    } else {
-                        uncaughtExceptions.add(newException);
-                    }
-                }
-                newExceptions = uncaughtExceptions;
-                toCheck = inGlobalIndexOrder(uncaughtExceptions);
-            }
+            CSMethod csMethod,
+            CSMethodThrowResult result) {
+        ExceptionEntry[] entries = result.catchersOf(currentStmt);
+        if (entries == null) {
+            return newExceptions;
         }
-        return newExceptions;
+        Context ctx = csMethod.getContext();
+        // the exceptions still uncaught, in global index order, kept in
+        // place: each handler keeps a prefix of what the previous one kept
+        CSObj[] toCheck = inGlobalIndexOrder(newExceptions);
+        int size = toCheck.length;
+        for (ExceptionEntry entry : entries) {
+            Type catchType = entry.catchType();
+            Var exceptionRef = entry.handler().getExceptionRef();
+            Type lastType = null;
+            boolean lastCaught = false;
+            int kept = 0;
+            for (int i = 0; i < size; ++i) {
+                CSObj newException = toCheck[i];
+                Type type = newException.getObject().getType();
+                if (type != lastType) {
+                    lastType = type;
+                    lastCaught = typeSystem.isSubtype(catchType, type);
+                }
+                if (lastCaught) {
+                    solver.addVarPointsTo(ctx, exceptionRef, newException);
+                } else {
+                    toCheck[kept++] = newException;
+                }
+            }
+            size = kept;
+        }
+        if (size == toCheck.length) {
+            return newExceptions;
+        }
+        SetEx<CSObj> uncaughtExceptions = setFactory.get();
+        for (int i = 0; i < size; ++i) {
+            uncaughtExceptions.add(toCheck[i]);
+        }
+        return uncaughtExceptions;
     }
 
     /**
      * @return the given objects in the order of their global indexes, the
      * iteration order of sets over the global {@link CSObj} indexer, so the
      * solver receives caught objects in the same order whichever indexer
-     * numbers the exception sets.
+     * numbers the exception sets; a new array the caller may change.
      */
-    private static Iterable<CSObj> inGlobalIndexOrder(Set<CSObj> objs) {
-        if (objs.size() < 2) {
-            return objs;
-        }
+    private static CSObj[] inGlobalIndexOrder(Set<CSObj> objs) {
         CSObj[] sorted = objs.toArray(new CSObj[0]);
-        Arrays.sort(sorted, BY_GLOBAL_INDEX);
-        return Arrays.asList(sorted);
+        if (sorted.length > 1) {
+            Arrays.sort(sorted, BY_GLOBAL_INDEX);
+        }
+        return sorted;
     }
 
     @Override
@@ -425,9 +527,10 @@ public class ExceptionAnalysis implements Plugin {
         for (CSMethod csMethod : solver.getCallGraph()) {
             JMethod method = csMethod.getMethod();
             MethodThrowResult result = throwResult.getOrCreateResult(method);
-            Optional<CSMethodThrowResult> csResult =
-                    csMethod.getResult(getClass().getName());
-            csResult.ifPresent(result::addCSMethodThrowResult);
+            CSMethodThrowResult csResult = csMethod.getThrowResult();
+            if (csResult != null) {
+                result.addCSMethodThrowResult(csResult);
+            }
         }
         solver.getResult().storeResult(getClass().getName(), throwResult);
         clear();

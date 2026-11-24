@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.util.collection.SetEx;
 import pascal.taie.util.collection.Sets;
 
 import java.util.Collections;
@@ -46,6 +47,12 @@ public class CSCallSite extends AbstractCSElement {
      * Call edges from this call site.
      */
     private final Set<Edge<CSCallSite, CSMethod>> edges = Sets.newHybridSet();
+
+    /**
+     * Exceptions that the exception analysis found this call site may
+     * throw; null until it finds the first.
+     */
+    private SetEx<CSObj> thrownExceptions;
 
     CSCallSite(Invoke callSite, Context context, CSMethod container) {
         super(context);
@@ -70,6 +77,23 @@ public class CSCallSite extends AbstractCSElement {
 
     public Set<Edge<CSCallSite, CSMethod>> getEdges() {
         return Collections.unmodifiableSet(edges);
+    }
+
+    /**
+     * @return the live set of exceptions that the exception analysis found
+     * this call site may throw, or null if it found none yet; only that
+     * analysis changes it.
+     */
+    public SetEx<CSObj> getThrownExceptions() {
+        return thrownExceptions;
+    }
+
+    /**
+     * Sets the set of exceptions this call site may throw; for the
+     * exception analysis, once per call site.
+     */
+    public void setThrownExceptions(SetEx<CSObj> thrownExceptions) {
+        this.thrownExceptions = thrownExceptions;
     }
 
     @Override
