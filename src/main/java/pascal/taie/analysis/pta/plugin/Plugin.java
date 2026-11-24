@@ -69,6 +69,19 @@ public interface Plugin {
     }
 
     /**
+     * Invoked with the pta option {@code release-solver-state} after the
+     * fixed point, once the solver has released its own solve-only state,
+     * right before {@link #onFinish()}: a plugin may drop here the state
+     * that only served the solve. The solver refuses new work from then on;
+     * the points-to sets and the call graph stay readable. With the option
+     * {@code release-pointer-flow-graph} the out edges of the pointers are
+     * already dropped here (reading them throws). Without
+     * {@code release-solver-state} this is not invoked.
+     */
+    default void onRelease() {
+    }
+
+    /**
      * Invoked when pointer analysis finishes.
      * Pointer analysis is supposed to have been finished at this stage,
      * thus this call back should NOT modify pointer analysis results.

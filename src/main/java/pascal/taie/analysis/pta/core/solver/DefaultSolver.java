@@ -500,6 +500,7 @@ public class DefaultSolver implements Solver {
         }
         if (options.getBoolean("release-solver-state")) {
             releaseSolverState();
+            plugin.onRelease();
         }
         plugin.onFinish();
     }
@@ -553,18 +554,31 @@ public class DefaultSolver implements Solver {
 
     /**
      * Releases the state that only the solve reads, before the plugins'
-     * onFinish: the work list (empty at the fixed point; after a time-limit
-     * stop its entries would never be processed either), the out-edge
-     * dedup sets of all pointers, mock pointers included (the out edges
-     * stay; new edges are refused) and the type filter memos (pure caches,
-     * rebuilt by a later application). New work is refused afterwards,
-     * also for pointers created later, whose dedup state is live.
+     * onRelease and onFinish: the work list (empty at the fixed point;
+     * after a time-limit stop its entries would never be processed either),
+     * the out-edge dedup sets of all pointers, mock pointers included (new
+     * edges are refused) and the type filter memos (pure caches, rebuilt by
+     * a later application). New work is refused afterwards, also for
+     * pointers created later, whose dedup state is live.
+     * <p>
+     * With the option {@code release-pointer-flow-graph} it also drops the
+     * out edges of those pointers, the pointer flow graph. The points-to
+     * sets and the call graph do not read it; its readers after the solve
+     * are the object flow graph of the result (Zipper, the taint flow
+     * graph), the taint plugin's and the reflective-args verifier's
+     * onFinish, and plugins that walk out edges. Each of them then fails
+     * with an {@link IllegalStateException} instead of reading an empty
+     * graph. Without the option the out edges stay.
      */
     private void releaseSolverState() {
         solverStateReleased = true;
         workList = new WorkList(ptsFactory);
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
         csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
+        if (options.getBoolean("release-pointer-flow-graph")) {
+            csManager.pointers().forEach(Pointer::releaseOutEdges);
+            csManager.mockPointers().forEach(Pointer::releaseOutEdges);
+        }
         typeFilters.values().forEach(TypeFilter::releaseMemo);
         TypeFilter.clearMemos();
     }
@@ -709,13 +723,20 @@ public class DefaultSolver implements Solver {
         Context context = recv.getContext();
         Var var = recv.getVar();
         for (Invoke callSite : var.getInvokes()) {
+            // the CS call site, looked up once per call site and only at
+            // its first resolved callee (where the lookup always happened)
+            CSCallSite[] csCallSiteOnce = new CSCallSite[1];
             pts.forEach(recvObj -> {
                 // resolve callee
                 JMethod callee = CallGraphs.resolveCallee(
                         recvObj.getObject().getType(), callSite);
                 if (callee != null) {
                     // select context
-                    CSCallSite csCallSite = csManager.getCSCallSite(context, callSite);
+                    CSCallSite csCallSite = csCallSiteOnce[0];
+                    if (csCallSite == null) {
+                        csCallSite = csManager.getCSCallSite(context, callSite);
+                        csCallSiteOnce[0] = csCallSite;
+                    }
                     Context calleeContext = contextSelector.selectContext(
                             csCallSite, recvObj, callee);
                     // build call edge

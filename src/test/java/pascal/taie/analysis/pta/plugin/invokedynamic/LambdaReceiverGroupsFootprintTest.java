@@ -1,0 +1,84 @@
+/*
+ * Tai-e: A Static Analysis Framework for Java
+ *
+ * Copyright (C) 2022 Tian Tan <tiantan@nju.edu.cn>
+ * Copyright (C) 2022 Yue Li <yueli@nju.edu.cn>
+ *
+ * This file is part of Tai-e.
+ *
+ * Tai-e is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License
+ * as published by the Free Software Foundation, either version 3
+ * of the License, or (at your option) any later version.
+ *
+ * Tai-e is distributed in the hope that it will be useful,but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+ * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with Tai-e. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package pascal.taie.analysis.pta.plugin.invokedynamic;
+
+import org.junit.jupiter.api.Test;
+
+import java.lang.ref.Reference;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Heap bytes a receiver grouping holds per key, measured over many
+ * groupings whose keys and objects are shared, so only the grouping's own
+ * structure is counted. A map entry per key (a LinkedHashMap per grouping)
+ * costs about 90 bytes per key at three keys and 190 at one key; the
+ * parallel arrays about 32 and 80 (with compressed oops: a 32-byte grouping
+ * object plus two arrays of 24 bytes at one key, of 32 bytes at three keys).
+ */
+class LambdaReceiverGroupsFootprintTest {
+
+    private static final int GROUPINGS = 100_000;
+
+    private static final String[] KEYS = {"A", "B", "C"};
+
+    private static final Object OBJ = new Object();
+
+    @Test
+    void threeSingleObjectKeysTakeUnder48BytesPerKey() {
+        double perKey = bytesPerKey(3);
+        System.out.println("[spd] receiver groups bytes per key (3 keys): " + perKey);
+        assertTrue(perKey < 48, "bytes per key: " + perKey);
+    }
+
+    @Test
+    void oneSingleObjectKeyTakesUnder120Bytes() {
+        double perKey = bytesPerKey(1);
+        System.out.println("[spd] receiver groups bytes per key (1 key): " + perKey);
+        assertTrue(perKey < 120, "bytes per key: " + perKey);
+    }
+
+    private static double bytesPerKey(int keyCount) {
+        long before = usedAfterGc();
+        Object[] held = new Object[GROUPINGS];
+        long array = usedAfterGc() - before;
+        for (int i = 0; i < GROUPINGS; ++i) {
+            ReceiverGroups<String, Object> g = new ReceiverGroups<>();
+            for (int k = 0; k < keyCount; ++k) {
+                g.add(KEYS[k], OBJ);
+            }
+            held[i] = g;
+        }
+        long used = usedAfterGc() - before - array;
+        Reference.reachabilityFence(held);
+        return (double) used / ((long) GROUPINGS * keyCount);
+    }
+
+    private static long usedAfterGc() {
+        Runtime runtime = Runtime.getRuntime();
+        for (int i = 0; i < 3; ++i) {
+            System.gc();
+        }
+        return runtime.totalMemory() - runtime.freeMemory();
+    }
+}
