@@ -363,10 +363,29 @@ public class LambdaAnalysis implements Plugin {
     private static Map<Type, List<CSObj>> groupByType(PointsToSet objs) {
         Map<Type, List<CSObj>> byType = new LinkedHashMap<>();
         for (CSObj obj : objs) {
+            // most groups hold one object, and a first grouping is kept in
+            // recvByType: start at one slot, not ArrayList's default ten
             byType.computeIfAbsent(obj.getObject().getType(),
-                    t -> new ArrayList<>()).add(obj);
+                    t -> new ArrayList<>(1)).add(obj);
         }
         return byType;
+    }
+
+    /**
+     * Appends {@code groups} to {@code cached} in place: a group of a new key
+     * is copied into an exactly sized list after the existing keys, a group
+     * of a known key is appended to that key's list. Keys and objects keep
+     * their first-seen order.
+     */
+    static <K, V> void appendGroups(Map<K, List<V>> cached, Map<K, List<V>> groups) {
+        groups.forEach((key, objs) -> {
+            List<V> list = cached.get(key);
+            if (list == null) {
+                cached.put(key, new ArrayList<>(objs));
+            } else {
+                list.addAll(objs);
+            }
+        });
     }
 
     /**
@@ -662,8 +681,7 @@ public class LambdaAnalysis implements Plugin {
         Map<Type, List<CSObj>> ptsByType = groupByType(pts);
         Map<Type, List<CSObj>> cached = Objects.requireNonNull(recvByType.get(csVar),
                 "no receiver grouping for a lambda receiver variable");
-        ptsByType.forEach((type, objs) ->
-                cached.computeIfAbsent(type, t -> new ArrayList<>()).addAll(objs));
+        appendGroups(cached, ptsByType);
         infos.forEach(info -> {
             // handle the case of that new objects reach base variable
             // of lambda invocation
