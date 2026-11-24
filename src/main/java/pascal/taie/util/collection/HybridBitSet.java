@@ -211,6 +211,62 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
+     * @return true if this set and {@code c} are both in the large form, of
+     * the same indexer, with their bits in sparse bit sets of the same
+     * context: the case in which {@link #unionSummary}, {@link #isUnionOf}
+     * and {@link #unionDiff} read {@link #addAllDiff addAllDiff(c)} without
+     * changing this set.
+     */
+    public boolean canSummarizeUnion(HybridBitSet<?> c) {
+        return form() == FORM_LARGE && c.form() == FORM_LARGE && indexer == c.indexer
+                && set instanceof GenericBitSet<E> bits
+                && c.set instanceof GenericBitSet<?> other
+                && bits.isSparseWith(other);
+    }
+
+    /**
+     * Reads the set that {@link #addAllDiff addAllDiff(c)} would make of
+     * this set, without changing it; requires
+     * {@link #canSummarizeUnion canSummarizeUnion(c)}.
+     *
+     * @return the {@link #sequenceHash()} of that set and its size, in the
+     * format of {@link SparseBitSet#orSummary}
+     */
+    public long unionSummary(HybridBitSet<?> c) {
+        long bits = ((GenericBitSet<E>) set).unionSummary((GenericBitSet<?>) c.set);
+        int hash = largeSequenceHash(SparseBitSet.unionHash(bits));
+        return (bits & 0xFFFFFFFF00000000L) | (hash & 0xFFFFFFFFL);
+    }
+
+    /**
+     * @return true if this set is the same by {@link #sameSequence} as the
+     * set that {@code a.addAllDiff(b)} would make of {@code a}, where
+     * {@code summary} is {@code a.unionSummary(b)}; requires
+     * {@code a.canSummarizeUnion(b)}.
+     */
+    public boolean isUnionOf(HybridBitSet<?> a, HybridBitSet<?> b, long summary) {
+        // a superset of both of the size of the union is the union
+        return form() == FORM_LARGE && indexer == a.indexer
+                && set instanceof GenericBitSet<E> bits
+                && bits.isSparseWith((GenericBitSet<?>) a.set)
+                && bits.size() == SparseBitSet.unionCardinality(summary)
+                && bits.containsAll(a.set)
+                && bits.containsAll(b.set);
+    }
+
+    /**
+     * @return the difference that {@link #addAllDiff addAllDiff(c)} would
+     * return, with the same form and elements, without changing this set;
+     * requires {@link #canSummarizeUnion canSummarizeUnion(c)}.
+     */
+    public HybridBitSet<E> unionDiff(HybridBitSet<? extends E> c) {
+        HybridBitSet<E> diff = new HybridBitSet<>(indexer, isSparse);
+        diff.set = ((GenericBitSet<E>) set).addedBy((GenericBitSet<?>) c.set);
+        diff.isLargeSet = true;
+        return diff;
+    }
+
+    /**
      * @return true if this set is in its large (bit set) form.
      */
     public boolean isLarge() {
@@ -231,9 +287,17 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
                 hash = 31 * hash + indexer.getIndex(e);
             }
         } else if (form == FORM_LARGE) {
-            hash = 31 * hash + set.hashCode();
+            hash = largeSequenceHash(set.hashCode());
         }
         return hash;
+    }
+
+    /**
+     * @return the {@link #sequenceHash()} of a large set whose bit set has
+     * the given hash code.
+     */
+    private static int largeSequenceHash(int setHash) {
+        return 31 * FORM_LARGE + setHash;
     }
 
     /**

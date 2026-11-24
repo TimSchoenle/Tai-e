@@ -494,6 +494,10 @@ public class DefaultSolver implements Solver {
         } else if (timeLimiter != null) { // finish normally but time limiter is still running
             timeLimiter.stop();
         }
+        if (interner != null) {
+            logger.info("Points-to set interner: {} shared sets, {}",
+                    interner.size(), interner.counters());
+        }
         if (options.getBoolean("release-solver-state")) {
             releaseSolverState();
         }

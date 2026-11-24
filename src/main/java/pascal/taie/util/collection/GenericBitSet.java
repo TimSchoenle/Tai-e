@@ -214,7 +214,16 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
 
     @Override
     public int hashCode() {
-        return Hashes.hash(getContext(), bitSet);
+        return hash(getContext(), bitSet.hashCode());
+    }
+
+    /**
+     * @return the {@link #hashCode()} of a bit set of the given context
+     * whose bits have the given hash code, as
+     * {@link Hashes#hash(Object, Object)} without boxing.
+     */
+    private static int hash(Object context, int bitsHash) {
+        return context.hashCode() * 31 + bitsHash;
     }
 
     /**
@@ -223,6 +232,41 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
      */
     public boolean sameBits(GenericBitSet<?> other) {
         return getContext() == other.getContext() && bitSet.equals(other.bitSet);
+    }
+
+    /**
+     * @return true if this set and {@code other} have the same context and
+     * both keep their bits in a {@link SparseBitSet}, so that
+     * {@link #unionSummary} and {@link #addedBy} apply.
+     */
+    public boolean isSparseWith(GenericBitSet<?> other) {
+        return getContext() == other.getContext()
+                && bitSet instanceof SparseBitSet
+                && other.bitSet instanceof SparseBitSet;
+    }
+
+    /**
+     * Reads what {@code addAll(other)} would make of this set without
+     * changing it; requires {@link #isSparseWith isSparseWith(other)}.
+     *
+     * @return the {@link #hashCode()} of the union in the low 32 bits and
+     * its size in the high 32 bits, as {@link SparseBitSet#orSummary}
+     */
+    public long unionSummary(GenericBitSet<?> other) {
+        long bits = ((SparseBitSet) bitSet).orSummary((SparseBitSet) other.bitSet);
+        int hash = hash(getContext(), SparseBitSet.unionHash(bits));
+        return (bits & 0xFFFFFFFF00000000L) | (hash & 0xFFFFFFFFL);
+    }
+
+    /**
+     * @return a new set of this context holding the elements that
+     * {@code addAll(other)} would add to this set; requires
+     * {@link #isSparseWith isSparseWith(other)}. Neither set changes.
+     */
+    public GenericBitSet<E> addedBy(GenericBitSet<?> other) {
+        GenericBitSet<E> result = newSet();
+        result.bitSet = ((SparseBitSet) other.bitSet).minus((SparseBitSet) bitSet);
+        return result;
     }
 
     @Override

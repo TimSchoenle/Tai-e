@@ -361,6 +361,74 @@ class PointsToSetInternerTest {
         assertEquals(2, interner.size());
     }
 
+    @Test
+    void countersCountEachChangeByHolderCount() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        Pointer p4 = TestElements.pointer(4);
+        Pointer p5 = TestElements.pointer(5);
+        // from the empty set (its pin counts as a holder): copy, new set
+        interner.addAllDiff(p1, small(1, 2));
+        // copy, which gives way to the set p1 holds
+        interner.addAllDiff(p2, small(1, 2));
+        // two holders: copy, new set
+        interner.addAllDiff(p1, small(3));
+        // sole holder: in place
+        interner.addAllDiff(p1, small(4));
+        // two copies from the empty set, both giving way to {1, 2}
+        interner.addAllDiff(p3, small(1, 2));
+        interner.addAllDiff(p4, small(1, 2));
+        // no change: not counted
+        interner.addAllDiff(p2, small(1, 2));
+        // three holders: copy, new set
+        interner.addAllDiff(p2, small(5));
+        // from the empty set, then from an unshared set: two copies, new sets
+        interner.addAllDiff(p5, small(7));
+        interner.unshare(p5);
+        interner.addAllDiff(p5, small(8));
+        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3, 0, 0),
+                interner.counters());
+    }
+
+    @Test
+    void sharedLargeSetTakesAnEqualSharedResultWithoutACopy() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        Pointer p4 = TestElements.pointer(4);
+        interner.addAllDiff(p1, large(1, 2, 3, 40));
+        interner.addAllDiff(p2, large(1, 2, 3, 40));
+        interner.addAllDiff(p4, large(1, 2, 3, 40));
+        PointsToSet before = p1.getPointsToSet();
+        assertSame(before, p2.getPointsToSet());
+        interner.addAllDiff(p3, large(1, 2, 3, 40, 50));
+        PointsToSet target = p3.getPointsToSet();
+        int sharedSets = interner.size();
+        long copies = interner.counters().copies();
+
+        PointsToSet diff = interner.addAllDiff(p1, large(3, 50));
+        assertEquals(copies, interner.counters().copies(), "the held set was copied");
+        assertSame(target, p1.getPointsToSet());
+        assertEquals(List.of(50), sequence(diff));
+        assertTrue(isLarge(diff));
+        assertFalse(diff.isShared());
+        assertSame(before, p2.getPointsToSet());
+        assertEquals(List.of(1, 2, 3, 40), sequence(before));
+        assertEquals(sharedSets, interner.size());
+
+        // a probe that finds nothing copies as before (p2 and p4 hold the set)
+        PointsToSet missDiff = interner.addAllDiff(p2, large(60));
+        assertEquals(copies + 1, interner.counters().copies());
+        assertEquals(List.of(60), sequence(missDiff));
+        assertTrue(isLarge(missDiff));
+        assertEquals(List.of(1, 2, 3, 40, 60), sequence(p2.getPointsToSet()));
+        assertSame(before, p4.getPointsToSet());
+        assertEquals(List.of(1, 2, 3, 40), sequence(before));
+        assertEquals(new PointsToSetInterner.Counters(0, 0, 5, 1, 5, 2, 2, 1),
+                interner.counters());
+    }
+
     /**
      * Random sequences of changes on several pointers, against a copying
      * interner kept here: after each step every pointer's set has the same
@@ -371,6 +439,8 @@ class PointsToSetInternerTest {
      */
     @Test
     void inPlaceChangeMatchesTheCopyingInterner() {
+        long probes = 0;
+        long probeHits = 0;
         for (long seed = 1; seed <= 40; ++seed) {
             Random random = new Random(seed);
             PointsToSetInterner sharing = new PointsToSetInterner(factory, 2);
@@ -426,7 +496,12 @@ class PointsToSetInternerTest {
                 // the distinct non-empty held sets plus the empty set
                 assertEquals(distinct.size() + 1, sharing.size(), at);
             }
+            probes += sharing.counters().probes();
+            probeHits += sharing.counters().probeHits();
         }
+        // the sequences take both outcomes of a probe before a copy
+        assertTrue(probeHits > 0, "no probe found its result");
+        assertTrue(probes > probeHits, "every probe found its result");
     }
 
     /**
