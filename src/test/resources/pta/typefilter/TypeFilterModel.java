@@ -49,7 +49,9 @@ class TypeFilterModel {
         new Factory().make();
         new Factory().make();
         new Factory().make();
-        // more object types than one word of a type memo holds
+        // more object types than one word of a type memo holds; two
+        // shapes objects give every shape type two objects
+        new Shapes().make();
         new Shapes().make();
     }
 }
