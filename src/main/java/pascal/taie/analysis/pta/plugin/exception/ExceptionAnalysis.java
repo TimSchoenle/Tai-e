@@ -116,6 +116,17 @@ public class ExceptionAnalysis implements Plugin {
     private Queue<Entry> workList = new ArrayDeque<>();
 
     /**
+     * Number of drained entries that brought no exception new to their
+     * statement.
+     */
+    long emptyDiffs;
+
+    /**
+     * Largest number of items the work-list held.
+     */
+    int maxWorkListSize;
+
+    /**
      * Work-list entries.
      */
     private record Entry(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
@@ -135,6 +146,8 @@ public class ExceptionAnalysis implements Plugin {
         this.onlyApp = solver.getOptions().getBoolean("only-app");
         this.resultKey = getClass().getName();
         this.resultFactory = () -> new CSMethodThrowResult(setFactory);
+        this.emptyDiffs = 0;
+        this.maxWorkListSize = 0;
     }
 
     /**
@@ -225,6 +238,7 @@ public class ExceptionAnalysis implements Plugin {
      */
     private void propagateExceptions() {
         while (!workList.isEmpty()) {
+            maxWorkListSize = Math.max(maxWorkListSize, workList.size());
             Entry entry = workList.poll();
             CSMethod csMethod = entry.csMethod();
             // Temporary fix: skip non-application methods when only-app is enabled.
@@ -238,11 +252,19 @@ public class ExceptionAnalysis implements Plugin {
             Stmt stmt = entry.stmt();
             CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
             Set<CSObj> diff = result.propagate(stmt, exceptions);
-            if (!diff.isEmpty()) {
+            if (diff.isEmpty()) {
+                emptyDiffs++;
+            } else {
                 Set<CSObj> uncaught = analyzeIntraUncaught(
                         stmt, diff, csMethod);
-                if (!uncaught.isEmpty()) {
-                    result.addUncaughtExceptions(uncaught);
+                // only the exceptions new to the uncaught set go out: every
+                // other one went out over each edge into csMethod when it
+                // entered the set, or with the whole set when the edge was
+                // added (onNewCallEdge), and those entries drained first
+                Set<CSObj> fresh = uncaught.isEmpty()
+                        ? uncaught
+                        : result.addUncaughtExceptions(uncaught);
+                if (!fresh.isEmpty()) {
                     solver.getCallGraph()
                             .edgesInTo(csMethod)
                             .filter(ExceptionAnalysis::propagatesExceptions)
@@ -250,7 +272,7 @@ public class ExceptionAnalysis implements Plugin {
                                 CSCallSite callSite = edge.getCallSite();
                                 CSMethod caller = callSite.getContainer();
                                 Invoke invoke = callSite.getCallSite();
-                                workList.add(new Entry(caller, invoke, uncaught));
+                                workList.add(new Entry(caller, invoke, fresh));
                             });
                 }
             }
@@ -342,11 +364,14 @@ public class ExceptionAnalysis implements Plugin {
     }
 
     /**
-     * Logs one line: how many exception objects got a local index and, for a
-     * {@link MapBasedCSManager}, how many throwable objects got a global
+     * Logs the work counters, then one line: how many exception objects
+     * got a local index and, for a {@link MapBasedCSManager}, how many
+     * throwable objects got a global
      * index and whether and when they ran out of their reserved range.
      */
     private void logCensus() {
+        logger.info("Exception work: {} entries brought nothing new;"
+                + " work-list peak {} items", emptyDiffs, maxWorkListSize);
         if (csManager instanceof MapBasedCSManager mapBased) {
             MapBasedCSManager.ThrowableCensus census = mapBased.getThrowableCensus();
             logger.info("Exception objects: {} indexed by exception analysis;"

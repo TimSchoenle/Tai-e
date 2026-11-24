@@ -63,8 +63,17 @@ public class CSMethodThrowResult {
         return thrown.addAllDiff(exceptions);
     }
 
-    void addUncaughtExceptions(Set<CSObj> exceptions) {
-        uncaughtExceptions.addAll(exceptions);
+    /**
+     * Adds the exceptions to those that the method does not catch.
+     *
+     * @return the exceptions that are new to the uncaught set; a shared
+     * empty set when none is new
+     */
+    Set<CSObj> addUncaughtExceptions(Set<CSObj> exceptions) {
+        if (uncaughtExceptions.containsAll(exceptions)) {
+            return Set.of();
+        }
+        return uncaughtExceptions.addAllDiff(exceptions);
     }
 
     Set<CSObj> mayThrowExplicitly(Stmt stmt) {

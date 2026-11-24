@@ -36,7 +36,7 @@ import java.util.function.Supplier;
 /**
  * Test access to the exception-set factory of the {@link ExceptionAnalysis}
  * a solver runs, and to the width of a bit set. Call it from a plugin's
- * {@code onStart}, when the solver holds its plugins.
+ * {@code onStart} or later, when the solver holds its plugins.
  */
 final class ExceptionAnalysisAccess {
 
@@ -69,6 +69,17 @@ final class ExceptionAnalysisAccess {
             Field field = ExceptionAnalysis.class.getDeclaredField("solver");
             field.setAccessible(true);
             field.set(exceptionAnalysis(solver), replacement);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /**
+     * @return the {@link ExceptionAnalysis} that {@code solver} runs.
+     */
+    static ExceptionAnalysis of(Solver solver) {
+        try {
+            return exceptionAnalysis(solver);
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(e);
         }
