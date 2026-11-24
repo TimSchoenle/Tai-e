@@ -43,4 +43,9 @@ class KObjSelector extends KLimitingSelector<Obj> {
     public Context selectContext(CSCallSite callSite, CSObj recv, JMethod callee) {
         return factory.append(recv.getContext(), recv.getObject(), limit);
     }
+
+    @Override
+    public boolean isInstanceContextCallSiteFree() {
+        return true;
+    }
 }

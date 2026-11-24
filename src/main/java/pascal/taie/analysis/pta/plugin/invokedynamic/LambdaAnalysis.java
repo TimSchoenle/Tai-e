@@ -57,6 +57,7 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -85,6 +86,14 @@ public class LambdaAnalysis implements Plugin {
     private ClassHierarchy hierarchy;
 
     private CSManager csManager;
+
+    /**
+     * Whether the selector selects the context of an instance call without
+     * its call site ({@link ContextSelector#isInstanceContextCallSiteFree}),
+     * so that the invocations of one target method reference on a receiver
+     * variable share one grouping ({@link #addSharedLambdaCallEdges}).
+     */
+    private boolean callSiteFreeContexts;
 
     /**
      * Map from method to the lambda functional objects created in the method.
@@ -137,6 +146,7 @@ public class LambdaAnalysis implements Plugin {
         this.selector = solver.getContextSelector();
         this.hierarchy = solver.getHierarchy();
         this.csManager = solver.getCSManager();
+        this.callSiteFreeContexts = selector.isInstanceContextCallSiteFree();
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
@@ -413,9 +423,20 @@ public class LambdaAnalysis implements Plugin {
     private void addLambdaCallEdges(
             InstanceInvoInfo info, PointsToSet recvObjs,
             ReceiverGroups<Type, CSObj> recvByType) {
-        CSCallSite csCallSite = info.getCSCallSite();
-        MethodRef targetRef = info.getTargetRef();
-        InvokeDynamic indy = info.getLambdaIndy();
+        addLambdaCallEdges(info, recvObjs, groupByCallee(
+                info.getCSCallSite(), info.getTargetRef(), recvByType));
+    }
+
+    /**
+     * @return the receivers of {@code recvByType} grouped by their
+     * context-sensitive callee for {@code targetRef} at {@code csCallSite},
+     * callees in first-seen order (the grouping of
+     * {@link #addLambdaCallEdges(InstanceInvoInfo, PointsToSet, ReceiverGroups)}).
+     * A receiver whose type does not dispatch {@code targetRef} is left out.
+     */
+    private Map<CSMethod, PointsToSet> groupByCallee(
+            CSCallSite csCallSite, MethodRef targetRef,
+            ReceiverGroups<Type, CSObj> recvByType) {
         Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
         recvByType.forEachGroup(new ReceiverGroups.Visitor<Type, CSObj, JMethod>() {
             @Override
@@ -431,6 +452,23 @@ public class LambdaAnalysis implements Plugin {
                         m -> solver.makePointsToSet()).addObject(recvObj);
             }
         });
+        return receiversByCallee;
+    }
+
+    /**
+     * Adds the facts of {@code receiversByCallee} (the result of
+     * {@link #groupByCallee} for the call site and target of {@code info})
+     * for {@code info}: per callee, in the map's order, the points-to update
+     * of the callee's this variable and, if the arguments fit, the call edge.
+     * The map and its sets are only read, so one grouping may serve several
+     * invocations whose grouping it equals.
+     */
+    private void addLambdaCallEdges(
+            InstanceInvoInfo info, PointsToSet recvObjs,
+            Map<CSMethod, PointsToSet> receiversByCallee) {
+        CSCallSite csCallSite = info.getCSCallSite();
+        MethodRef targetRef = info.getTargetRef();
+        InvokeDynamic indy = info.getLambdaIndy();
         if (verifier != null) {
             verifier.checkGrouping(csCallSite, recvObjs, targetRef, indy,
                     receiversByCallee);
@@ -713,6 +751,34 @@ public class LambdaAnalysis implements Plugin {
         cached.appendAll(ptsByType);
         // handle the case of that new objects reach base variable
         // of lambda invocation
-        infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType));
+        if (callSiteFreeContexts && infos.size() > 1) {
+            addSharedLambdaCallEdges(infos, pts, ptsByType);
+        } else {
+            infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType));
+        }
+    }
+
+    /**
+     * The same facts, in the same order, as
+     * {@link #addLambdaCallEdges(InstanceInvoInfo, PointsToSet, ReceiverGroups)}
+     * for each of {@code infos} in turn, with one grouping per target method
+     * reference instead of one per invocation. A grouping reads the call site
+     * only through the callee context, which the selector selects without the
+     * call site ({@link #callSiteFreeContexts}), and the dispatch of the
+     * target; so the invocations of one target have equal groupings, in equal
+     * order. Between two invocations the solver state the grouping reads does
+     * not change: the facts of an invocation only enter the work list, and
+     * its context-sensitive callees were created by the first grouping.
+     */
+    private void addSharedLambdaCallEdges(
+            Set<InstanceInvoInfo> infos, PointsToSet pts,
+            ReceiverGroups<Type, CSObj> ptsByType) {
+        Map<MethodRef, Map<CSMethod, PointsToSet>> groupingByTarget = new HashMap<>();
+        for (InstanceInvoInfo info : infos) {
+            Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
+                    info.getTargetRef(),
+                    targetRef -> groupByCallee(info.getCSCallSite(), targetRef, ptsByType));
+            addLambdaCallEdges(info, pts, receiversByCallee);
+        }
     }
 }
