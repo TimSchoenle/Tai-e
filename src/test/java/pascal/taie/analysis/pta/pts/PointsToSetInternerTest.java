@@ -280,6 +280,194 @@ class PointsToSetInternerTest {
         }
     }
 
+    @Test
+    void soleHolderChangesItsSetInPlace() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        interner.addAllDiff(p1, small(1, 2));
+        PointsToSet sole = p1.getPointsToSet();
+        PointsToSet diff = interner.addAllDiff(p1, small(2, 3));
+        assertSame(sole, p1.getPointsToSet());
+        assertTrue(sole.isShared());
+        assertEquals(List.of(3), sequence(diff));
+        assertEquals(List.of(1, 2, 3), sequence(sole));
+        assertSame(sole, interner.find(small(1, 2, 3)));
+        assertNull(interner.find(small(1, 2)));
+        // a set held by two pointers is copied
+        interner.addAllDiff(p2, small(1, 2, 3));
+        assertSame(sole, p2.getPointsToSet());
+        interner.addAllDiff(p1, small(4));
+        assertNotSame(sole, p1.getPointsToSet());
+        assertEquals(List.of(1, 2, 3), sequence(p2.getPointsToSet()));
+        assertEquals(List.of(1, 2, 3, 4), sequence(p1.getPointsToSet()));
+    }
+
+    @Test
+    void soleHolderGivesWayToAnEqualSharedSet() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        interner.addAllDiff(p1, small(1, 2, 3));
+        PointsToSet target = p1.getPointsToSet();
+        interner.addAllDiff(p2, small(1, 2));
+        interner.addAllDiff(p2, small(3));
+        assertSame(target, p2.getPointsToSet());
+        assertNull(interner.find(small(1, 2)));
+        // the table holds the empty set and the one shared set
+        assertEquals(2, interner.size());
+        // the shared set counts both pointers, so a change of p1 is made on a copy
+        interner.addAllDiff(p1, small(4));
+        assertSame(target, p2.getPointsToSet());
+        assertEquals(List.of(1, 2, 3), sequence(target));
+        assertSame(target, interner.find(small(1, 2, 3)));
+        assertEquals(List.of(1, 2, 3, 4), sequence(p1.getPointsToSet()));
+    }
+
+    @Test
+    void soleHolderTurnsItsSmallSetLargeInPlace() {
+        Pointer p = TestElements.pointer(1);
+        interner.addAllDiff(p, small(1, 2));
+        PointsToSet sole = p.getPointsToSet();
+        assertFalse(isLarge(sole));
+        int[] more = {3, 4, 5, 6, 7, 8, 9, 10};
+        PointsToSet reference = small(1, 2);
+        PointsToSet referenceDiff = reference.addAllDiff(small(more));
+        PointsToSet diff = interner.addAllDiff(p, small(more));
+        assertSame(sole, p.getPointsToSet());
+        assertTrue(sole.isShared());
+        assertTrue(isLarge(reference));
+        assertTrue(isLarge(sole));
+        assertEquals(sequence(reference), sequence(sole));
+        assertEquals(sequence(referenceDiff), sequence(diff));
+        assertEquals(isLarge(referenceDiff), isLarge(diff));
+        assertSame(sole, interner.find(sole.copy()));
+        assertNull(interner.find(small(1, 2)));
+        assertEquals(2, interner.size());
+    }
+
+    @Test
+    void soleHolderAddsALargeSetToItsLargeSetInPlace() {
+        Pointer p = TestElements.pointer(1);
+        interner.addAllDiff(p, large(1, 2, 3));
+        PointsToSet sole = p.getPointsToSet();
+        assertTrue(isLarge(sole));
+        PointsToSet diff = interner.addAllDiff(p, large(3, 4, 5));
+        assertSame(sole, p.getPointsToSet());
+        assertTrue(sole.isShared());
+        assertTrue(isLarge(sole));
+        assertEquals(List.of(1, 2, 3, 4, 5), sequence(sole));
+        assertEquals(List.of(4, 5), sequence(diff));
+        assertSame(sole, interner.find(large(1, 2, 3, 4, 5)));
+        assertNull(interner.find(large(1, 2, 3)));
+        assertEquals(2, interner.size());
+    }
+
+    /**
+     * Random sequences of changes on several pointers, against a copying
+     * interner kept here: after each step every pointer's set has the same
+     * elements, iteration order and form, each difference has the same
+     * elements, order and form, and two pointers share a set exactly when
+     * they share one in the copying interner. The table starts at two slots,
+     * so in-place changes meet its growth and its deletions.
+     */
+    @Test
+    void inPlaceChangeMatchesTheCopyingInterner() {
+        for (long seed = 1; seed <= 40; ++seed) {
+            Random random = new Random(seed);
+            PointsToSetInterner sharing = new PointsToSetInterner(factory, 2);
+            CopyingInterner copying = new CopyingInterner();
+            int n = 10;
+            Pointer[] pointers = new Pointer[n];
+            PointsToSet[] copied = new PointsToSet[n];
+            for (int i = 0; i < n; ++i) {
+                pointers[i] = TestElements.pointer(i);
+            }
+            for (int step = 0; step < 600; ++step) {
+                int i = random.nextInt(n);
+                int[] picked = pick(random);
+                boolean asLarge = random.nextInt(4) == 0;
+                PointsToSet held = copied[i] != null ? copied[i] : factory.make();
+                PointsToSet[] next = new PointsToSet[1];
+                PointsToSet copyDiff = copying.addAllDiff(held,
+                        asLarge ? large(picked) : small(picked), next);
+                copied[i] = next[0];
+                PointsToSet diff = sharing.addAllDiff(pointers[i],
+                        asLarge ? large(picked) : small(picked));
+                String at = "seed " + seed + " step " + step;
+                assertEquals(sequence(copyDiff), sequence(diff), at);
+                // a change that adds nothing returns the shared empty set, whose
+                // form differs from an empty large difference; the solver only
+                // asks an empty difference whether it is empty
+                if (!copyDiff.isEmpty()) {
+                    assertEquals(isLarge(copyDiff), isLarge(diff), at);
+                }
+                for (int j = 0; j < n; ++j) {
+                    PointsToSet set = pointers[j].getPointsToSet();
+                    if (copied[j] == null) {
+                        assertNull(set, at);
+                        continue;
+                    }
+                    assertEquals(sequence(copied[j]), sequence(set), at);
+                    assertEquals(isLarge(copied[j]), isLarge(set), at);
+                    for (int k = 0; k < n; ++k) {
+                        if (copied[k] != null) {
+                            assertEquals(copied[j] == copied[k],
+                                    set == pointers[k].getPointsToSet(), at);
+                        }
+                    }
+                }
+                Set<PointsToSet> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+                for (Pointer p : pointers) {
+                    PointsToSet set = p.getPointsToSet();
+                    if (set != null && !set.isEmpty()) {
+                        distinct.add(set);
+                        assertSame(set, sharing.find(set.copy()), at);
+                    }
+                }
+                // the distinct non-empty held sets plus the empty set
+                assertEquals(distinct.size() + 1, sharing.size(), at);
+            }
+        }
+    }
+
+    /**
+     * The copy-on-write interner: every change is made on a copy, which is
+     * then replaced by the kept set with the same form and sequence.
+     */
+    private final class CopyingInterner {
+
+        private final List<DelegatePointsToSet> kept = new ArrayList<>();
+
+        private final IdentityHashMap<PointsToSet, Integer> holders = new IdentityHashMap<>();
+
+        /**
+         * Applies {@code pts} to a copy of {@code held} and puts the kept set
+         * equal to the result into {@code next[0]}.
+         *
+         * @return the difference
+         */
+        PointsToSet addAllDiff(PointsToSet held, PointsToSet pts, PointsToSet[] next) {
+            DelegatePointsToSet copy = (DelegatePointsToSet) held.copy();
+            PointsToSet diff = copy.addAllDiff(pts);
+            DelegatePointsToSet result = copy;
+            for (DelegatePointsToSet k : kept) {
+                if (k.sameSequence(copy)) {
+                    result = k;
+                    break;
+                }
+            }
+            if (result == copy) {
+                kept.add(copy);
+            }
+            holders.merge(result, 1, Integer::sum);
+            if (holders.containsKey(held) && holders.merge(held, -1, Integer::sum) == 0) {
+                holders.remove(held);
+                kept.removeIf(k -> k == held);
+            }
+            next[0] = result;
+            return diff;
+        }
+    }
+
     /**
      * Many distinct sets in a table that starts at two slots, so it grows
      * several times and deletes across collisions and the wrap-around; after

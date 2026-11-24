@@ -45,7 +45,8 @@ public abstract class DelegatePointsToSet implements PointsToSet {
     /**
      * -1 while this set is mutable; once it is shared through a
      * {@link PointsToSetInterner}, the number of pointers holding it.
-     * A shared set is never mutated again.
+     * A shared set is never mutated, except that the interner may take a
+     * set back from its table to change it in place for its only holder.
      */
     int holders = -1;
 

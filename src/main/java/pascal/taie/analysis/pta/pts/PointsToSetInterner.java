@@ -28,15 +28,15 @@ import pascal.taie.analysis.pta.core.cs.element.Pointer;
 /**
  * Shares equal points-to sets between pointers (hash-consing).
  * <p>
- * A pointer holds a shared, immutable set; a change of its points-to set
- * builds the new set on a copy and replaces the held set by the shared set
- * equal to the copy. Two sets are equal here when they have the same form
+ * A pointer holds a shared set; a change of its points-to set builds the
+ * new set on a copy, or in place when no other pointer holds the set, and
+ * replaces the held set by the shared set equal to the result. Two sets are equal here when they have the same form
  * (empty, singleton, small or large) and the same elements in iteration
  * order, so sharing never changes the iteration order of a pointer's set.
  * <p>
  * Each shared set counts the pointers holding it; a set that no pointer
  * holds any more leaves the table, so the table keeps no garbage alive.
- * It stays immutable.
+ * A set in the table is never mutated.
  */
 public final class PointsToSetInterner {
 
@@ -79,12 +79,19 @@ public final class PointsToSetInterner {
     }
 
     /**
-     * Copy-on-write form of {@code pt(pointer).addAllDiff(pts)}: the set the
-     * pointer holds is shared and never mutated, so the change is made on a
+     * Copy-on-write form of {@code pt(pointer).addAllDiff(pts)}: a set that
+     * other pointers hold too is never mutated, so the change is made on a
      * copy, which then replaces the held set by the shared set equal to it.
      * The copy undergoes exactly the operation the held set would, so the
      * pointer's new set and the returned difference are the same as
      * without sharing.
+     * <p>
+     * A shared set held by this pointer alone (not the empty set) is changed
+     * in place instead: it leaves the table, takes the change and is shared
+     * again, or gives way to the shared set equal to it. The result is the
+     * same as on a copy, without copying the set. As without sharing, a
+     * caller must not keep the set of a pointer across a change of that
+     * pointer's set and expect the old contents.
      *
      * @return the difference between {@code pts} and the set the pointer
      * held before the call.
@@ -98,9 +105,28 @@ public final class PointsToSetInterner {
         if (covers(held, pts)) {
             return empty;
         }
+        // the empty set, pinned at one, counts at least two once held
+        if (held instanceof DelegatePointsToSet sole && sole.holders == 1) {
+            return addAllDiffInPlace(pointer, sole, pts);
+        }
         PointsToSet next = held.copy();
         PointsToSet diff = next.addAllDiff(pts);
         pointer.setPointsToSet(replace(held, next));
+        return diff;
+    }
+
+    /**
+     * Changes the shared set that only {@code pointer} holds in place and
+     * shares the result again.
+     */
+    private PointsToSet addAllDiffInPlace(
+            Pointer pointer, DelegatePointsToSet sole, PointsToSet pts) {
+        remove(sole);
+        sole.holders = -1;
+        PointsToSet diff = sole.addAllDiff(pts);
+        DelegatePointsToSet shared = intern(sole);
+        ++shared.holders;
+        pointer.setPointsToSet(shared);
         return diff;
     }
 
