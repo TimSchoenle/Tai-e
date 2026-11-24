@@ -60,7 +60,15 @@ public abstract class AbstractResultHolder implements ResultHolder {
 
     @Override
     public <R> R getResult(String key, Supplier<R> supplier) {
-        return (R) results.computeIfAbsent(key, __ -> supplier.get());
+        // get first: computeIfAbsent would allocate a capturing lambda per call
+        Object result = results.get(key);
+        if (result == null) {
+            result = supplier.get();
+            if (result != null) {
+                results.put(key, result);
+            }
+        }
+        return (R) result;
     }
 
     @Override

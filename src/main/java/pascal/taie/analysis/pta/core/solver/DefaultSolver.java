@@ -112,6 +112,25 @@ public class DefaultSolver implements Solver {
      */
     private static final long UNLIMITED = -1;
 
+    /**
+     * Mask of the work list iterations at which the progress clock is read:
+     * every 8192 iterations.
+     */
+    private static final long PROGRESS_CHECK_MASK = (1L << 13) - 1;
+
+    private static final long NANOS_PER_SECOND = 1_000_000_000L;
+
+    private static final long BYTES_PER_MB = 1L << 20;
+
+    private static final String PROGRESS_FORMAT = "PTA progress: elapsed_s={}"
+            + " iterations={} pending_pointers={} pending_call_edges={}"
+            + " cs_methods={} methods={} cs_call_edges={} pointers={}"
+            + " heap_used_mb={}";
+
+    private static final String PROGRESS_EXT_FORMAT = PROGRESS_FORMAT
+            + " ext_pending={} ext_waves={} ext_drained={} ext_edges={}"
+            + " ext_empty_diffs={}";
+
     private final AnalysisOptions options;
 
     private final HeapModel heapModel;
@@ -159,6 +178,38 @@ public class DefaultSolver implements Solver {
     private final long timeLimit;
 
     private TimeLimiter timeLimiter;
+
+    /**
+     * Interval between progress lines in nanoseconds; 0 means off
+     * (option {@code progress-interval}, in seconds). Not final only for
+     * {@link #setProgressCheckForTesting(long, long)}.
+     */
+    private long progressIntervalNanos;
+
+    /**
+     * Mask of the work list iterations at which the progress clock is read;
+     * {@link #PROGRESS_CHECK_MASK} except in tests.
+     */
+    private long progressCheckMask = PROGRESS_CHECK_MASK;
+
+    private final ProgressCounters progressCounters = new ProgressCounters();
+
+    /**
+     * Work list entries processed by the current solve.
+     */
+    private long iterations;
+
+    /**
+     * Context-sensitive call edges added to the call graph by the current
+     * solve; kept because counting the graph's edges is not O(1).
+     */
+    private long csCallEdges;
+
+    private long progressLines;
+
+    private long solveStartNanos;
+
+    private long lastProgressNanos;
 
     /**
      * Whether the analysis has reached time limit.
@@ -218,6 +269,13 @@ public class DefaultSolver implements Solver {
                 typeSystem);
         onlyApp = options.getBoolean("only-app");
         timeLimit = options.getInt("time-limit");
+        int progressInterval = options.getInt("progress-interval");
+        if (progressInterval < 0) {
+            throw new IllegalArgumentException(
+                    "progress-interval must be >= 0, given: " + progressInterval);
+        }
+        progressIntervalNanos = progressInterval * NANOS_PER_SECOND;
+        progressCounters.setProgressCheck(this::checkProgressIfOn, progressCheckMask);
     }
 
     @Override
@@ -253,6 +311,48 @@ public class DefaultSolver implements Solver {
     @Override
     public CSCallGraph getCallGraph() {
         return callGraph;
+    }
+
+    @Override
+    public ProgressCounters getProgressCounters() {
+        return progressCounters;
+    }
+
+    /**
+     * @return the work list entries processed by the last solve.
+     */
+    public long getIterations() {
+        return iterations;
+    }
+
+    /**
+     * @return the context-sensitive call edges the last solve added.
+     */
+    public long getNumberOfCSCallEdges() {
+        return csCallEdges;
+    }
+
+    /**
+     * @return the progress lines the last solve logged.
+     */
+    public long getProgressLines() {
+        return progressLines;
+    }
+
+    /**
+     * Replaces the progress check for tests, whose programs are far smaller
+     * than one check period: the clock is read when the work list
+     * iteration count has none of the bits of {@code checkMask} set, and a
+     * line is logged when {@code intervalNanos} (0 means off) has passed.
+     */
+    void setProgressCheckForTesting(long checkMask, long intervalNanos) {
+        if (checkMask < 0 || intervalNanos < 0) {
+            throw new IllegalArgumentException("checkMask and intervalNanos"
+                    + " must be >= 0, given: " + checkMask + ", " + intervalNanos);
+        }
+        progressCheckMask = checkMask;
+        progressIntervalNanos = intervalNanos;
+        progressCounters.setProgressCheck(this::checkProgressIfOn, checkMask);
     }
 
     @Override
@@ -310,6 +410,12 @@ public class DefaultSolver implements Solver {
         ignoredMethods = Sets.newSet();
         stmtProcessor = new StmtProcessor();
         isTimeout = false;
+        iterations = 0;
+        csCallEdges = 0;
+        progressLines = 0;
+        progressCounters.reset();
+        solveStartNanos = System.nanoTime();
+        lastProgressNanos = solveStartNanos;
         if (timeLimit != UNLIMITED) {
             timeLimiter = new TimeLimiter(timeLimit);
             timeLimiter.countDown();
@@ -358,6 +464,10 @@ public class DefaultSolver implements Solver {
         while (!workList.isEmpty() && !isTimeout) {
             // phase starts
             while (!workList.isEmpty() && !isTimeout) {
+                if ((++iterations & progressCheckMask) == 0
+                        && progressIntervalNanos != 0) {
+                    checkProgress();
+                }
                 WorkList.Entry entry = workList.pollEntry();
                 if (entry instanceof WorkList.PointerEntry pEntry) {
                     Pointer p = pEntry.pointer();
@@ -388,6 +498,53 @@ public class DefaultSolver implements Solver {
             releaseSolverState();
         }
         plugin.onFinish();
+    }
+
+    /**
+     * Logs one progress line when at least the progress interval has passed
+     * since the last line (or the start of the solve). Reads only O(1) sizes
+     * and counters.
+     */
+    private void checkProgress() {
+        long now = System.nanoTime();
+        if (now - lastProgressNanos < progressIntervalNanos) {
+            return;
+        }
+        lastProgressNanos = now;
+        ++progressLines;
+        Runtime runtime = Runtime.getRuntime();
+        long heapUsedMb = (runtime.totalMemory() - runtime.freeMemory()) / BYTES_PER_MB;
+        long elapsedS = (now - solveStartNanos) / NANOS_PER_SECOND;
+        long extPending = progressCounters.getPendingEntries();
+        long extWaves = progressCounters.getWaves();
+        long extDrained = progressCounters.getEntriesDrained();
+        if (extPending == 0 && extWaves == 0 && extDrained == 0) {
+            logger.info(PROGRESS_FORMAT,
+                    elapsedS, iterations, workList.pointerEntryCount(),
+                    workList.callEdgeCount(), callGraph.getNumberOfMethods(),
+                    reachableMethods.size(), csCallEdges,
+                    csManager.getNumberOfPointers(), heapUsedMb);
+        } else {
+            logger.info(PROGRESS_EXT_FORMAT,
+                    elapsedS, iterations, workList.pointerEntryCount(),
+                    workList.callEdgeCount(), callGraph.getNumberOfMethods(),
+                    reachableMethods.size(), csCallEdges,
+                    csManager.getNumberOfPointers(), heapUsedMb,
+                    extPending, extWaves, extDrained,
+                    progressCounters.getEdgesVisited(),
+                    progressCounters.getEmptyDiffs());
+        }
+    }
+
+    /**
+     * The progress check that plugins run during their own drains
+     * ({@link ProgressCounters#drainEntry(long)}): a no-op when the progress
+     * line is off.
+     */
+    private void checkProgressIfOn() {
+        if (progressIntervalNanos != 0) {
+            checkProgress();
+        }
     }
 
     /**
@@ -575,6 +732,7 @@ public class DefaultSolver implements Solver {
 
     private void processCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (callGraph.addEdge(edge)) {
+            ++csCallEdges;
             // process new call edge
             CSMethod csCallee = edge.getCallee();
             addCSMethod(csCallee);

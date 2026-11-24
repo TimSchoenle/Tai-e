@@ -98,6 +98,10 @@ The supported Spring annotations and XML tags are configured by `src/main/resour
 ** Default value: `-1`
 ** Specify a time limit for pointer analysis (unit: second).When it is `-1`, there is no time limit.
 
+* Progress interval: `progress-interval:<seconds>`
+** Default value: `60`
+** Every 8192 work list entries the solver reads the clock; when at least this many seconds passed since the last line (or the start of the solve), it logs one INFO line `PTA progress: elapsed_s=.. iterations=.. pending_pointers=.. pending_call_edges=.. cs_methods=.. methods=.. cs_call_edges=.. pointers=.. heap_used_mb=..`, followed by ` ext_pending=.. ext_waves=..` when a plugin set the solver's `ProgressCounters`. When it is `0`, no line is logged.
+
 == Analysis Plugin System
 
 We explain how this analysis plugin system works.As shown in figure below:
