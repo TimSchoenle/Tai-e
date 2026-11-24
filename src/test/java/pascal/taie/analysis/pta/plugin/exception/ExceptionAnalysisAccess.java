@@ -61,6 +61,20 @@ final class ExceptionAnalysisAccess {
     }
 
     /**
+     * Makes the {@link ExceptionAnalysis} of {@code solver} call
+     * {@code replacement} instead of {@code solver}.
+     */
+    static void replaceSolver(Solver solver, Solver replacement) {
+        try {
+            Field field = ExceptionAnalysis.class.getDeclaredField("solver");
+            field.setAccessible(true);
+            field.set(exceptionAnalysis(solver), replacement);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /**
      * @return the number of 64-bit words the given bit set holds.
      */
     static int words(SetEx<CSObj> set) {

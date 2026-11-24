@@ -46,9 +46,21 @@ public class CSMethodThrowResult {
         uncaughtExceptions = setFactory.get();
     }
 
+    /**
+     * Adds the exceptions to those that {@code stmt} may throw.
+     *
+     * @return the exceptions that are new to {@code stmt}; a shared empty
+     * set when none is new
+     */
     Set<CSObj> propagate(Stmt stmt, Set<CSObj> exceptions) {
-        return explicitExceptions.computeIfAbsent(stmt, __ -> setFactory.get())
-                .addAllDiff(exceptions);
+        SetEx<CSObj> thrown = explicitExceptions.get(stmt);
+        if (thrown == null) {
+            thrown = setFactory.get();
+            explicitExceptions.put(stmt, thrown);
+        } else if (thrown.containsAll(exceptions)) {
+            return Set.of();
+        }
+        return thrown.addAllDiff(exceptions);
     }
 
     void addUncaughtExceptions(Set<CSObj> exceptions) {
@@ -62,5 +74,14 @@ public class CSMethodThrowResult {
 
     Set<CSObj> mayThrowUncaught() {
         return Collections.unmodifiableSet(uncaughtExceptions);
+    }
+
+    /**
+     * @return the live set of uncaught exceptions, so that a set of the same
+     * factory takes it word by word; the caller must neither change it nor
+     * keep it past the work that reads it
+     */
+    SetEx<CSObj> uncaughtSet() {
+        return uncaughtExceptions;
     }
 }

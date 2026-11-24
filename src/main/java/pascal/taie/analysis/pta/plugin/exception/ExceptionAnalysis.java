@@ -51,7 +51,6 @@ import pascal.taie.util.collection.IndexerBitSet;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 import pascal.taie.util.collection.SetEx;
-import pascal.taie.util.collection.Sets;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -86,6 +85,21 @@ public class ExceptionAnalysis implements Plugin {
     private Supplier<SetEx<CSObj>> setFactory;
 
     /**
+     * Whether only application methods are analyzed (option only-app).
+     */
+    private boolean onlyApp;
+
+    /**
+     * The key of the {@link CSMethodThrowResult} of each CS method.
+     */
+    private String resultKey;
+
+    /**
+     * Creates the {@link CSMethodThrowResult} of a CS method.
+     */
+    private Supplier<CSMethodThrowResult> resultFactory;
+
+    /**
      * Map from thrown variables to the corresponding throw statements.
      */
     private MultiMap<Var, Throw> var2Throws = Maps.newMultiMap();
@@ -118,6 +132,9 @@ public class ExceptionAnalysis implements Plugin {
         // follows the number of exception objects, not the global indexes
         this.exceptionIndexer = new ExceptionObjIndexer();
         this.setFactory = () -> new IndexerBitSet<>(exceptionIndexer, isSparse);
+        this.onlyApp = solver.getOptions().getBoolean("only-app");
+        this.resultKey = getClass().getName();
+        this.resultFactory = () -> new CSMethodThrowResult(setFactory);
     }
 
     /**
@@ -182,15 +199,20 @@ public class ExceptionAnalysis implements Plugin {
     public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (propagatesExceptions(edge)) {
             CSMethod callee = edge.getCallee();
-            Optional<CSMethodThrowResult> csResult =
-                    callee.getResult(getClass().getName());
-            csResult.ifPresent(result -> {
-                CSMethod caller = edge.getCallSite().getContainer();
-                Invoke invoke = edge.getCallSite().getCallSite();
-                Set<CSObj> exceptions = result.mayThrowUncaught();
-                workList.add(new Entry(caller, invoke, exceptions));
-                propagateExceptions();
-            });
+            Optional<CSMethodThrowResult> csResult = callee.getResult(resultKey);
+            if (csResult.isPresent()) {
+                // the live set, as the unmodifiable view passed before:
+                // it is only read, and the work-list is empty, so this
+                // entry is drained first, before addUncaughtExceptions
+                // can grow the set
+                Set<CSObj> exceptions = csResult.get().uncaughtSet();
+                if (!exceptions.isEmpty()) {
+                    CSMethod caller = edge.getCallSite().getContainer();
+                    Invoke invoke = edge.getCallSite().getCallSite();
+                    workList.add(new Entry(caller, invoke, exceptions));
+                    propagateExceptions();
+                }
+            }
         }
     }
 
@@ -206,14 +228,15 @@ public class ExceptionAnalysis implements Plugin {
             Entry entry = workList.poll();
             CSMethod csMethod = entry.csMethod();
             // Temporary fix: skip non-application methods when only-app is enabled.
-            if (solver.getOptions().getBoolean("only-app")
-                    && !csMethod.getMethod().isApplication()) {
+            if (onlyApp && !csMethod.getMethod().isApplication()) {
+                continue;
+            }
+            Set<CSObj> exceptions = entry.exceptions();
+            if (exceptions.isEmpty()) {
                 continue;
             }
             Stmt stmt = entry.stmt();
-            Set<CSObj> exceptions = entry.exceptions();
-            CSMethodThrowResult result = csMethod.getResult(getClass().getName(),
-                    () -> new CSMethodThrowResult(setFactory));
+            CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
             Set<CSObj> diff = result.propagate(stmt, exceptions);
             if (!diff.isEmpty()) {
                 Set<CSObj> uncaught = analyzeIntraUncaught(
@@ -264,7 +287,7 @@ public class ExceptionAnalysis implements Plugin {
             Context ctx = csMethod.getContext();
             Iterable<CSObj> toCheck = inGlobalIndexOrder(newExceptions);
             for (ExceptionEntry entry : entries) {
-                Set<CSObj> uncaughtExceptions = Sets.newHybridSet();
+                SetEx<CSObj> uncaughtExceptions = setFactory.get();
                 for (CSObj newException : toCheck) {
                     Obj exObj = newException.getObject();
                     if (typeSystem.isSubtype(entry.catchType(), exObj.getType())) {
@@ -276,7 +299,7 @@ public class ExceptionAnalysis implements Plugin {
                     }
                 }
                 newExceptions = uncaughtExceptions;
-                toCheck = uncaughtExceptions;
+                toCheck = inGlobalIndexOrder(uncaughtExceptions);
             }
         }
         return newExceptions;
