@@ -193,6 +193,8 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
     public void methodInvoke(Context context, Invoke invoke,
                              PointsToSet mtdObjs, PointsToSet recvObjs) {
         Var argsVar = invoke.getInvokeExp().getArg(1);
+        ReceiverDispatch<CSObj> receivers = new ReceiverDispatch<>(
+                hierarchy, recvObjs, recvObjs.size(), recvObj -> recvObj.getObject().getType());
         mtdObjs.forEach(mtdObj -> {
             if (isInvalidTarget(invoke, mtdObj)) {
                 return;
@@ -205,9 +207,10 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
                     recvObjs.forEach(recvObj ->
                             addReflectiveCallEdge(context, invoke, recvObj, target, argsVar));
                 } else if (!recvObjs.isEmpty()) {
-                    ReceiverDispatch dispatch = new ReceiverDispatch(hierarchy, target);
-                    recvObjs.forEach(recvObj -> addDispatchedCallEdge(
-                            context, invoke, recvObj, target, dispatch, argsVar));
+                    receivers.startTarget(target);
+                    for (int i = 0, n = receivers.size(); i < n; ++i) {
+                        addDispatchedCallEdge(context, invoke, target, receivers, i, argsVar);
+                    }
                 }
             }
         });
@@ -398,20 +401,22 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
     }
 
     /**
-     * Adds the call edge of instance method {@code target} on
-     * {@code recvObj}, dispatched on the receiver's type.
+     * Adds the call edge of instance method {@code target} on the
+     * {@code i}-th receiver of {@code receivers}, dispatched on the
+     * receiver's type. The skip check stays per receiver: each edge added
+     * raises the call site's target count that it reads.
      */
     private void addDispatchedCallEdge(
-            Context callerCtx, Invoke callSite, CSObj recvObj,
-            JMethod target, ReceiverDispatch dispatch, Var args) {
+            Context callerCtx, Invoke callSite, JMethod target,
+            ReceiverDispatch<CSObj> receivers, int i, Var args) {
         if (isSkippedTarget(callSite, target)) {
             return;
         }
-        JMethod callee = dispatch.dispatch(recvObj.getObject().getType());
+        JMethod callee = receivers.dispatch(i);
         if (callee == null) {
             return;
         }
-        addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+        addResolvedCallEdge(callerCtx, callSite, receivers.receiver(i), callee, args);
     }
 
     private void addResolvedCallEdge(
