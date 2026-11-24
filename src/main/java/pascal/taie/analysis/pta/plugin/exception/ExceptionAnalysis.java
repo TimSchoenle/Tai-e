@@ -39,6 +39,7 @@ import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
+import pascal.taie.config.ConfigException;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.proginfo.ExceptionEntry;
 import pascal.taie.ir.stmt.Catch;
@@ -60,6 +61,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 public class ExceptionAnalysis implements Plugin {
 
@@ -132,6 +134,74 @@ public class ExceptionAnalysis implements Plugin {
     int maxWorkListSize;
 
     /**
+     * A wave over at least this many call edges finds, in parallel and
+     * before it hands out its first edge, the callers whose call site
+     * already throws all its exceptions (option
+     * exception-wave-parallel-threshold).
+     */
+    private int parallelThreshold;
+
+    /**
+     * Number of buckets of {@link #waveStats}: bucket {@code b} holds the
+     * waves over {@code [2^(b-1), 2^b)} call edges (bucket 0: no edge).
+     */
+    private static final int WAVE_BUCKETS = Integer.SIZE;
+
+    /**
+     * Per bucket of wave size: the waves, their call edges, and the edges
+     * whose caller already threw all the exceptions of the wave.
+     */
+    final WaveStats waveStats = new WaveStats();
+
+    /**
+     * Number of waves whose covered callers were found in parallel, and
+     * of the edges they skipped for it.
+     */
+    long parallelWaves;
+
+    long skippedEdges;
+
+    /**
+     * Work counters of the waves, by bucket of wave size.
+     */
+    static final class WaveStats {
+
+        final long[] waves = new long[WAVE_BUCKETS];
+
+        final long[] edges = new long[WAVE_BUCKETS];
+
+        final long[] emptyDiffs = new long[WAVE_BUCKETS];
+
+        private void record(Wave wave) {
+            int bucket = Integer.SIZE - Integer.numberOfLeadingZeros(wave.end);
+            waves[bucket]++;
+            edges[bucket] += wave.end;
+            emptyDiffs[bucket] += wave.emptyDiffs;
+        }
+
+        private void clear() {
+            Arrays.fill(waves, 0);
+            Arrays.fill(edges, 0);
+            Arrays.fill(emptyDiffs, 0);
+        }
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            for (int b = 0; b < WAVE_BUCKETS; b++) {
+                if (waves[b] != 0) {
+                    sb.append(sb.isEmpty() ? "" : "; ")
+                            .append("<").append(1L << b).append(" edges: ")
+                            .append(waves[b]).append(" waves, ")
+                            .append(edges[b]).append(" edges, ")
+                            .append(emptyDiffs[b]).append(" empty");
+                }
+            }
+            return sb.isEmpty() ? "no waves" : sb.toString();
+        }
+    }
+
+    /**
      * Work-list items.
      */
     private sealed interface Work permits Entry, Wave {
@@ -159,24 +229,26 @@ public class ExceptionAnalysis implements Plugin {
 
         private int next;
 
+        /**
+         * Whether the covered callers were looked for.
+         */
+        private boolean filtered;
+
+        /**
+         * The edges whose caller already throws all {@link #exceptions} at
+         * the call site, by edge index; null if they were not looked for.
+         */
+        private boolean[] covered;
+
+        /**
+         * Number of edges of this wave that brought nothing new.
+         */
+        private int emptyDiffs;
+
         private Wave(CSMethod callee, Set<CSObj> exceptions) {
             this.callee = callee;
             this.exceptions = exceptions;
             this.end = callee.getEdgeCount();
-        }
-
-        /**
-         * @return the next edge that propagates exceptions, or null if no
-         * such edge is left.
-         */
-        private Edge<CSCallSite, CSMethod> takeEdge() {
-            while (next < end) {
-                Edge<CSCallSite, CSMethod> edge = callee.getEdge(next++);
-                if (propagatesExceptions(edge)) {
-                    return edge;
-                }
-            }
-            return null;
         }
 
         private boolean isDone() {
@@ -200,6 +272,15 @@ public class ExceptionAnalysis implements Plugin {
         this.resultFactory = () -> new CSMethodThrowResult(setFactory);
         this.emptyDiffs = 0;
         this.maxWorkListSize = 0;
+        this.parallelThreshold = solver.getOptions()
+                .getInt("exception-wave-parallel-threshold");
+        if (parallelThreshold < 1) {
+            throw new ConfigException("exception-wave-parallel-threshold must be"
+                    + " at least 1, got " + parallelThreshold);
+        }
+        this.waveStats.clear();
+        this.parallelWaves = 0;
+        this.skippedEdges = 0;
     }
 
     /**
@@ -297,14 +378,26 @@ public class ExceptionAnalysis implements Plugin {
                 // the wave stays at the head until its last edge is taken,
                 // so its entries drain where the entries queued per edge
                 // used to: the edges do not change during a drain
-                Edge<CSCallSite, CSMethod> edge = wave.takeEdge();
-                if (wave.isDone()) {
+                if (!wave.filtered) {
+                    wave.filtered = true;
+                    if (wave.end >= parallelThreshold) {
+                        findCovered(wave);
+                    }
+                }
+                Edge<CSCallSite, CSMethod> edge = takeEdge(wave);
+                boolean done = wave.isDone();
+                if (done) {
                     workList.poll();
                 }
                 if (edge != null) {
                     CSCallSite callSite = edge.getCallSite();
-                    propagate(callSite.getContainer(), callSite.getCallSite(),
-                            wave.exceptions);
+                    if (propagate(callSite.getContainer(), callSite.getCallSite(),
+                            wave.exceptions)) {
+                        wave.emptyDiffs++;
+                    }
+                }
+                if (done) {
+                    waveStats.record(wave);
                 }
             } else {
                 workList.poll();
@@ -319,22 +412,87 @@ public class ExceptionAnalysis implements Plugin {
     }
 
     /**
+     * @return the next edge of {@code wave} that propagates exceptions and
+     * whose caller was not found covered, or null if no such edge is left.
+     * Each edge found covered counts as an entry that brought nothing new.
+     */
+    private Edge<CSCallSite, CSMethod> takeEdge(Wave wave) {
+        boolean[] covered = wave.covered;
+        while (wave.next < wave.end) {
+            int index = wave.next++;
+            if (covered != null && covered[index]) {
+                emptyDiffs++;
+                wave.emptyDiffs++;
+                skippedEdges++;
+                continue;
+            }
+            Edge<CSCallSite, CSMethod> edge = wave.callee.getEdge(index);
+            if (propagatesExceptions(edge)) {
+                return edge;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Finds, in parallel, the edges of {@code wave} whose caller already
+     * throws all exceptions of the wave at the call site. Nothing adds to
+     * the caller results while the tasks run. A dense set only reads in
+     * containsAll; a sparse set may drop its all-zero blocks there, which
+     * changes no element. Two edges of one call site (a regular and an
+     * other edge into the same callee) can make two tasks check one set;
+     * a dropped block is zero either way, so each answer is the one a
+     * single thread gives. The sets only grow while the wave drains, so an
+     * edge found covered stays covered until it is taken, and taking it
+     * would bring nothing new.
+     */
+    private void findCovered(Wave wave) {
+        boolean[] covered = new boolean[wave.end];
+        CSMethod callee = wave.callee;
+        Set<CSObj> exceptions = wave.exceptions;
+        IntStream.range(0, covered.length).parallel().forEach(i ->
+                covered[i] = isCovered(callee.getEdge(i), exceptions));
+        wave.covered = covered;
+        parallelWaves++;
+    }
+
+    /**
+     * @return whether {@link #propagate} over {@code edge} would count the
+     * exceptions as bringing nothing new; reads only.
+     */
+    private boolean isCovered(Edge<CSCallSite, CSMethod> edge, Set<CSObj> exceptions) {
+        if (!propagatesExceptions(edge) || exceptions.isEmpty()) {
+            return false;
+        }
+        CSCallSite callSite = edge.getCallSite();
+        CSMethod caller = callSite.getContainer();
+        if (onlyApp && !caller.getMethod().isApplication()) {
+            return false;
+        }
+        Optional<CSMethodThrowResult> result = caller.getResult(resultKey);
+        return result.isPresent()
+                && result.get().throwsAll(callSite.getCallSite(), exceptions);
+    }
+
+    /**
      * Adds the exceptions to those that {@code stmt} of {@code csMethod} may
      * throw, and queues a wave of those that the method newly does not catch.
+     *
+     * @return whether the exceptions brought nothing new to {@code stmt}.
      */
-    private void propagate(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
+    private boolean propagate(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
         // Temporary fix: skip non-application methods when only-app is enabled.
         if (onlyApp && !csMethod.getMethod().isApplication()) {
-            return;
+            return false;
         }
         if (exceptions.isEmpty()) {
-            return;
+            return false;
         }
         CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
         Set<CSObj> diff = result.propagate(stmt, exceptions);
         if (diff.isEmpty()) {
             emptyDiffs++;
-            return;
+            return true;
         }
         Set<CSObj> uncaught = analyzeIntraUncaught(stmt, diff, csMethod);
         // only the exceptions new to the uncaught set go out: every
@@ -347,6 +505,7 @@ public class ExceptionAnalysis implements Plugin {
         if (!fresh.isEmpty() && csMethod.getEdgeCount() > 0) {
             workList.add(new Wave(csMethod, fresh));
         }
+        return false;
     }
 
     /**
@@ -442,6 +601,8 @@ public class ExceptionAnalysis implements Plugin {
     private void logCensus() {
         logger.info("Exception work: {} entries brought nothing new;"
                 + " work-list peak {} items", emptyDiffs, maxWorkListSize);
+        logger.info("Exception waves: {}; {} waves filtered in parallel,"
+                + " {} covered edges skipped", waveStats, parallelWaves, skippedEdges);
         if (csManager instanceof MapBasedCSManager mapBased) {
             MapBasedCSManager.ThrowableCensus census = mapBased.getThrowableCensus();
             logger.info("Exception objects: {} indexed by exception analysis;"

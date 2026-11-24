@@ -64,6 +64,16 @@ public class CSMethodThrowResult {
     }
 
     /**
+     * @return whether {@code stmt} already may throw all {@code exceptions};
+     * changes no element (a sparse set may drop all-zero blocks), so
+     * threads may call it while nothing adds to this result.
+     */
+    boolean throwsAll(Stmt stmt, Set<CSObj> exceptions) {
+        SetEx<CSObj> thrown = explicitExceptions.get(stmt);
+        return thrown != null && thrown.containsAll(exceptions);
+    }
+
+    /**
      * Adds the exceptions to those that the method does not catch.
      *
      * @return the exceptions that are new to the uncaught set; a shared

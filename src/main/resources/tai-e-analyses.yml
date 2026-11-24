@@ -16,6 +16,9 @@
     merge-exception-objects: true
     collect-throw-results: true # store per-method throw results after the
     # solve (needed by throw analysis algorithm pta; false saves their memory)
+    exception-wave-parallel-threshold: 4096 # a wave of uncaught exceptions
+    # over at least this many call edges finds in parallel the callers that
+    # already throw them (same results; at least 1)
     share-points-to-sets: false # share equal points-to sets between pointers
     # (immutable sets, copy on write; same results, less memory)
     handle-invokedynamic: false
