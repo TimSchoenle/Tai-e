@@ -178,6 +178,19 @@ public interface Pointer extends Indexable {
     }
 
     /**
+     * Drops the out edges of this pointer, after the solver has reached its
+     * fixed point and released the dedup state
+     * ({@link #releaseEdgeDedup()}). Afterwards {@link #getOutEdges()},
+     * {@link #getOutDegree()}, {@link #forEachOutTransfer},
+     * {@link #removeEdgesIf} and the addEdge methods throw an
+     * {@link IllegalStateException} instead of seeing an empty graph. A
+     * pointer created after the release has no out edges and refuses new
+     * ones (the solver refuses new work). The default keeps the out edges.
+     */
+    default void releaseOutEdges() {
+    }
+
+    /**
      * @return the type of this pointer
      */
     Type getType();

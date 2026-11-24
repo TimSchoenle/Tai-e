@@ -31,6 +31,11 @@
     # before the plugins' onFinish, the solver state that only serves the
     # solve (work list, out-edge dedup sets, type filter memos); the result
     # stays readable, new pointer flow edges are refused afterwards
+    release-pointer-flow-graph: false # with release-solver-state, whether
+    # also drop the out edges of all pointers (the pointer flow graph) at
+    # that point; points-to sets and the call graph stay readable, a later
+    # read of the pointer flow graph (object flow graph, taint analysis,
+    # Zipper) fails
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format
