@@ -198,13 +198,18 @@ public class SparseBitSet extends AbstractBitSet
         final int w = wordIndex(bitIndex);
         final int w1 = level1Index(w);
         final int w2 = level2Index(w);
-        long[] a3 = getOrCreateBlock(w1, w2);
+        long[] a3 = getBlock(table, w1, w2);
+        if (a3 == null) {
+            a3 = getOrCreateBlock(w1, w2);
+            // the block receives the bit below, so it does not stay all zero
+            recordNewBlock();
+        }
         int w3 = level3Index(w);
         long oldWord = a3[w3];
         long newWord = oldWord | (1L << bitIndex);
         if (oldWord != newWord) {
             a3[w3] = newWord;
-            invalidateState();
+            recordWord(w, oldWord, newWord);
             return true;
         }
         return false;
@@ -760,11 +765,7 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.or(set);
         }
-        boolean changed = orTable(other.table, null);
-        if (changed) {
-            invalidateState();
-        }
-        return changed;
+        return orTable(other.table, null);
     }
 
     /**
@@ -888,7 +889,7 @@ public class SparseBitSet extends AbstractBitSet
         }
         SparseBitSet diff = new SparseBitSet();
         if (orTable(other.table, diff)) {
-            invalidateState();
+            // orTable writes the blocks of diff directly
             diff.invalidateState();
         }
         return diff;
@@ -899,7 +900,8 @@ public class SparseBitSet extends AbstractBitSet
      * of this set (and of {@code diff}) is fetched or created once, a block of
      * {@code source} whose words are all zero is skipped without touching this
      * set, and a block is allocated only when it receives a non-zero word.
-     * The caller invalidates the states.
+     * The state of this set is updated from each changed word; the caller
+     * invalidates the state of {@code diff}.
      *
      * @param source the table of the set to or into this set
      * @param diff   if not {@code null}, a fresh set that receives the bits
@@ -928,7 +930,9 @@ public class SparseBitSet extends AbstractBitSet
                     if (selfArea == null) {
                         selfArea = getOrCreateArea(w1);
                     }
-                    selfArea[w2] = sourceBlock.clone();
+                    selfBlock = sourceBlock.clone();
+                    selfArea[w2] = selfBlock;
+                    recordNewBlock(w1, w2, selfBlock);
                     changed = true;
                     if (diff != null) {
                         if (diffArea == null) {
@@ -945,6 +949,7 @@ public class SparseBitSet extends AbstractBitSet
                     long newWord = selfWord | sourceWord;
                     if (newWord != selfWord) {
                         selfBlock[w3] = newWord;
+                        recordWord(wordIndex(w1, w2, w3), selfWord, newWord);
                         changed = true;
                         if (diff != null) {
                             if (diffBlock == null) {
@@ -1021,13 +1026,13 @@ public class SparseBitSet extends AbstractBitSet
     @Override
     public int length() {
         updateState();
-        return state.length;
+        return state.length();
     }
 
     @Override
     public int size() {
         updateState();
-        return state.size;
+        return state.size();
     }
 
     @Override
@@ -1039,7 +1044,7 @@ public class SparseBitSet extends AbstractBitSet
     @Override
     public int hashCode() {
         updateState();
-        return state.hash;
+        return state.hash();
     }
 
     @Override
@@ -1432,6 +1437,73 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * Updates the state for a block that was just added to this set and that
+     * receives at least one non-zero word before this set is read again.
+     * Words of the block are recorded separately.
+     */
+    private void recordNewBlock() {
+        State s = state;
+        if (s.valid) {
+            if (s.incremental) {
+                ++s.blockCount;
+            } else {
+                s.valid = false;
+            }
+        }
+    }
+
+    /**
+     * Updates the state for a non-zero block that was just added to this set
+     * at the given position, together with its words.
+     */
+    private void recordNewBlock(int w1, int w2, long[] block) {
+        recordNewBlock();
+        if (state.valid) {
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                long word = block[w3];
+                if (word != 0) {
+                    recordWord(wordIndex(w1, w2, w3), 0L, word);
+                }
+            }
+        }
+    }
+
+    /**
+     * Updates the state for a word that only gained bits: {@code newWord}
+     * holds every bit of {@code oldWord} and at least one more.
+     * The update gives what {@link #updateState()} would compute for the
+     * changed set, as the hash is a xor over the words and the other values
+     * are counts and the last non-zero word. It is done only while the state
+     * is valid and {@link State#incremental}; otherwise the state is
+     * invalidated.
+     *
+     * @param index   the word index of the changed word
+     * @param oldWord the word before the change
+     * @param newWord the word after the change
+     */
+    private void recordWord(int index, long oldWord, long newWord) {
+        State s = state;
+        if (!s.valid) {
+            return;
+        }
+        if (!s.incremental) {
+            s.valid = false;
+            return;
+        }
+        long weight = index + 1;
+        s.rawHash ^= (oldWord * weight) ^ (newWord * weight);
+        s.cardinality += Long.bitCount(newWord) - Long.bitCount(oldWord);
+        if (oldWord == 0) {
+            ++s.count;
+        }
+        // an empty set has maxWordIndex 0, so its first word passes here
+        if (index >= s.maxWordIndex) {
+            s.maxWordIndex = index;
+            s.maxWord = newWord;
+        }
+    }
+
+    /**
      * The entirety of the bit set is examined, and the various statistics of
      * the bit set (size, length, cardinality, hashCode, etc.) are computed. Level
      * arrays that are empty (i.e., all zero at level 3, all null at level 2) are
@@ -1448,7 +1520,7 @@ public class SparseBitSet extends AbstractBitSet
         updateState(); // Update structure and state if needed.
         /* Write any hidden stuff. */
         s.defaultWriteObject();
-        s.writeInt(state.length); // Needed to know where last bit is
+        s.writeInt(state.length()); // Needed to know where last bit is
 
         /* This is the number of index/value pairs to be written. */
         int count = state.count; // Minimum number of words to be written
@@ -1478,7 +1550,7 @@ public class SparseBitSet extends AbstractBitSet
             throw new InternalError("count of entries not consistent");
         }
         /* As a consistency check, write the hash code of the set. */
-        s.writeInt(state.hash);
+        s.writeInt(state.hash());
     }
 
     @Serial
@@ -1516,7 +1588,7 @@ public class SparseBitSet extends AbstractBitSet
             throw new InternalError("count of entries not consistent");
         }
         final int hash = s.readInt(); // Get the hashcode that was stored
-        if (hash != state.hash) { // An error of some kind, if not the same
+        if (hash != state.hash()) { // An error of some kind, if not the same
             throw new IOException("deserialized hashCode mis-match");
         }
     }
@@ -1559,6 +1631,12 @@ public class SparseBitSet extends AbstractBitSet
         private transient int blockCount;
 
         /**
+         * Number of the visited blocks whose words are all zero. They are
+         * counted in {@link #blockCount} and then removed from the set.
+         */
+        private transient int zeroBlockCount;
+
+        /**
          * Working space for counting the number of non-zero bits in the bit set.
          * Holds the current state of the computation of the cardinality.This
          * value is ultimately transferred to the Cache object.
@@ -1578,6 +1656,7 @@ public class SparseBitSet extends AbstractBitSet
             maxWord = 0L; // word at that index
             count = 0; // count of non-zero words in whole set
             blockCount = 0; // count of blocks actually use in whole set
+            zeroBlockCount = 0; // count of all-zero blocks among them
             cardinality = 0; // count of non-zero bits in the whole set
         }
 
@@ -1591,6 +1670,9 @@ public class SparseBitSet extends AbstractBitSet
                     isZero = false;
                     compute(wordIndex(w1, w2, w3), word);
                 }
+            }
+            if (isZero) {
+                ++zeroBlockCount;
             }
             return isZero;
         }
@@ -1630,9 +1712,13 @@ public class SparseBitSet extends AbstractBitSet
             State state = self.state;
             state.count = count;
             state.cardinality = cardinality;
-            state.length = (maxWordIndex + 1) * BITS_PER_WORD - Long.numberOfLeadingZeros(maxWord);
-            state.size = blockCount * LENGTH3 * BITS_PER_WORD;
-            state.hash = (int) ((hash >> Integer.SIZE) ^ hash);
+            state.maxWordIndex = maxWordIndex;
+            state.maxWord = maxWord;
+            state.blockCount = blockCount;
+            state.rawHash = hash;
+            // the size counts the all-zero blocks this pass removed, so a
+            // later update word by word must not start from it
+            state.incremental = zeroBlockCount == 0;
             state.valid = true;
         }
     }
@@ -1645,14 +1731,41 @@ public class SparseBitSet extends AbstractBitSet
          */
         private boolean valid;
 
-        private transient int hash;
+        /**
+         * Whether a valid state may be updated word by word
+         * ({@link #recordWord}, {@link #recordNewBlock()}). Set by
+         * {@link #updateState()} only when it found no all-zero block; while
+         * it holds, the set has no all-zero block, because every writer that
+         * can leave one invalidates the state.
+         */
+        private boolean incremental;
 
-        private transient int size;
+        /** The hash before folding to an {@code int}. */
+        private transient long rawHash;
+
+        /** Number of blocks in use; all-zero blocks a recompute removed included. */
+        private transient int blockCount;
 
         private transient int cardinality;
 
-        private transient int length;
+        /** Index of the last non-zero word, or 0 if there is none. */
+        private transient int maxWordIndex;
+
+        /** The last non-zero word, or 0 if there is none. */
+        private transient long maxWord;
 
         private transient int count;
+
+        private int hash() {
+            return (int) ((rawHash >> Integer.SIZE) ^ rawHash);
+        }
+
+        private int size() {
+            return blockCount * LENGTH3 * BITS_PER_WORD;
+        }
+
+        private int length() {
+            return (maxWordIndex + 1) * BITS_PER_WORD - Long.numberOfLeadingZeros(maxWord);
+        }
     }
 }
