@@ -24,6 +24,7 @@ package pascal.taie.analysis.pta.core.solver;
 
 import org.jspecify.annotations.Nullable;
 import pascal.taie.World;
+import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.pts.DelegatePointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSet;
@@ -244,6 +245,33 @@ public class TypeFilter implements Transfer {
 
     @Nullable PointsToSet deltaResult;
 
+    /**
+     * The kind and the transfer of a pointer flow edge whose only transfer
+     * is a type filter, in one object, so that an out-edge store without
+     * edge objects keeps them in one slot (see {@link #edgeTag(FlowKind)}).
+     * Internal to the out-edge store of the pointers; public only because
+     * that store is in another package.
+     *
+     * @param filter the only transfer of the edge
+     * @param kind   the kind of the edge
+     */
+    public record EdgeTag(TypeFilter filter, FlowKind kind) {
+    }
+
+    private static final int FLOW_KINDS = FlowKind.values().length;
+
+    /**
+     * The tag of the first {@link FlowKind} asked for, or null before;
+     * most filters only ever serve one kind.
+     */
+    private @Nullable EdgeTag firstEdgeTag;
+
+    /**
+     * The tags of the other kinds, by ordinal, or null until a second
+     * kind is asked for.
+     */
+    private @Nullable EdgeTag @Nullable [] edgeTags;
+
     public TypeFilter(Type type, Solver solver) {
         this.type = type;
         this.typeSystem = solver.getTypeSystem();
@@ -287,6 +315,36 @@ public class TypeFilter implements Transfer {
      */
     long applications() {
         return applications;
+    }
+
+    /**
+     * @return the tag of this filter and the kind, the same object for
+     * every call with the same kind (the edges of a solver are added by
+     * one thread; two threads racing on the first use of a kind would each
+     * get a tag of equal content). Internal to the out-edge store of the
+     * pointers.
+     */
+    public EdgeTag edgeTag(FlowKind kind) {
+        EdgeTag first = firstEdgeTag;
+        if (first != null && first.kind() == kind) {
+            return first;
+        }
+        if (first == null) {
+            first = new EdgeTag(this, kind);
+            firstEdgeTag = first;
+            return first;
+        }
+        EdgeTag[] tags = edgeTags;
+        if (tags == null) {
+            tags = new EdgeTag[FLOW_KINDS];
+            edgeTags = tags;
+        }
+        EdgeTag tag = tags[kind.ordinal()];
+        if (tag == null) {
+            tag = new EdgeTag(this, kind);
+            tags[kind.ordinal()] = tag;
+        }
+        return tag;
     }
 
     @Override
