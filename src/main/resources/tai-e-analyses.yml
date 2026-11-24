@@ -42,6 +42,9 @@
     pack-pending-deltas: true # whether a pending work list delta that is a
     # large set on arrival is held as packed words (same results either way;
     # the "Work list:" log line counts packs and unpacks)
+    census: false # whether log, at the finish before any release, the SCC
+    # census of the pointer flow graph's unfiltered edges and the block
+    # census of the points-to sets (measurement only; walks every pointer)
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format

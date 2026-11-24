@@ -232,6 +232,12 @@ public class DefaultSolver implements Solver {
      */
     private boolean solverStateReleased;
 
+    /**
+     * The census taken at the finish with the option {@code census}, or
+     * null if the option is off.
+     */
+    private @Nullable SolverCensus census;
+
     private CSCallGraph callGraph;
 
     private PointerFlowGraph pointerFlowGraph;
@@ -501,6 +507,9 @@ public class DefaultSolver implements Solver {
         if (interner != null) {
             logger.info("Points-to set interner: {} shared sets, {}",
                     interner.size(), interner.counters());
+        }
+        if (options.getBoolean("census")) {
+            census = SolverCensus.take(csManager);
         }
         if (options.getBoolean("release-solver-state")) {
             releaseSolverState();
