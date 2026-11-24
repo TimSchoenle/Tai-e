@@ -37,6 +37,7 @@ import pascal.taie.language.type.Type;
 import pascal.taie.util.collection.ArraySet;
 import pascal.taie.util.collection.HybridIndexableSet;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -420,6 +421,51 @@ class PointerOutEdgesTest {
             stored.add(edge.target());
         }
         assertEquals(targets, stored);
+    }
+
+    private static Object[] slots(Pointer pointer) throws ReflectiveOperationException {
+        Field edges = AbstractPointer.class.getDeclaredField("edges");
+        edges.setAccessible(true);
+        return (Object[]) edges.get(pointer);
+    }
+
+    /**
+     * Two slots per out edge: the target or edge object, and one tag for
+     * the kind and the transfer (none for an edge object; the kind itself
+     * for {@link Identity}; for a {@link TypeFilter}, one tag per filter and
+     * kind, shared by every edge of that filter and kind).
+     */
+    @Test
+    void anEdgeTakesTwoSlotsAndEdgesShareTheTagOfTheirFilterAndKind()
+            throws ReflectiveOperationException {
+        Transfer filter = transfers[1];
+        TestPointer a = new TestPointer(TARGETS);
+        TestPointer b = new TestPointer(TARGETS + 1);
+        a.addEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, a, TARGET[0]), Identity.get());
+        assertEquals(2, slots(a).length);
+        a.addEdge(new PointerFlowEdge(FlowKind.CAST, a, TARGET[1]), filter);
+        PointerFlowEdge plain = new Plain(FlowKind.RETURN, a, TARGET[2]);
+        a.addEdge(plain, Identity.get());
+        b.addEdge(new PointerFlowEdge(FlowKind.CAST, b, TARGET[1]), filter);
+        b.addEdge(new PointerFlowEdge(FlowKind.RETURN, b, TARGET[2]), filter);
+        b.addEdge(new PointerFlowEdge(FlowKind.RETURN, b, TARGET[3]), transfers[2]);
+
+        Object[] as = slots(a);
+        assertEquals(0, as.length % 2);
+        assertSame(TARGET[0], as[0]);
+        assertSame(FlowKind.LOCAL_ASSIGN, as[1]);
+        assertSame(TARGET[1], as[2]);
+        assertSame(plain, as[4]);
+        assertNull(as[5]);
+        Object[] bs = slots(b);
+        assertSame(TARGET[1], bs[0]);
+        assertSame(as[3], bs[1], "one tag per filter and kind");
+        assertNotSame(bs[1], bs[3], "a tag per kind");
+        assertNotSame(bs[3], bs[5], "a tag per filter");
+        assertEquals(List.of(TARGET[1], filter, TARGET[2], filter, TARGET[3], transfers[2]),
+                outTransfers(b, true));
+        assertEquals(List.of(FlowKind.CAST, FlowKind.RETURN, FlowKind.RETURN),
+                b.getOutEdges().stream().map(PointerFlowEdge::kind).toList());
     }
 
     @Test

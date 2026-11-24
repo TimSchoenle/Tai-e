@@ -63,15 +63,17 @@ abstract class AbstractPointer implements Pointer {
     /**
      * Slots per out edge in {@link #edges}.
      */
-    private static final int SLOTS = 3;
+    private static final int SLOTS = 2;
 
     /**
      * Out edges in insertion order, {@link #SLOTS} slots each, or null
      * before the first edge. An edge stored as an object has the
-     * {@link PointerFlowEdge} in its first slot and null in the others. An
+     * {@link PointerFlowEdge} in its first slot and null in the second. An
      * edge stored without an object (see {@link #addEdge(PointerFlowEdge,
-     * Transfer)}) has its target in the first slot, its only transfer in
-     * the second and its {@link FlowKind} in the third. The edges fill a
+     * Transfer)}) has its target in the first slot and a tag for its
+     * {@link FlowKind} and its only transfer in the second: the kind itself
+     * for {@link Identity}, {@link TypeFilter#edgeTag(FlowKind)} for a
+     * {@link TypeFilter}. The edges fill a
      * prefix of the array; the first slot of each unused entry is null.
      * (No count field: it would enlarge every pointer object.)
      */
@@ -134,7 +136,7 @@ abstract class AbstractPointer implements Pointer {
         int[] added = IntArraySets.add(liveSuccessors(), edge.target().getIndex());
         if (added != null) {
             successors = added;
-            append(edge, null, null);
+            append(edge, null);
             return edge;
         } else if (edge.kind() == FlowKind.OTHER) {
             Object[] slots = edges;
@@ -152,11 +154,10 @@ abstract class AbstractPointer implements Pointer {
                     PointerFlowEdge outEdge = materialize(slots, i);
                     slots[i] = outEdge;
                     slots[i + 1] = null;
-                    slots[i + 2] = null;
                     return outEdge;
                 }
             }
-            append(edge, null, null);
+            append(edge, null);
             return edge;
         }
         return null;
@@ -168,7 +169,8 @@ abstract class AbstractPointer implements Pointer {
      * An edge of the class {@link PointerFlowEdge} itself, of a kind other
      * than {@link FlowKind#OTHER}, without transfers and with the transfer
      * {@link Identity} or a {@link TypeFilter} (neither reads the edge) is
-     * stored as its target, transfer and kind, without the edge object:
+     * stored as its target and one tag for its transfer and kind, without
+     * the edge object:
      * {@link #getOutEdges()} returns a new edge object for it each time.
      */
     @Override
@@ -185,7 +187,9 @@ abstract class AbstractPointer implements Pointer {
             return null;
         }
         successors = added;
-        append(edge.target(), transfer, edge.kind());
+        FlowKind kind = edge.kind();
+        append(edge.target(), transfer == Identity.INSTANCE
+                ? kind : ((TypeFilter) transfer).edgeTag(kind));
         edge.addTransfer(transfer);
         return edge;
     }
@@ -258,7 +262,7 @@ abstract class AbstractPointer implements Pointer {
         return low * SLOTS;
     }
 
-    private void append(Object first, @Nullable Transfer transfer, @Nullable FlowKind kind) {
+    private void append(Object first, @Nullable Object tag) {
         Object[] slots = edges;
         int used = used();
         if (slots == null) {
@@ -270,8 +274,15 @@ abstract class AbstractPointer implements Pointer {
             edges = slots;
         }
         slots[used] = first;
-        slots[used + 1] = transfer;
-        slots[used + 2] = kind;
+        slots[used + 1] = tag;
+    }
+
+    /**
+     * @return the only transfer of an edge stored without an object, from
+     * its tag.
+     */
+    private static Transfer transferOf(Object tag) {
+        return tag instanceof FlowKind ? Identity.INSTANCE : ((TypeFilter.EdgeTag) tag).filter();
     }
 
     /**
@@ -279,9 +290,11 @@ abstract class AbstractPointer implements Pointer {
      * slot {@code i}.
      */
     private PointerFlowEdge materialize(Object[] slots, int i) {
-        PointerFlowEdge edge = new PointerFlowEdge(
-                (FlowKind) slots[i + 2], this, (Pointer) slots[i]);
-        edge.addTransfer((Transfer) slots[i + 1]);
+        Object tag = slots[i + 1];
+        FlowKind kind = tag instanceof FlowKind identityKind
+                ? identityKind : ((TypeFilter.EdgeTag) tag).kind();
+        PointerFlowEdge edge = new PointerFlowEdge(kind, this, (Pointer) slots[i]);
+        edge.addTransfer(transferOf(tag));
         return edge;
     }
 
@@ -301,7 +314,7 @@ abstract class AbstractPointer implements Pointer {
                 Pointer target = edge.target();
                 edge.forEachTransfer(transfer -> action.accept(edge, target, transfer));
             } else if (first != null) {
-                action.accept(null, (Pointer) first, (Transfer) slots[i + 1]);
+                action.accept(null, (Pointer) first, transferOf(slots[i + 1]));
             } else {
                 return;
             }
