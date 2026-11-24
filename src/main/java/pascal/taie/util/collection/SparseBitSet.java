@@ -967,6 +967,94 @@ public class SparseBitSet extends AbstractBitSet
         return changed;
     }
 
+    /**
+     * Reads what {@code or(source)} would make of this set without changing
+     * it: one pass over the words of {@code source}, starting from the
+     * state of this set.
+     *
+     * @return the {@link #hashCode()} of the union in the low 32 bits and
+     * its {@link #cardinality()} in the high 32 bits; see
+     * {@link #unionHash(long)} and {@link #unionCardinality(long)}
+     */
+    public long orSummary(SparseBitSet source) {
+        updateState();
+        long rawHash = state.rawHash;
+        int cardinality = state.cardinality;
+        long[][][] sourceTable = source.table;
+        for (int w1 = 0; w1 < sourceTable.length; ++w1) {
+            long[][] sourceArea = sourceTable[w1];
+            if (sourceArea == null) {
+                continue;
+            }
+            long[][] selfArea = w1 < table.length ? table[w1] : null;
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] sourceBlock = sourceArea[w2];
+                if (sourceBlock == null) {
+                    continue;
+                }
+                long[] selfBlock = selfArea != null ? selfArea[w2] : null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long selfWord = selfBlock != null ? selfBlock[w3] : 0L;
+                    long newWord = selfWord | sourceBlock[w3];
+                    if (newWord != selfWord) {
+                        long weight = wordIndex(w1, w2, w3) + 1;
+                        rawHash ^= (selfWord * weight) ^ (newWord * weight);
+                        cardinality += Long.bitCount(newWord) - Long.bitCount(selfWord);
+                    }
+                }
+            }
+        }
+        return ((long) cardinality << Integer.SIZE) | (State.fold(rawHash) & 0xFFFFFFFFL);
+    }
+
+    /**
+     * @return the hash code of the union in a result of {@link #orSummary}.
+     */
+    public static int unionHash(long summary) {
+        return (int) summary;
+    }
+
+    /**
+     * @return the cardinality of the union in a result of {@link #orSummary}.
+     */
+    public static int unionCardinality(long summary) {
+        return (int) (summary >>> Integer.SIZE);
+    }
+
+    /**
+     * @return a new set of the bits of this set that {@code other} does not
+     * hold; neither set changes.
+     */
+    public SparseBitSet minus(SparseBitSet other) {
+        SparseBitSet result = new SparseBitSet();
+        for (int w1 = 0; w1 < table.length; ++w1) {
+            long[][] area = table[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                long[] otherBlock = getBlock(other.table, w1, w2);
+                long[] resultBlock = null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long word = otherBlock != null ? block[w3] & ~otherBlock[w3] : block[w3];
+                    if (word != 0) {
+                        if (resultBlock == null) {
+                            resultBlock = result.getOrCreateBlock(w1, w2);
+                        }
+                        resultBlock[w3] = word;
+                    }
+                }
+            }
+        }
+        // the blocks were written directly
+        result.invalidateState();
+        return result;
+    }
+
     @Override
     public boolean xor(IBitSet set) {
         if (this == set) {
@@ -1757,6 +1845,10 @@ public class SparseBitSet extends AbstractBitSet
         private transient int count;
 
         private int hash() {
+            return fold(rawHash);
+        }
+
+        private static int fold(long rawHash) {
             return (int) ((rawHash >> Integer.SIZE) ^ rawHash);
         }
 

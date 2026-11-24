@@ -24,13 +24,17 @@ package pascal.taie.analysis.pta.pts;
 
 import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.util.collection.SparseBitSet;
 
 /**
  * Shares equal points-to sets between pointers (hash-consing).
  * <p>
  * A pointer holds a shared set; a change of its points-to set builds the
  * new set on a copy, or in place when no other pointer holds the set, and
- * replaces the held set by the shared set equal to the result. Two sets are equal here when they have the same form
+ * replaces the held set by the shared set equal to the result. A large set
+ * held by several pointers that takes a large set first looks for the
+ * result in the table and takes it from there without a copy. Two sets are
+ * equal here when they have the same form
  * (empty, singleton, small or large) and the same elements in iteration
  * order, so sharing never changes the iteration order of a pointer's set.
  * <p>
@@ -52,8 +56,8 @@ public final class PointsToSetInterner {
     private int size;
 
     /**
-     * Changes of a pointer's set through {@link #addAllDiff}, by the number
-     * of pointers holding the set before the change.
+     * Changes of a pointer's set through {@link #addAllDiff}, by the holder
+     * count of the set before the change (see {@link Counters}).
      */
     private long unsharedWrites;
 
@@ -70,6 +74,14 @@ public final class PointsToSetInterner {
     private long copies;
 
     private long copyHits;
+
+    /**
+     * Changes of a set held by two or more pointers that probed the table
+     * for their result before copying, and those of them that found it.
+     */
+    private long probes;
+
+    private long probeHits;
 
     public PointsToSetInterner(PointsToSetFactory factory) {
         this(factory, INITIAL_CAPACITY);
@@ -130,6 +142,21 @@ public final class PointsToSetInterner {
         if (held instanceof DelegatePointsToSet sole && sole.holders == 1) {
             return addAllDiffInPlace(pointer, sole, pts);
         }
+        if (held instanceof DelegatePointsToSet shared && shared.holders >= 2) {
+            DelegatePointsToSet delta = asDelegate(pts);
+            if (shared.canSummarizeUnion(delta)) {
+                ++probes;
+                DelegatePointsToSet found = findUnion(shared, delta);
+                if (found != null) {
+                    ++probeHits;
+                    PointsToSet diff = shared.unionDiff(delta);
+                    ++found.holders;
+                    release(shared);
+                    pointer.setPointsToSet(found);
+                    return diff;
+                }
+            }
+        }
         PointsToSet next = held.copy();
         PointsToSet diff = next.addAllDiff(pts);
         ++copies;
@@ -138,7 +165,8 @@ public final class PointsToSetInterner {
     }
 
     private void countWrite(PointsToSet held) {
-        int holders = held instanceof DelegatePointsToSet delegate ? delegate.holders : -1;
+        // covers() has checked that held is a DelegatePointsToSet
+        int holders = ((DelegatePointsToSet) held).holders;
         if (holders < 1) {
             ++unsharedWrites;
         } else if (holders == 1) {
@@ -163,6 +191,29 @@ public final class PointsToSetInterner {
         ++shared.holders;
         pointer.setPointsToSet(shared);
         return diff;
+    }
+
+    /**
+     * Probes the table for the set that {@code held.addAllDiff(pts)} would
+     * make of a copy of {@code held}, without building it: its hash comes
+     * from the state of {@code held} and one pass over the words of
+     * {@code pts}; requires {@code held.canSummarizeUnion(pts)}.
+     *
+     * @return the shared set equal to that set, or null if the table holds
+     * none
+     */
+    @Nullable
+    private DelegatePointsToSet findUnion(DelegatePointsToSet held, DelegatePointsToSet pts) {
+        long summary = held.unionSummary(pts);
+        int hash = SparseBitSet.unionHash(summary);
+        int mask = table.length - 1;
+        for (int i = slot(hash, mask); table[i] != null; i = (i + 1) & mask) {
+            DelegatePointsToSet e = table[i];
+            if (e.internHash == hash && e.isUnionOf(held, pts, summary)) {
+                return e;
+            }
+        }
+        return null;
     }
 
     /**
@@ -233,7 +284,7 @@ public final class PointsToSetInterner {
      */
     public Counters counters() {
         return new Counters(unsharedWrites, soleWrites, twoHolderWrites,
-                manyHolderWrites, copies, copyHits);
+                manyHolderWrites, copies, copyHits, probes, probeHits);
     }
 
     /**
@@ -249,10 +300,16 @@ public final class PointsToSetInterner {
      * @param manyHolderWrites changes of a shared set held by three or more
      * @param copies           changes made on a copy of the held set
      * @param copyHits         copies that gave way to an equal shared set
+     * @param probes           changes of a large set held by two or more,
+     *                         by a large set, that probed the table for the
+     *                         result before copying
+     * @param probeHits        probes that found the result shared, and took
+     *                         it without a copy
      */
     public record Counters(long unsharedWrites, long soleWrites,
                            long twoHolderWrites, long manyHolderWrites,
-                           long copies, long copyHits) {
+                           long copies, long copyHits,
+                           long probes, long probeHits) {
     }
 
     private static DelegatePointsToSet asDelegate(PointsToSet set) {

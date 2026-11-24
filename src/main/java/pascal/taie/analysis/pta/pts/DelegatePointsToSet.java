@@ -90,6 +90,38 @@ public abstract class DelegatePointsToSet implements PointsToSet {
         return hybrid().addAllDiffKeeps(pts.hybrid());
     }
 
+    /**
+     * @return true if {@link #unionSummary}, {@link #isUnionOf} and
+     * {@link #unionDiff} read {@code addAllDiff(pts)} without changing
+     * this set (see {@link HybridBitSet#canSummarizeUnion}).
+     */
+    boolean canSummarizeUnion(DelegatePointsToSet pts) {
+        return hybrid().canSummarizeUnion(pts.hybrid());
+    }
+
+    /**
+     * @see HybridBitSet#unionSummary
+     */
+    long unionSummary(DelegatePointsToSet pts) {
+        return hybrid().unionSummary(pts.hybrid());
+    }
+
+    /**
+     * @see HybridBitSet#isUnionOf
+     */
+    boolean isUnionOf(DelegatePointsToSet a, DelegatePointsToSet b, long summary) {
+        return hybrid().isUnionOf(a.hybrid(), b.hybrid(), summary);
+    }
+
+    /**
+     * @return the difference {@code addAllDiff(pts)} would return, without
+     * changing this set
+     * @see HybridBitSet#unionDiff
+     */
+    PointsToSet unionDiff(DelegatePointsToSet pts) {
+        return newSet(hybrid().unionDiff(pts.hybrid()));
+    }
+
     private HybridBitSet<CSObj> hybrid() {
         if (set instanceof HybridBitSet<CSObj> hybrid) {
             return hybrid;
