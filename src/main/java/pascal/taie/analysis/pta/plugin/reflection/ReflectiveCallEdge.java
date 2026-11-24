@@ -50,4 +50,16 @@ class ReflectiveCallEdge extends OtherEdge<CSCallSite, CSMethod> {
     @Nullable Var getArgs() {
         return args;
     }
+
+    /**
+     * @return true: Class.newInstance() rethrows what the constructor
+     * throws. Method.invoke and Constructor.newInstance wrap it in an
+     * InvocationTargetException, which is not modelled: the unwrapped
+     * exception leaves the call site in its place, so a handler of the
+     * wrapper's type does not receive it.
+     */
+    @Override
+    public boolean propagatesExceptions() {
+        return true;
+    }
 }

@@ -105,5 +105,17 @@ public class DoPriviledgedModel extends IRModelPlugin {
         DoPrivilegedCallEdge(CSCallSite csCallSite, CSMethod callee) {
             super(csCallSite, callee);
         }
+
+        /**
+         * @return true: doPrivileged(...) rethrows what a PrivilegedAction
+         * throws. It wraps a checked exception of a
+         * PrivilegedExceptionAction in a PrivilegedActionException, which is
+         * not modelled: the unwrapped exception leaves the call site in its
+         * place.
+         */
+        @Override
+        public boolean propagatesExceptions() {
+            return true;
+        }
     }
 }

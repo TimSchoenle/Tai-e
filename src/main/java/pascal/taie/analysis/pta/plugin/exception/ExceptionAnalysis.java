@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.plugin.exception;
 import pascal.taie.analysis.exception.CatchAnalysis;
 import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.Edge;
+import pascal.taie.analysis.graph.callgraph.OtherEdge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
@@ -154,8 +155,7 @@ public class ExceptionAnalysis implements Plugin {
      */
     @Override
     public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
-        if (edge.getKind() != CallKind.OTHER) {
-            // currently, don't propagate exceptions along OTHER edges
+        if (propagatesExceptions(edge)) {
             CSMethod callee = edge.getCallee();
             Optional<CSMethodThrowResult> csResult =
                     callee.getResult(getClass().getName());
@@ -197,8 +197,7 @@ public class ExceptionAnalysis implements Plugin {
                     result.addUncaughtExceptions(uncaught);
                     solver.getCallGraph()
                             .edgesInTo(csMethod)
-                            // currently, don't propagate exceptions along OTHER edges
-                            .filter(edge -> edge.getKind() != CallKind.OTHER)
+                            .filter(ExceptionAnalysis::propagatesExceptions)
                             .forEach(edge -> {
                                 CSCallSite callSite = edge.getCallSite();
                                 CSMethod caller = callSite.getContainer();
@@ -208,6 +207,17 @@ public class ExceptionAnalysis implements Plugin {
                 }
             }
         }
+    }
+
+    /**
+     * @return whether the exceptions that the callee of {@code edge} does not
+     * catch leave its call site: true for regular calls and for the
+     * {@link CallKind#OTHER} edges whose call site calls the callee.
+     */
+    private static boolean propagatesExceptions(Edge<CSCallSite, CSMethod> edge) {
+        return edge.getKind() != CallKind.OTHER
+                || (edge instanceof OtherEdge<?, ?> otherEdge
+                && otherEdge.propagatesExceptions());
     }
 
     /**

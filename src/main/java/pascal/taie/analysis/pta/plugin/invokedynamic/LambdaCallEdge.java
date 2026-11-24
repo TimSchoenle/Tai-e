@@ -57,6 +57,15 @@ class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod> {
         return lambdaContext;
     }
 
+    /**
+     * @return true: the call on the functional object runs the lambda body,
+     * and what the body throws leaves that call.
+     */
+    @Override
+    public boolean propagatesExceptions() {
+        return true;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
