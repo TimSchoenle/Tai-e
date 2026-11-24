@@ -84,4 +84,13 @@ class SelectiveSelector implements ContextSelector {
                 delegate.selectHeapContext(method, obj) :
                 delegate.getEmptyContext();
     }
+
+    /**
+     * The choice between the delegate and the empty context reads only the
+     * callee, so the call site matters exactly when it does to the delegate.
+     */
+    @Override
+    public boolean isInstanceContextCallSiteFree() {
+        return delegate.isInstanceContextCallSiteFree();
+    }
 }

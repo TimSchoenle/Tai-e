@@ -44,4 +44,9 @@ class KTypeSelector extends KLimitingSelector<Type> {
         return factory.append(
                 recv.getContext(), recv.getObject().getContainerType(), limit);
     }
+
+    @Override
+    public boolean isInstanceContextCallSiteFree() {
+        return true;
+    }
 }

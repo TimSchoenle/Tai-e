@@ -47,6 +47,11 @@ class ContextInsensitiveSelector extends AbstractContextSelector<Void> {
     }
 
     @Override
+    public boolean isInstanceContextCallSiteFree() {
+        return true;
+    }
+
+    @Override
     protected Context selectNewObjContext(CSMethod method, NewObj obj) {
         return getEmptyContext();
     }

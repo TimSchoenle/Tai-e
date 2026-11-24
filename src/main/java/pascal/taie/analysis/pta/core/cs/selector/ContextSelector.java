@@ -67,4 +67,18 @@ public interface ContextSelector {
      * @return the heap context for the object.
      */
     Context selectHeapContext(CSMethod method, Obj obj);
+
+    /**
+     * Whether {@link #selectContext(CSCallSite, CSObj, JMethod)} never reads
+     * its call site, so that its result is a function of the receiver object
+     * and the callee alone. An analysis may then select the callee context of
+     * a receiver object once and use it for every call site. The default is
+     * {@code false}; a selector returns {@code true} only when this holds.
+     *
+     * @return whether the context of an instance call is independent of the
+     * call site.
+     */
+    default boolean isInstanceContextCallSiteFree() {
+        return false;
+    }
 }
