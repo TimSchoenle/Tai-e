@@ -58,7 +58,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Queue;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -113,7 +112,13 @@ public class ExceptionAnalysis implements Plugin {
     /**
      * Work-list of exception entries to be propagated.
      */
-    private Queue<Entry> workList = new ArrayDeque<>();
+    private ArrayDeque<Work> workList = new ArrayDeque<>();
+
+    /**
+     * A drain whose work-list held more items than this replaces the
+     * deque afterwards, as an {@link ArrayDeque} never shrinks.
+     */
+    private static final int TRIM_ABOVE = 1024;
 
     /**
      * Number of drained entries that brought no exception new to their
@@ -127,9 +132,56 @@ public class ExceptionAnalysis implements Plugin {
     int maxWorkListSize;
 
     /**
-     * Work-list entries.
+     * Work-list items.
      */
-    private record Entry(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
+    private sealed interface Work permits Entry, Wave {
+    }
+
+    /**
+     * Exceptions that {@code stmt} of {@code csMethod} may throw.
+     */
+    private record Entry(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions)
+            implements Work {
+    }
+
+    /**
+     * Uncaught exceptions of {@code callee} that go out over its call edges
+     * {@code next} to {@code end - 1}, one edge at a time, each as an entry
+     * at the head of the work-list.
+     */
+    private static final class Wave implements Work {
+
+        private final CSMethod callee;
+
+        private final Set<CSObj> exceptions;
+
+        private final int end;
+
+        private int next;
+
+        private Wave(CSMethod callee, Set<CSObj> exceptions) {
+            this.callee = callee;
+            this.exceptions = exceptions;
+            this.end = callee.getEdgeCount();
+        }
+
+        /**
+         * @return the next edge that propagates exceptions, or null if no
+         * such edge is left.
+         */
+        private Edge<CSCallSite, CSMethod> takeEdge() {
+            while (next < end) {
+                Edge<CSCallSite, CSMethod> edge = callee.getEdge(next++);
+                if (propagatesExceptions(edge)) {
+                    return edge;
+                }
+            }
+            return null;
+        }
+
+        private boolean isDone() {
+            return next >= end;
+        }
     }
 
     @Override
@@ -237,45 +289,63 @@ public class ExceptionAnalysis implements Plugin {
      * to call site (invoke) of the method.
      */
     private void propagateExceptions() {
+        int peak = 0;
         while (!workList.isEmpty()) {
-            maxWorkListSize = Math.max(maxWorkListSize, workList.size());
-            Entry entry = workList.poll();
-            CSMethod csMethod = entry.csMethod();
-            // Temporary fix: skip non-application methods when only-app is enabled.
-            if (onlyApp && !csMethod.getMethod().isApplication()) {
-                continue;
-            }
-            Set<CSObj> exceptions = entry.exceptions();
-            if (exceptions.isEmpty()) {
-                continue;
-            }
-            Stmt stmt = entry.stmt();
-            CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
-            Set<CSObj> diff = result.propagate(stmt, exceptions);
-            if (diff.isEmpty()) {
-                emptyDiffs++;
-            } else {
-                Set<CSObj> uncaught = analyzeIntraUncaught(
-                        stmt, diff, csMethod);
-                // only the exceptions new to the uncaught set go out: every
-                // other one went out over each edge into csMethod when it
-                // entered the set, or with the whole set when the edge was
-                // added (onNewCallEdge), and those entries drained first
-                Set<CSObj> fresh = uncaught.isEmpty()
-                        ? uncaught
-                        : result.addUncaughtExceptions(uncaught);
-                if (!fresh.isEmpty()) {
-                    solver.getCallGraph()
-                            .edgesInTo(csMethod)
-                            .filter(ExceptionAnalysis::propagatesExceptions)
-                            .forEach(edge -> {
-                                CSCallSite callSite = edge.getCallSite();
-                                CSMethod caller = callSite.getContainer();
-                                Invoke invoke = callSite.getCallSite();
-                                workList.add(new Entry(caller, invoke, fresh));
-                            });
+            peak = Math.max(peak, workList.size());
+            Work head = workList.peek();
+            if (head instanceof Wave wave) {
+                // the wave stays at the head until its last edge is taken,
+                // so its entries drain where the entries queued per edge
+                // used to: the edges do not change during a drain
+                Edge<CSCallSite, CSMethod> edge = wave.takeEdge();
+                if (wave.isDone()) {
+                    workList.poll();
                 }
+                if (edge != null) {
+                    CSCallSite callSite = edge.getCallSite();
+                    propagate(callSite.getContainer(), callSite.getCallSite(),
+                            wave.exceptions);
+                }
+            } else {
+                workList.poll();
+                Entry entry = (Entry) head;
+                propagate(entry.csMethod(), entry.stmt(), entry.exceptions());
             }
+        }
+        maxWorkListSize = Math.max(maxWorkListSize, peak);
+        if (peak > TRIM_ABOVE) {
+            workList = new ArrayDeque<>();
+        }
+    }
+
+    /**
+     * Adds the exceptions to those that {@code stmt} of {@code csMethod} may
+     * throw, and queues a wave of those that the method newly does not catch.
+     */
+    private void propagate(CSMethod csMethod, Stmt stmt, Set<CSObj> exceptions) {
+        // Temporary fix: skip non-application methods when only-app is enabled.
+        if (onlyApp && !csMethod.getMethod().isApplication()) {
+            return;
+        }
+        if (exceptions.isEmpty()) {
+            return;
+        }
+        CSMethodThrowResult result = csMethod.getResult(resultKey, resultFactory);
+        Set<CSObj> diff = result.propagate(stmt, exceptions);
+        if (diff.isEmpty()) {
+            emptyDiffs++;
+            return;
+        }
+        Set<CSObj> uncaught = analyzeIntraUncaught(stmt, diff, csMethod);
+        // only the exceptions new to the uncaught set go out: every
+        // other one went out over each edge into csMethod when it
+        // entered the set, or with the whole set when the edge was
+        // added (onNewCallEdge), and those entries drained first
+        Set<CSObj> fresh = uncaught.isEmpty()
+                ? uncaught
+                : result.addUncaughtExceptions(uncaught);
+        if (!fresh.isEmpty() && csMethod.getEdgeCount() > 0) {
+            workList.add(new Wave(csMethod, fresh));
         }
     }
 
