@@ -54,10 +54,25 @@ import java.util.Queue;
  * bits per bit set block, and many deltas can wait at the same time. A
  * packed delta that receives more objects is restored to a set, so merging
  * works on sets as before.
+ * <p>
+ * The entries of one propagation's fan-out ({@link #addFanOutEntry}, up
+ * to {@link #endFanOut()}) share the stored delta of a set they receive by
+ * identity: the set is copied, or packed, once for the new entries of the
+ * fan-out instead of once per entry. Packed words are never changed
+ * (restoring them copies them); a shared set is flagged in every slot that
+ * holds it and copied on its first merge there. A delta handed out by
+ * {@link #takePolledDelta()} may thus be the pending delta of other
+ * pointers: the caller only reads it.
  */
 final class WorkList {
 
     private static final int INITIAL_CAPACITY = 16;
+
+    /**
+     * The most distinct sets of one fan-out whose stored deltas are kept
+     * for reuse; the entries for further sets are stored as before.
+     */
+    private static final int FAN_OUT_SOURCES = 8;
 
     /**
      * The largest ring capacity, a power of two.
@@ -82,6 +97,36 @@ final class WorkList {
      * Pending deltas by ring slot: a {@link PointsToSet} or packed words.
      */
     private @Nullable Object[] ringDeltas = new Object[INITIAL_CAPACITY];
+
+    /**
+     * By ring slot: whether the slot's delta is a set that other slots
+     * may hold too, so that a merge copies it first.
+     */
+    private boolean[] ringShared = new boolean[INITIAL_CAPACITY];
+
+    /**
+     * The sets received by the current fan-out, in {@code [0, fanSize)}; a
+     * forgotten source is null.
+     */
+    private final @Nullable PointsToSet[] fanSources = new PointsToSet[FAN_OUT_SOURCES];
+
+    /**
+     * The stored delta of each fan-out source: a set or packed words.
+     */
+    private final @Nullable Object[] fanStored = new Object[FAN_OUT_SOURCES];
+
+    /**
+     * The insertion number of the first entry holding each stored delta.
+     */
+    private final int[] fanFirstSeq = new int[FAN_OUT_SOURCES];
+
+    /**
+     * Whether each stored set is already flagged shared in every slot
+     * holding it.
+     */
+    private final boolean[] fanFlagged = new boolean[FAN_OUT_SOURCES];
+
+    private int fanSize;
 
     /**
      * Insertion number of the oldest pending pointer.
@@ -115,6 +160,10 @@ final class WorkList {
 
     private long unpacks;
 
+    private long sharedEntries;
+
+    private long sharedCopies;
+
     /**
      * @param ptsFactory the factory of the pending sets
      * @param packLarge  whether a pending delta that is a large set on
@@ -125,44 +174,153 @@ final class WorkList {
         this.packLarge = packLarge;
     }
 
+    /**
+     * Adds the set to the pending delta of the pointer, or adds the
+     * pointer with a copy of the set.
+     */
     void addEntry(Pointer pointer, PointsToSet pointsToSet) {
+        int slot = pendingSlot(pointer);
+        if (slot >= 0) {
+            merge(slot, pointsToSet);
+        } else {
+            insert(pointer, newDelta(pointsToSet));
+        }
+    }
+
+    /**
+     * {@link #addEntry} for one target of the current fan-out: a new entry
+     * reuses the stored delta of an earlier new entry of this fan-out that
+     * received the same set. The caller does not change the set before
+     * {@link #endFanOut()}.
+     */
+    void addFanOutEntry(Pointer pointer, PointsToSet pointsToSet) {
+        int slot = pendingSlot(pointer);
+        if (slot >= 0) {
+            merge(slot, pointsToSet);
+            return;
+        }
+        for (int i = 0; i < fanSize; ++i) {
+            if (fanSources[i] == pointsToSet) {
+                insertShared(pointer, i);
+                return;
+            }
+        }
+        Object stored = newDelta(pointsToSet);
+        int seq = insert(pointer, stored);
+        if (fanSize < FAN_OUT_SOURCES) {
+            fanSources[fanSize] = pointsToSet;
+            fanStored[fanSize] = stored;
+            fanFirstSeq[fanSize] = seq;
+            fanFlagged[fanSize] = false;
+            ++fanSize;
+        }
+    }
+
+    /**
+     * Ends the current fan-out: later entries store their own deltas.
+     */
+    void endFanOut() {
+        Arrays.fill(fanSources, 0, fanSize, null);
+        Arrays.fill(fanStored, 0, fanSize, null);
+        fanSize = 0;
+    }
+
+    /**
+     * @return the ring slot of the pointer if it is pending, else -1
+     */
+    private int pendingSlot(Pointer pointer) {
         int index = pointer.getIndex();
         if (index < seqByIndex.length) {
             int slot = seqByIndex[index] & (ringPointers.length - 1);
             if (ringPointers[slot] == pointer) {
-                merge(slot, pointsToSet);
-                return;
+                return slot;
             }
         }
+        return -1;
+    }
+
+    /**
+     * Adds a pointer that is not pending, with its delta.
+     *
+     * @return the insertion number of the new entry
+     */
+    private int insert(Pointer pointer, Object delta) {
         if (size == ringPointers.length) {
             growRing();
         }
+        int index = pointer.getIndex();
         if (index >= seqByIndex.length) {
             growIndex(index);
         }
         int seq = headSeq + size;
         int slot = seq & (ringPointers.length - 1);
         ringPointers[slot] = pointer;
-        ringDeltas[slot] = newDelta(pointsToSet);
+        ringDeltas[slot] = delta;
+        ringShared[slot] = false;
         seqByIndex[index] = seq;
         ++size;
         ++newEntries;
         if (size > pendingPeak) {
             pendingPeak = size;
         }
+        return seq;
+    }
+
+    /**
+     * Adds a pointer that is not pending with the stored delta of fan-out
+     * source {@code i}. A stored set is flagged in its first slot when it
+     * gets a second holder: no merge has changed it there, as an in-place
+     * merge forgets the source.
+     */
+    private void insertShared(Pointer pointer, int i) {
+        Object stored = fanStored[i];
+        boolean isSet = stored instanceof PointsToSet;
+        if (isSet && !fanFlagged[i]) {
+            ringShared[fanFirstSeq[i] & (ringPointers.length - 1)] = true;
+            fanFlagged[i] = true;
+        }
+        int seq = insert(pointer, stored);
+        if (isSet) {
+            ringShared[seq & (ringPointers.length - 1)] = true;
+        }
+        ++sharedEntries;
     }
 
     private void merge(int slot, PointsToSet pointsToSet) {
         Object pending = ringDeltas[slot];
-        if (pending instanceof PointsToSet set) {
-            set.addAll(pointsToSet);
+        PointsToSet set;
+        if (pending instanceof PointsToSet held) {
+            if (ringShared[slot]) {
+                set = held.copy();
+                ringDeltas[slot] = set;
+                ringShared[slot] = false;
+                ++sharedCopies;
+            } else {
+                if (fanSize != 0) {
+                    forgetFanOutSource(held);
+                }
+                set = held;
+            }
         } else {
-            PointsToSet set = ptsFactory.ofPackedLarge((long[]) pending);
+            set = ptsFactory.ofPackedLarge((long[]) pending);
             ++unpacks;
-            set.addAll(pointsToSet);
             ringDeltas[slot] = set;
         }
+        set.addAll(pointsToSet);
         ++mergedEntries;
+    }
+
+    /**
+     * Stops reusing the stored set that a merge is about to change in
+     * place.
+     */
+    private void forgetFanOutSource(PointsToSet held) {
+        for (int i = 0; i < fanSize; ++i) {
+            if (fanStored[i] == held) {
+                fanSources[i] = null;
+                fanStored[i] = null;
+            }
+        }
     }
 
     private Object newDelta(PointsToSet pointsToSet) {
@@ -190,13 +348,16 @@ final class WorkList {
         int newMask = oldCapacity * 2 - 1;
         Pointer[] newPointers = new Pointer[oldCapacity * 2];
         Object[] newDeltas = new Object[oldCapacity * 2];
+        boolean[] newShared = new boolean[oldCapacity * 2];
         for (int i = 0; i < size; ++i) {
             int seq = headSeq + i;
             newPointers[seq & newMask] = ringPointers[seq & oldMask];
             newDeltas[seq & newMask] = ringDeltas[seq & oldMask];
+            newShared[seq & newMask] = ringShared[seq & oldMask];
         }
         ringPointers = newPointers;
         ringDeltas = newDeltas;
+        ringShared = newShared;
     }
 
     private void growIndex(int index) {
@@ -243,8 +404,12 @@ final class WorkList {
         Object pending = ringDeltas[slot];
         ringPointers[slot] = null;
         ringDeltas[slot] = null;
+        ringShared[slot] = false;
         ++headSeq;
         --size;
+        if (fanSize != 0) {
+            endFanOut();
+        }
         if (pending instanceof PointsToSet set) {
             polledDelta = set;
         } else {
@@ -256,7 +421,8 @@ final class WorkList {
 
     /**
      * @return the delta of the pointer returned by the last
-     * {@link #pollPointer()}; it can be taken once.
+     * {@link #pollPointer()}; it can be taken once. The caller only reads
+     * it: other pending pointers may hold the same set.
      */
     PointsToSet takePolledDelta() {
         PointsToSet delta = polledDelta;
@@ -310,6 +476,20 @@ final class WorkList {
     }
 
     /**
+     * @return the new entries that reused a stored delta of their fan-out
+     */
+    long sharedEntries() {
+        return sharedEntries;
+    }
+
+    /**
+     * @return the merges that first copied a shared set
+     */
+    long sharedCopies() {
+        return sharedCopies;
+    }
+
+    /**
      * @return the counters of the pointer entries, for the log.
      */
     String countersLine() {
@@ -318,6 +498,8 @@ final class WorkList {
                 + " new_entries=" + newEntries
                 + " merged_entries=" + mergedEntries
                 + " packs=" + packs
-                + " unpacks=" + unpacks;
+                + " unpacks=" + unpacks
+                + " shared_entries=" + sharedEntries
+                + " shared_copies=" + sharedCopies;
     }
 }

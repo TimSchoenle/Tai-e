@@ -616,8 +616,10 @@ public class DefaultSolver implements Solver {
         if (!diff.isEmpty()) {
             try {
                 pointer.forEachOutTransfer((edge, target, transfer) ->
-                        addPointsTo(target, deltaTransfers.apply(edge, transfer, diff)));
+                        addFanOutPointsTo(target, transfer,
+                                deltaTransfers.apply(edge, transfer, diff)));
             } finally {
+                workList.endFanOut();
                 deltaTransfers.finish(pointer, diff);
             }
         }
@@ -1049,6 +1051,22 @@ public class DefaultSolver implements Solver {
     public void addPointsTo(Pointer pointer, PointsToSet pts) {
         checkAcceptsWork();
         workList.addEntry(pointer, pts);
+    }
+
+    /**
+     * {@link #addPointsTo(Pointer, PointsToSet)} for one out-edge of a
+     * propagation. The result of {@link Identity} (the delta) and of a
+     * {@link TypeFilter} (a new set, or the delta) is not changed before
+     * the propagation ends, so its new entries may share one stored
+     * delta; another transfer's result might be a set it reuses.
+     */
+    private void addFanOutPointsTo(Pointer target, Transfer transfer, PointsToSet pts) {
+        if (transfer == Identity.INSTANCE || transfer.getClass() == TypeFilter.class) {
+            checkAcceptsWork();
+            workList.addFanOutEntry(target, pts);
+        } else {
+            addPointsTo(target, pts);
+        }
     }
 
     /**
