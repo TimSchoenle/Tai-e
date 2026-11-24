@@ -475,6 +475,12 @@ public class ExceptionAnalysis implements Plugin {
                 progress.addEmptyDiff();
                 wave.emptyDiffs++;
                 skippedEdges++;
+                if (wave.next < wave.end) {
+                    // sequentially the rest of the wave is taken in the
+                    // next loop iteration of propagateExceptions, which
+                    // drains one entry (and may run the progress check)
+                    progress.drainEntry(workList.size());
+                }
                 continue;
             }
             Edge<CSCallSite, CSMethod> edge = wave.callee.getEdge(index);
@@ -488,7 +494,7 @@ public class ExceptionAnalysis implements Plugin {
     /**
      * Finds, in parallel, the edges of {@code wave} whose caller already
      * throws all exceptions of the wave at the call site. Nothing adds to
-     * the caller results while the tasks run. A dense set only reads in
+     * the call sites' thrown sets while the tasks run. A dense set only reads in
      * containsAll; a sparse set may drop its all-zero blocks there, which
      * changes no element. Two edges of one call site (a regular and an
      * other edge into the same callee) can make two tasks check one set;

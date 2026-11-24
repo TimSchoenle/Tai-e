@@ -29,6 +29,7 @@ import pascal.taie.analysis.Tests;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
+import pascal.taie.analysis.pta.core.solver.ProgressCounters;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
@@ -39,9 +40,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -72,6 +73,8 @@ public class ExceptionWaveFilterTest {
             assertEquals(sequential.results(), filtered.results(), label);
             assertEquals(sequential.emptyDiffs(), filtered.emptyDiffs(), label);
             assertEquals(sequential.waveStats(), filtered.waveStats(), label);
+            assertEquals(sequential.counters(), filtered.counters(),
+                    "visits, edges visited, progress empty diffs, entries drained " + label);
         }
     }
 
@@ -122,7 +125,8 @@ public class ExceptionWaveFilterTest {
      * @param results     the throw results of every CS method
      */
     private record Run(List<String> events, List<String> results, long emptyDiffs,
-                       String waveStats, long parallelWaves, long skippedEdges) {
+                       String waveStats, long parallelWaves, long skippedEdges,
+                       List<Long> counters) {
     }
 
     /**
@@ -174,22 +178,25 @@ public class ExceptionWaveFilterTest {
             ExceptionAnalysis analysis = ExceptionAnalysisAccess.of(solver);
             List<String> results = new ArrayList<>();
             for (CSMethod csMethod : solver.getCallGraph()) {
-                Optional<CSMethodThrowResult> result =
-                        csMethod.getResult(ExceptionAnalysis.class.getName());
-                if (result.isEmpty()) {
+                CSMethodThrowResult result = csMethod.getThrowResult();
+                if (result == null) {
                     continue;
                 }
-                results.add(csMethod + " uncaught " + result.get().mayThrowUncaught());
+                results.add(csMethod + " uncaught " + result.mayThrowUncaught());
                 for (Stmt stmt : csMethod.getMethod().getIR()) {
                     results.add(csMethod + " " + stmt + " "
-                            + result.get().mayThrowExplicitly(stmt));
+                            + result.mayThrowExplicitly(stmt));
                 }
             }
+            assertFalse(results.isEmpty(), "no throw result recorded");
             // the call graph iterates its methods in no fixed order
             results.sort(null);
+            ProgressCounters progress = solver.getProgressCounters();
+            List<Long> counters = List.of(analysis.visits, progress.getEdgesVisited(),
+                    progress.getEmptyDiffs(), progress.getEntriesDrained());
             last = new Run(List.copyOf(events), results, analysis.emptyDiffs,
                     analysis.waveStats.toString(), analysis.parallelWaves,
-                    analysis.skippedEdges);
+                    analysis.skippedEdges, counters);
         }
     }
 }
