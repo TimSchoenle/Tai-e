@@ -45,6 +45,8 @@
     plugins: [ ] # | [ pluginClass, ... ]
     time-limit: -1 # set time limit (in seconds) for pointer analysis,
     # -1 means no time limit
+    progress-interval: 60 # log one solver progress line at most every this
+    # many seconds (checked every 8192 work list entries), 0 means off
 
 
 - description: call graph construction
