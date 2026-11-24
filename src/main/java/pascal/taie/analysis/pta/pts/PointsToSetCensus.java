@@ -98,6 +98,11 @@ public final class PointsToSetCensus {
     private static final int SMALL_OBJECTS = 24 + 24;
 
     /**
+     * The packed words reference and block count of a packed SparseBitSet.
+     */
+    private static final int PACKED_FIELDS = 8;
+
+    /**
      * Capacity of the small form's array.
      */
     private static final int SMALL_CAPACITY = new HybridHashSet<>().getThreshold();
@@ -117,6 +122,15 @@ public final class PointsToSetCensus {
     private long bytesTodayLarge;
 
     private long bytesPackedLarge;
+
+    /**
+     * Distinct large sets stored packed (see {@link DelegatePointsToSet#pack()}),
+     * and the estimated bytes of all distinct large sets in the form they
+     * are stored in.
+     */
+    private long largeStoredPacked;
+
+    private long bytesStoredLarge;
 
     private int[] indexes = new int[16];
 
@@ -147,6 +161,13 @@ public final class PointsToSetCensus {
                 largeDistinct++;
                 bytesTodayLarge += today;
                 bytesPackedLarge += packed;
+                if (((DelegatePointsToSet) pts).isPacked()) {
+                    largeStoredPacked++;
+                    bytesStoredLarge += WRAPPER + HYBRID + SPARSE_OBJECTS + PACKED_FIELDS
+                            + align(ARRAY_HEADER + 8L * shape.packedLength());
+                } else {
+                    bytesStoredLarge += today;
+                }
             } else if (n > 1) {
                 today += SMALL_OBJECTS + align(ARRAY_HEADER + REF * (long) SMALL_CAPACITY);
                 packed = today;
@@ -210,12 +231,22 @@ public final class PointsToSetCensus {
         return bytesPackedLarge;
     }
 
+    public long largeStoredPacked() {
+        return largeStoredPacked;
+    }
+
+    public long bytesStoredLarge() {
+        return bytesStoredLarge;
+    }
+
     @Override
     public String toString() {
         return "pts-census all: " + all + "\npts-census distinct: " + distinct
                 + "\npts-census bytes (distinct, estimate): today=" + bytesToday
                 + " packed=" + bytesPacked + " large-sets=" + largeDistinct
-                + " large-today=" + bytesTodayLarge + " large-packed=" + bytesPackedLarge;
+                + " large-today=" + bytesTodayLarge + " large-packed=" + bytesPackedLarge
+                + " large-stored-packed=" + largeStoredPacked
+                + " large-stored=" + bytesStoredLarge;
     }
 
     /**

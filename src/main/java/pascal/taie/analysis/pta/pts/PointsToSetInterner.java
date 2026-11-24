@@ -150,7 +150,7 @@ public final class PointsToSetInterner {
                 if (found != null) {
                     ++probeHits;
                     PointsToSet diff = shared.unionDiff(delta);
-                    ++found.holders;
+                    hold(found);
                     release(shared);
                     pointer.setPointsToSet(found);
                     return diff;
@@ -188,7 +188,7 @@ public final class PointsToSetInterner {
         sole.holders = -1;
         PointsToSet diff = sole.addAllDiff(pts);
         DelegatePointsToSet shared = intern(sole);
-        ++shared.holders;
+        hold(shared);
         pointer.setPointsToSet(shared);
         return diff;
     }
@@ -234,10 +234,22 @@ public final class PointsToSetInterner {
             ++copyHits;
         }
         if (shared != old) {
-            ++shared.holders;
+            hold(shared);
             release(old);
         }
         return shared;
+    }
+
+    /**
+     * Counts one more pointer holding the shared set {@code shared}. A set
+     * held by two or more pointers is never changed in place, so it is
+     * stored packed (see {@link DelegatePointsToSet#pack()}); a sole holder
+     * that changes it later restores its blocks.
+     */
+    private static void hold(DelegatePointsToSet shared) {
+        if (++shared.holders >= 2) {
+            shared.pack();
+        }
     }
 
     /**

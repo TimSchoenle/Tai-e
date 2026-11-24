@@ -108,6 +108,17 @@ public class SparseBitSet extends AbstractBitSet
     public static final int BLOCKS_PER_AREA = LENGTH2;
 
     /**
+     * The word mask in a header of {@link #packed}: one bit per word of a block.
+     */
+    private static final int PACKED_MASK = (1 << LENGTH3) - 1;
+
+    /**
+     * The largest rank a header of {@link #packed} can hold, in the bits
+     * above the word mask of its low half.
+     */
+    private static final int MAX_PACKED_RANK = (1 << (Integer.SIZE - LENGTH3)) - 1;
+
+    /**
      * The shift to create the word index. (I.e., move it to the right end)
      */
     static final int SHIFT3 = ADDRESS_BITS_PER_WORD;
@@ -183,6 +194,23 @@ public class SparseBitSet extends AbstractBitSet
 
     private transient State state;
 
+    /**
+     * The words of this set while it is packed (see {@link #pack()}), or
+     * {@code null}; {@link #table} is {@code null} while this set is packed.
+     * The array starts with one header per block that holds a non-zero
+     * word, in ascending block order: {@code (blockIndex << 32) |
+     * (rank << 8) | wordMask}, where bit {@code w3} of the mask is set when
+     * word {@code w3} of the block is non-zero and {@code rank} is the number
+     * of non-zero words of the blocks before it. The non-zero words follow
+     * the headers, in ascending order.
+     */
+    private transient long @Nullable [] packed;
+
+    /**
+     * The number of block headers at the start of {@link #packed}.
+     */
+    private transient int packedBlocks;
+
     public SparseBitSet() {
         this(1);
     }
@@ -201,6 +229,7 @@ public class SparseBitSet extends AbstractBitSet
         if ((bitIndex + 1) < 1) {
             throw new IndexOutOfBoundsException("bitIndex=" + bitIndex);
         }
+        unpack();
         if (bitIndex >= bitsLength) {
             resize(bitIndex);
         }
@@ -233,6 +262,7 @@ public class SparseBitSet extends AbstractBitSet
         if (bitIndex >= bitsLength) {
             return false;
         }
+        unpack();
         final int w = wordIndex(bitIndex);
         long[][] a2;
         if ((a2 = table[level1Index(w)]) == null) {
@@ -262,6 +292,9 @@ public class SparseBitSet extends AbstractBitSet
             throw new IndexOutOfBoundsException("bitIndex=" + bitIndex);
         }
         final int w = wordIndex(bitIndex);
+        if (packed != null) {
+            return bitIndex < bitsLength && (packedWord(w) & (1L << bitIndex)) != 0;
+        }
         long[][] a2;
         long[] a3;
         return bitIndex < bitsLength
@@ -275,6 +308,7 @@ public class SparseBitSet extends AbstractBitSet
         if ((bitIndex + 1) < 1) {
             throw new IndexOutOfBoundsException("bitIndex=" + bitIndex);
         }
+        unpack();
         if (bitIndex >= bitsLength) {
             resize(bitIndex);
         }
@@ -295,6 +329,9 @@ public class SparseBitSet extends AbstractBitSet
         // any search that goes off the end of the level1 array.
         if (fromIndex < 0) {
             throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex);
+        }
+        if (packed != null) {
+            return packedNextSetBit(fromIndex);
         }
         // This is the word from which the search begins.
         int w = wordIndex(fromIndex);
@@ -357,6 +394,7 @@ public class SparseBitSet extends AbstractBitSet
         int w3 = level3Index(w);
 
         long nword = (~0L << fromIndex);
+        unpack();
         final int tableLength = table.length;
 
         long[][] a2;
@@ -404,6 +442,7 @@ public class SparseBitSet extends AbstractBitSet
             throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex);
         }
 
+        unpack();
         final long[][][] table = this.table;
         final int tableSize = table.length - 1;
 
@@ -461,6 +500,7 @@ public class SparseBitSet extends AbstractBitSet
             throw new IndexOutOfBoundsException("fromIndex < 0: " + fromIndex);
         }
 
+        unpack();
         final long[][][] table = this.table;
         final int tableSize = table.length - 1;
 
@@ -564,6 +604,9 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.contains(set);
         }
+        if (packed != null || other.packed != null) {
+            return containsWords(other);
+        }
         return iterateBlocks(this, other, new ContainsAction(this));
     }
 
@@ -628,6 +671,8 @@ public class SparseBitSet extends AbstractBitSet
         // Unlike other set operations, AND requires iteration on
         // non-null blocks of both this and other sets.
         boolean changed = false;
+        unpack();
+        other.unpack();
         long[][][] thisTable = this.table;
         long[][][] otherTable = other.table;
         int w1InCommon = Math.min(thisTable.length, otherTable.length);
@@ -775,6 +820,10 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.or(set);
         }
+        unpack();
+        if (other.packed != null) {
+            return orPacked(other.packed, other.packedBlocks, null);
+        }
         return orTable(other.table, null);
     }
 
@@ -791,8 +840,23 @@ public class SparseBitSet extends AbstractBitSet
             return super.updateMemoAndCount(known, pass, test);
         }
         checkMemoSets(known, pass);
-        long[][][] selfTable = table;
+        k.unpack();
+        p.unpack();
         int count = 0;
+        long[] words = packed;
+        if (words != null) {
+            // a packed set (a shared one) is read in place; its headers are
+            // in ascending block order, the order of the blocks below
+            int blocks = packedBlocks;
+            for (int h = 0; h < blocks; ++h) {
+                long header = words[h];
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                count += updateMemoAndCountBlock(words, blocks + packedRank(header),
+                        packedMask(header), blockIndex >> LEVEL2, blockIndex & MASK2, k, p, test);
+            }
+            return count;
+        }
+        long[][][] selfTable = table;
         for (int w1 = 0; w1 < selfTable.length; ++w1) {
             long[][] area = selfTable[w1];
             if (area == null) {
@@ -800,38 +864,56 @@ public class SparseBitSet extends AbstractBitSet
             }
             for (int w2 = 0; w2 < LENGTH2; ++w2) {
                 long[] block = area[w2];
-                if (block == null) {
-                    continue;
+                if (block != null) {
+                    count += updateMemoAndCountBlock(block, 0, PACKED_MASK, w1, w2, k, p, test);
                 }
-                long[] knownBlock = getBlock(k.table, w1, w2);
-                long[] passBlock = getBlock(p.table, w1, w2);
-                for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                    long word = block[w3];
-                    if (word == 0) {
-                        continue;
-                    }
-                    long unknown = knownBlock == null ? word : word & ~knownBlock[w3];
-                    if (unknown != 0) {
-                        // tested before they are marked known: a throwing
-                        // test leaves the bits of this word unknown
-                        long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
-                        if (knownBlock == null) {
-                            knownBlock = k.getOrCreateBlock(w1, w2);
-                        }
-                        knownBlock[w3] |= unknown;
-                        k.invalidateState();
-                        if (accepted != 0) {
-                            if (passBlock == null) {
-                                passBlock = p.getOrCreateBlock(w1, w2);
-                            }
-                            passBlock[w3] |= accepted;
-                            p.invalidateState();
-                        }
-                    }
-                    if (passBlock != null) {
-                        count += Long.bitCount(word & passBlock[w3]);
-                    }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * {@link #updateMemoAndCount} for the block {@code (w1, w2)} of a set:
+     * its words are {@code words[at..]}, one per set bit of {@code mask}, in
+     * ascending word order (a block with blocks: {@code at} 0 and every bit
+     * of the mask set).
+     *
+     * @return the number of bits of the block that are in {@code p}
+     */
+    private static int updateMemoAndCountBlock(long[] words, int at, int mask, int w1, int w2,
+                                               SparseBitSet k, SparseBitSet p, IntPredicate test) {
+        long[] knownBlock = getBlock(k.table, w1, w2);
+        long[] passBlock = getBlock(p.table, w1, w2);
+        int count = 0;
+        int next = at;
+        for (int w3 = 0; w3 < LENGTH3; ++w3) {
+            if ((mask & (1 << w3)) == 0) {
+                continue;
+            }
+            long word = words[next++];
+            if (word == 0) {
+                continue;
+            }
+            long unknown = knownBlock == null ? word : word & ~knownBlock[w3];
+            if (unknown != 0) {
+                // tested before they are marked known: a throwing
+                // test leaves the bits of this word unknown
+                long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
+                if (knownBlock == null) {
+                    knownBlock = k.getOrCreateBlock(w1, w2);
                 }
+                knownBlock[w3] |= unknown;
+                k.invalidateState();
+                if (accepted != 0) {
+                    if (passBlock == null) {
+                        passBlock = p.getOrCreateBlock(w1, w2);
+                    }
+                    passBlock[w3] |= accepted;
+                    p.invalidateState();
+                }
+            }
+            if (passBlock != null) {
+                count += Long.bitCount(word & passBlock[w3]);
             }
         }
         return count;
@@ -864,6 +946,14 @@ public class SparseBitSet extends AbstractBitSet
             super.forEachAnd(set, action);
             return;
         }
+        if (packed != null) {
+            forEachAndPacked(other, action);
+            return;
+        }
+        if (other.packed != null) {
+            other.forEachAndPacked(this, action);
+            return;
+        }
         long[][][] selfTable = table;
         long[][][] otherTable = other.table;
         int areas = Math.min(selfTable.length, otherTable.length);
@@ -889,6 +979,32 @@ public class SparseBitSet extends AbstractBitSet
         }
     }
 
+    /**
+     * {@link #forEachAnd} of this packed set, read in place: per non-zero
+     * word, in ascending order, the bits it shares with the word of
+     * {@code other} (packed or not).
+     */
+    private void forEachAndPacked(SparseBitSet other, IntConsumer action) {
+        long[] words = packed;
+        int blocks = packedBlocks;
+        for (int h = 0; h < blocks; ++h) {
+            long header = words[h];
+            int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+            int mask = packedMask(header);
+            int at = blocks + packedRank(header);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) == 0) {
+                    continue;
+                }
+                int wordIndex = firstWord + w3;
+                int base = wordIndex << SHIFT3;
+                for (long rest = words[at++] & other.wordAt(wordIndex); rest != 0; rest &= rest - 1) {
+                    action.accept(base + Long.numberOfTrailingZeros(rest));
+                }
+            }
+        }
+    }
+
     @Override
     public IBitSet orDiff(IBitSet set) {
         if (this == set) {
@@ -897,8 +1013,11 @@ public class SparseBitSet extends AbstractBitSet
         if (!(set instanceof SparseBitSet other)) {
             return super.orDiff(set);
         }
+        unpack();
         SparseBitSet diff = new SparseBitSet();
-        if (orTable(other.table, diff)) {
+        if (other.packed != null
+                ? orPacked(other.packed, other.packedBlocks, diff)
+                : orTable(other.table, diff)) {
             // orTable writes the blocks of diff directly
             diff.invalidateState();
         }
@@ -978,6 +1097,61 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * {@link #orTable} with the words of a packed set ({@link #packed} and
+     * its header count) as the source, read in place; makes the same
+     * changes, state updates and difference.
+     */
+    private boolean orPacked(long[] source, int blocks, @Nullable SparseBitSet diff) {
+        boolean changed = false;
+        for (int h = 0; h < blocks; ++h) {
+            long header = source[h];
+            int blockIndex = (int) (header >>> Integer.SIZE);
+            int w1 = blockIndex >> LEVEL2;
+            int w2 = blockIndex & MASK2;
+            int mask = packedMask(header);
+            int at = blocks + packedRank(header);
+            long[] selfBlock = getBlock(table, w1, w2);
+            if (selfBlock == null) {
+                selfBlock = getOrCreateBlock(w1, w2);
+                long[] diffBlock = diff != null ? diff.getOrCreateBlock(w1, w2) : null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) != 0) {
+                        selfBlock[w3] = source[at];
+                        if (diffBlock != null) {
+                            diffBlock[w3] = source[at];
+                        }
+                        ++at;
+                    }
+                }
+                recordNewBlock(w1, w2, selfBlock);
+                changed = true;
+                continue;
+            }
+            long[] diffBlock = null;
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) == 0) {
+                    continue;
+                }
+                long sourceWord = source[at++];
+                long selfWord = selfBlock[w3];
+                long newWord = selfWord | sourceWord;
+                if (newWord != selfWord) {
+                    selfBlock[w3] = newWord;
+                    recordWord(wordIndex(w1, w2, w3), selfWord, newWord);
+                    changed = true;
+                    if (diff != null) {
+                        if (diffBlock == null) {
+                            diffBlock = diff.getOrCreateBlock(w1, w2);
+                        }
+                        diffBlock[w3] = sourceWord & ~selfWord;
+                    }
+                }
+            }
+        }
+        return changed;
+    }
+
+    /**
      * Reads what {@code or(source)} would make of this set without changing
      * it: one pass over the words of {@code source}, starting from the
      * state of this set.
@@ -990,13 +1164,39 @@ public class SparseBitSet extends AbstractBitSet
         updateState();
         long rawHash = state.rawHash;
         int cardinality = state.cardinality;
+        long[] sourceWords = source.packed;
+        if (sourceWords != null) {
+            int blocks = source.packedBlocks;
+            for (int h = 0; h < blocks; ++h) {
+                long header = sourceWords[h];
+                int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+                int mask = packedMask(header);
+                int at = blocks + packedRank(header);
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) == 0) {
+                        continue;
+                    }
+                    long sourceWord = sourceWords[at++];
+                    int index = firstWord + w3;
+                    long selfWord = wordAt(index);
+                    long newWord = selfWord | sourceWord;
+                    if (newWord != selfWord) {
+                        long weight = index + 1;
+                        rawHash ^= (selfWord * weight) ^ (newWord * weight);
+                        cardinality += Long.bitCount(newWord) - Long.bitCount(selfWord);
+                    }
+                }
+            }
+            return ((long) cardinality << Integer.SIZE) | (State.fold(rawHash) & 0xFFFFFFFFL);
+        }
         long[][][] sourceTable = source.table;
+        long[][][] selfTable = table;
         for (int w1 = 0; w1 < sourceTable.length; ++w1) {
             long[][] sourceArea = sourceTable[w1];
             if (sourceArea == null) {
                 continue;
             }
-            long[][] selfArea = w1 < table.length ? table[w1] : null;
+            long[][] selfArea = selfTable != null && w1 < selfTable.length ? selfTable[w1] : null;
             for (int w2 = 0; w2 < LENGTH2; ++w2) {
                 long[] sourceBlock = sourceArea[w2];
                 if (sourceBlock == null) {
@@ -1004,7 +1204,9 @@ public class SparseBitSet extends AbstractBitSet
                 }
                 long[] selfBlock = selfArea != null ? selfArea[w2] : null;
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                    long selfWord = selfBlock != null ? selfBlock[w3] : 0L;
+                    long selfWord = selfBlock != null ? selfBlock[w3]
+                            : selfTable == null && sourceBlock[w3] != 0
+                            ? packedWord(wordIndex(w1, w2, w3)) : 0L;
                     long newWord = selfWord | sourceBlock[w3];
                     if (newWord != selfWord) {
                         long weight = wordIndex(w1, w2, w3) + 1;
@@ -1037,6 +1239,34 @@ public class SparseBitSet extends AbstractBitSet
      */
     public SparseBitSet minus(SparseBitSet other) {
         SparseBitSet result = new SparseBitSet();
+        long[] words = packed;
+        if (words != null) {
+            // both sets are read in place
+            for (int h = 0; h < packedBlocks; ++h) {
+                long header = words[h];
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                int mask = packedMask(header);
+                int at = packedBlocks + packedRank(header);
+                long[] resultBlock = null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) == 0) {
+                        continue;
+                    }
+                    long word = words[at++] & ~other.wordAt((blockIndex << SHIFT2) + w3);
+                    if (word != 0) {
+                        if (resultBlock == null) {
+                            resultBlock = result.getOrCreateBlock(
+                                    blockIndex >> LEVEL2, blockIndex & MASK2);
+                        }
+                        resultBlock[w3] = word;
+                    }
+                }
+            }
+            result.invalidateState();
+            return result;
+        }
+        // other is read in place, packed or not
+        boolean otherPacked = other.packed != null;
         for (int w1 = 0; w1 < table.length; ++w1) {
             long[][] area = table[w1];
             if (area == null) {
@@ -1047,10 +1277,13 @@ public class SparseBitSet extends AbstractBitSet
                 if (block == null) {
                     continue;
                 }
-                long[] otherBlock = getBlock(other.table, w1, w2);
+                long[] otherBlock = otherPacked ? null : getBlock(other.table, w1, w2);
                 long[] resultBlock = null;
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                    long word = otherBlock != null ? block[w3] & ~otherBlock[w3] : block[w3];
+                    long word = otherBlock != null ? block[w3] & ~otherBlock[w3]
+                            : otherPacked && block[w3] != 0
+                            ? block[w3] & ~other.packedWord(wordIndex(w1, w2, w3))
+                            : block[w3];
                     if (word != 0) {
                         if (resultBlock == null) {
                             resultBlock = result.getOrCreateBlock(w1, w2);
@@ -1112,6 +1345,7 @@ public class SparseBitSet extends AbstractBitSet
 
     @Override
     public void clear() {
+        unpack();
         clearTable(0);
     }
 
@@ -1159,6 +1393,9 @@ public class SparseBitSet extends AbstractBitSet
 
     @Override
     public SparseBitSet copy() {
+        if (packed != null) {
+            return copyPacked();
+        }
         SparseBitSet copy = new SparseBitSet();
         copy.or(this);
         return copy;
@@ -1175,6 +1412,19 @@ public class SparseBitSet extends AbstractBitSet
      * @return the packed words; empty when this set is empty
      */
     public long[] toPacked() {
+        long[] packedWords = packed;
+        if (packedWords != null) {
+            long[] result = new long[packedWords.length];
+            int at = 0;
+            for (int h = 0; h < packedBlocks; ++h) {
+                long header = packedWords[h];
+                int n = Integer.bitCount(packedMask(header));
+                result[at++] = (header & 0xFFFFFFFF00000000L) | packedMask(header);
+                System.arraycopy(packedWords, packedBlocks + packedRank(header), result, at, n);
+                at += n;
+            }
+            return result;
+        }
         int length = 0;
         for (long[][] area : table) {
             if (area != null) {
@@ -1237,6 +1487,255 @@ public class SparseBitSet extends AbstractBitSet
         }
         set.invalidateState();
         return set;
+    }
+
+    /**
+     * Stores the bits of this set in one array of its non-zero words (see
+     * {@link #packed}) in place of its blocks, which costs a fraction of the
+     * memory of a set whose blocks hold few non-zero words. The set keeps its
+     * contents and state. Queries of single bits, iteration, containment,
+     * copies, {@link #orSummary}, {@link #minus}, {@link #updateMemoAndCount},
+     * {@link #forEachAnd} and the packed set as the operand of {@link #or}
+     * and {@link #orDiff} work on the packed words;
+     * any other operation first restores the blocks.
+     * Does nothing if this set is packed, or holds more non-zero words than
+     * a header can count.
+     */
+    public void pack() {
+        if (packed != null) {
+            return;
+        }
+        updateState();
+        int blocks = 0;
+        long words = 0;
+        for (long[][] area : table) {
+            if (area != null) {
+                for (long[] block : area) {
+                    int n = block == null ? 0 : nonZeroWords(block);
+                    if (n != 0) {
+                        ++blocks;
+                        words += n;
+                    }
+                }
+            }
+        }
+        if (words > MAX_PACKED_RANK) {
+            return;
+        }
+        long[] result = new long[blocks + (int) words];
+        int header = 0;
+        int at = blocks;
+        for (int w1 = 0; w1 < table.length; ++w1) {
+            long[][] area = table[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                long rank = at - blocks;
+                long mask = 0;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if (block[w3] != 0) {
+                        mask |= 1L << w3;
+                        result[at++] = block[w3];
+                    }
+                }
+                if (mask != 0) {
+                    result[header++] = ((long) ((w1 << LEVEL2) + w2) << Integer.SIZE)
+                            | (rank << LENGTH3) | mask;
+                }
+            }
+        }
+        packed = result;
+        packedBlocks = blocks;
+        table = null;
+    }
+
+    /**
+     * @return {@code true} if this set is packed (see {@link #pack()}).
+     */
+    public boolean isPacked() {
+        return packed != null;
+    }
+
+    /**
+     * Restores the blocks of a packed set; the state stays as it is, as the
+     * contents do not change.
+     */
+    private void unpack() {
+        long[] words = packed;
+        if (words == null) {
+            return;
+        }
+        table = new long[bitsLength == Integer.MAX_VALUE ? MAX_LENGTH1 : bitsLength / UNIT][][];
+        fillFromPacked(words, packedBlocks);
+        packed = null;
+        packedBlocks = 0;
+    }
+
+    /**
+     * Writes the packed words into the blocks of this set.
+     */
+    private void fillFromPacked(long[] words, int blocks) {
+        for (int h = 0; h < blocks; ++h) {
+            long header = words[h];
+            int blockIndex = (int) (header >>> Integer.SIZE);
+            int mask = packedMask(header);
+            int at = blocks + packedRank(header);
+            long[] block = getOrCreateBlock(blockIndex >> LEVEL2, blockIndex & MASK2);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) != 0) {
+                    block[w3] = words[at++];
+                }
+            }
+        }
+    }
+
+    private static int packedMask(long header) {
+        return (int) header & PACKED_MASK;
+    }
+
+    private static int packedRank(long header) {
+        return (int) header >>> LENGTH3;
+    }
+
+    /**
+     * @return the index of the first header of {@link #packed} whose block
+     * index is at least {@code blockIndex}, or {@link #packedBlocks} if
+     * there is none.
+     */
+    private int packedCeiling(int blockIndex) {
+        long[] words = packed;
+        int low = 0;
+        int high = packedBlocks;
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if ((int) (words[mid] >>> Integer.SIZE) < blockIndex) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    /**
+     * @return the word of this packed set at {@code wordIndex}, 0 if absent.
+     */
+    private long packedWord(int wordIndex) {
+        int blockIndex = wordIndex >> SHIFT2;
+        int h = packedCeiling(blockIndex);
+        if (h == packedBlocks) {
+            return 0L;
+        }
+        long header = packed[h];
+        if ((int) (header >>> Integer.SIZE) != blockIndex) {
+            return 0L;
+        }
+        int mask = packedMask(header);
+        int bit = 1 << level3Index(wordIndex);
+        if ((mask & bit) == 0) {
+            return 0L;
+        }
+        return packed[packedBlocks + packedRank(header) + Integer.bitCount(mask & (bit - 1))];
+    }
+
+    /**
+     * @return the word of this set at {@code wordIndex}, packed or not.
+     */
+    private long wordAt(int wordIndex) {
+        if (packed != null) {
+            return packedWord(wordIndex);
+        }
+        long[] block = getBlock(table, level1Index(wordIndex), level2Index(wordIndex));
+        return block == null ? 0L : block[level3Index(wordIndex)];
+    }
+
+    private int packedNextSetBit(int fromIndex) {
+        long[] words = packed;
+        int w = wordIndex(fromIndex);
+        for (int h = packedCeiling(w >> SHIFT2); h < packedBlocks; ++h) {
+            long header = words[h];
+            int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+            int mask = packedMask(header);
+            int at = packedBlocks + packedRank(header);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) == 0) {
+                    continue;
+                }
+                long word = words[at++];
+                int index = firstWord + w3;
+                if (index == w) {
+                    word &= ~0L << fromIndex;
+                } else if (index < w) {
+                    continue;
+                }
+                if (word != 0) {
+                    return (index << SHIFT3) + Long.numberOfTrailingZeros(word);
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * {@link #contains} when one of the two sets is packed: every non-zero
+     * word of {@code other} must be covered by the word of this set.
+     */
+    private boolean containsWords(SparseBitSet other) {
+        long[] words = other.packed;
+        if (words != null) {
+            int blocks = other.packedBlocks;
+            for (int h = 0; h < blocks; ++h) {
+                long header = words[h];
+                int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+                int mask = packedMask(header);
+                int at = blocks + packedRank(header);
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) != 0) {
+                        long word = words[at++];
+                        if ((word & ~wordAt(firstWord + w3)) != 0) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        long[][][] otherTable = other.table;
+        for (int w1 = 0; w1 < otherTable.length; ++w1) {
+            long[][] area = otherTable[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long word = block[w3];
+                    if (word != 0 && (word & ~wordAt(wordIndex(w1, w2, w3))) != 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * {@link #copy()} of a packed set: the copy is not packed, has the blocks
+     * of the packed words and the state of this set.
+     */
+    private SparseBitSet copyPacked() {
+        SparseBitSet copy = new SparseBitSet();
+        copy.fillFromPacked(packed, packedBlocks);
+        copy.state = state.copyWithBlocks(packedBlocks);
+        return copy;
     }
 
     private static int nonZeroWords(long[] block) {
@@ -1403,6 +1902,8 @@ public class SparseBitSet extends AbstractBitSet
     private static <R> R iterateBlocks(SparseBitSet self, SparseBitSet iterated,
                                        BlockAction<R> action) {
         assert self == action.self;
+        self.unpack();
+        iterated.unpack();
         long[][][] selfTable = self.table;
         long[][][] iteratedTable = iterated.table;
         action.start(iterated);
@@ -1615,6 +2116,7 @@ public class SparseBitSet extends AbstractBitSet
 
     @Serial
     private void writeObject(ObjectOutputStream s) throws IOException {
+        unpack();
         updateState(); // Update structure and state if needed.
         /* Write any hidden stuff. */
         s.defaultWriteObject();
@@ -1840,6 +2342,24 @@ public class SparseBitSet extends AbstractBitSet
 
         /** The hash before folding to an {@code int}. */
         private transient long rawHash;
+
+        /**
+         * @return a valid state of the same contents as this valid state,
+         * for a set of {@code blocks} blocks none of which is all zero.
+         */
+        private State copyWithBlocks(int blocks) {
+            assert valid;
+            State copy = new State();
+            copy.valid = true;
+            copy.incremental = true;
+            copy.rawHash = rawHash;
+            copy.blockCount = blocks;
+            copy.cardinality = cardinality;
+            copy.maxWordIndex = maxWordIndex;
+            copy.maxWord = maxWord;
+            copy.count = count;
+            return copy;
+        }
 
         /** Number of blocks in use; all-zero blocks a recompute removed included. */
         private transient int blockCount;

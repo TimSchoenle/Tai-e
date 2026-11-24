@@ -91,6 +91,21 @@ public abstract class DelegatePointsToSet implements PointsToSet {
     }
 
     /**
+     * Stores a large set in its compact packed form; the contents, the
+     * iteration order and the results of every query stay the same.
+     */
+    void pack() {
+        hybrid().packLarge();
+    }
+
+    /**
+     * @return true if this set is large and stored in its packed form.
+     */
+    boolean isPacked() {
+        return hybrid().isPackedLarge();
+    }
+
+    /**
      * @return true if {@link #unionSummary}, {@link #isUnionOf} and
      * {@link #unionDiff} read {@code addAllDiff(pts)} without changing
      * this set (see {@link HybridBitSet#canSummarizeUnion}).

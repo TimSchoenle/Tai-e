@@ -28,11 +28,13 @@ import pascal.taie.Main;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.analysis.pta.pts.DelegatePointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.Indexer;
+import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.Sets;
 
 import java.lang.reflect.InvocationTargetException;
@@ -79,6 +81,8 @@ class TypeFilterModelTest {
     private static int objectTypeCount;
 
     private static int identityResults;
+
+    private static int packedInputs;
 
     /**
      * Runs the trials on the solver's objects at the end of the analysis.
@@ -410,6 +414,12 @@ class TypeFilterModelTest {
                     expected.addObject(o);
                 }
             }
+            // the first filter of a trial meets the unchecked objects in the
+            // memo: the packed and the unpacked input take turns
+            boolean packedFirst = (trial & 1) == 0;
+            if (packedFirst) {
+                checkPacked(guard, input, expected, trial);
+            }
             PointsToSet got = new TypeFilter(guard, solver).apply(null, input);
             int inRep = TypeFilter.representation(input);
             int wantRep = TypeFilter.representation(expected);
@@ -429,6 +439,45 @@ class TypeFilterModelTest {
                         + " (" + inRep + "), expected " + want + " (" + wantRep
                         + ", identity " + wantIdentity + "), got " + have + " ("
                         + TypeFilter.representation(got) + ", identity " + (got == input) + ")");
+            }
+            if (!packedFirst) {
+                checkPacked(guard, input, expected, trial);
+            }
+        }
+
+        /**
+         * Filters a packed copy of a bit-set input, stored as a shared set
+         * held by two pointers is: the filter reads it in place, so the
+         * result is the one of the input and the copy stays packed.
+         */
+        private void checkPacked(Type guard, PointsToSet input, PointsToSet expected, int trial) {
+            if (TypeFilter.representation(input) != 2
+                    || !(input.copy() instanceof DelegatePointsToSet copy
+                    && copy.set instanceof HybridBitSet<CSObj> hybrid)) {
+                return;
+            }
+            hybrid.packLarge();
+            if (!hybrid.isPackedLarge()) {
+                FAILURES.add("trial " + trial + ": the copy of a bit-set input is not packed");
+                return;
+            }
+            packedInputs++;
+            PointsToSet got = new TypeFilter(guard, solver).apply(null, copy);
+            int wantRep = TypeFilter.representation(expected);
+            boolean wantIdentity = wantRep == 2 && expected.size() == input.size();
+            List<CSObj> want = new ArrayList<>(expected.getObjects());
+            List<CSObj> have = new ArrayList<>(got.getObjects());
+            if (!want.equals(have)
+                    || wantRep != TypeFilter.representation(got)
+                    || wantIdentity != (got == copy)
+                    || !hybrid.isPackedLarge()
+                    || !new ArrayList<>(input.getObjects())
+                            .equals(new ArrayList<>(copy.getObjects()))) {
+                FAILURES.add("trial " + trial + " guard " + guard + ": packed input "
+                        + input.getObjects() + ", expected " + want + " (" + wantRep
+                        + ", identity " + wantIdentity + "), got " + have + " ("
+                        + TypeFilter.representation(got) + ", identity " + (got == copy)
+                        + "), input still packed " + hybrid.isPackedLarge());
             }
         }
 
@@ -501,5 +550,6 @@ class TypeFilterModelTest {
             }
         }
         assertTrue(identityResults > 0, "no trial returned its input");
+        assertTrue(packedInputs > 0, "no trial filtered a packed input");
     }
 }

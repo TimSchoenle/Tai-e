@@ -178,6 +178,26 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
+     * Packs the sparse bit set of this set if it is large (see
+     * {@link SparseBitSet#pack()}); the contents do not change.
+     */
+    public void packLarge() {
+        if (isLargeSet && set instanceof GenericBitSet<E> bits
+                && bits.bitSet instanceof SparseBitSet sparse) {
+            sparse.pack();
+        }
+    }
+
+    /**
+     * @return {@code true} if this set is large and its sparse bit set is
+     * packed.
+     */
+    public boolean isPackedLarge() {
+        return isLargeSet && set instanceof GenericBitSet<E> bits
+                && bits.bitSet instanceof SparseBitSet sparse && sparse.isPacked();
+    }
+
+    /**
      * Restores a large sparse set from the words of {@link #toPackedLarge}:
      * the result equals the packed set as a {@link #copy()} of it would,
      * large set flag included.

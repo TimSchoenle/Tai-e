@@ -245,12 +245,21 @@ class PointsToSetInternerTest {
             PointsToSet empty = sharing.addAllDiff(TestElements.pointer(n), factory.make());
             for (int step = 0; step < 600; ++step) {
                 int i = random.nextInt(n);
-                int[] picked = pick(random);
-                boolean asLarge = random.nextInt(4) == 0;
-                PointsToSet referenceDiff = references[i].addAllDiff(
-                        asLarge ? large(picked) : small(picked));
-                PointsToSet diff = sharing.addAllDiff(pointers[i],
-                        asLarge ? large(picked) : small(picked));
+                int k = (i + 1 + random.nextInt(n - 1)) % n;
+                PointsToSet referenceDiff;
+                PointsToSet diff;
+                if (random.nextInt(5) == 0 && pointers[k].getPointsToSet() != null) {
+                    // the held set of another pointer, as a new edge propagates it
+                    referenceDiff = references[i].addAllDiff(references[k]);
+                    diff = sharing.addAllDiff(pointers[i], pointers[k].getPointsToSet());
+                } else {
+                    int[] picked = pick(random);
+                    boolean asLarge = random.nextInt(4) == 0;
+                    referenceDiff = references[i].addAllDiff(
+                            asLarge ? large(picked) : small(picked));
+                    diff = sharing.addAllDiff(pointers[i],
+                            asLarge ? large(picked) : small(picked));
+                }
                 String at = "seed " + seed + " step " + step;
                 assertEquals(sequence(referenceDiff), sequence(diff), at);
                 for (int j = 0; j < n; ++j) {
@@ -261,6 +270,10 @@ class PointsToSetInternerTest {
                     }
                     assertEquals(sequence(references[j]), sequence(held), at);
                     assertEquals(isLarge(references[j]), isLarge(held), at);
+                    DelegatePointsToSet delegate = (DelegatePointsToSet) held;
+                    if (delegate.isLarge() && delegate.holders >= 2) {
+                        assertTrue(delegate.isPacked(), at + " pointer " + j);
+                    }
                 }
             }
             Set<PointsToSet> held = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -278,6 +291,35 @@ class PointsToSetInternerTest {
                 }
             }
         }
+    }
+
+    @Test
+    void largeSetHeldByTwoIsStoredPacked() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        int[] objects = {1, 9, 40, 41, 63};
+        interner.addAllDiff(p1, large(objects));
+        DelegatePointsToSet first = (DelegatePointsToSet) p1.getPointsToSet();
+        assertFalse(first.isPacked(), "a set held by one pointer was packed");
+        interner.addAllDiff(p2, large(objects));
+        assertSame(first, p2.getPointsToSet());
+        assertTrue(first.isPacked());
+        assertEquals(List.of(1, 9, 40, 41, 63), sequence(first));
+        assertTrue(first.contains(objs[40]));
+        assertFalse(first.contains(objs[39]));
+        assertSame(first, interner.find(large(objects)));
+        assertTrue(first.isPacked(), "a read restored the blocks");
+        // p2 changes a copy; the set stays packed for p1
+        PointsToSet diff = interner.addAllDiff(p2, large(2, 9));
+        assertEquals(List.of(2), sequence(diff));
+        assertEquals(List.of(1, 2, 9, 40, 41, 63), sequence(p2.getPointsToSet()));
+        assertTrue(first.isPacked());
+        // p1 holds it alone now and changes it in place
+        diff = interner.addAllDiff(p1, small(3));
+        assertSame(first, p1.getPointsToSet());
+        assertFalse(first.isPacked());
+        assertEquals(List.of(3), sequence(diff));
+        assertEquals(List.of(1, 3, 9, 40, 41, 63), sequence(first));
     }
 
     @Test
