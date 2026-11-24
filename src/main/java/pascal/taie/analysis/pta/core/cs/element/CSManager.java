@@ -137,4 +137,13 @@ public interface CSManager {
      * The indexer is useful for creating efficient points-to sets.
      */
     Indexer<CSObj> getObjectIndexer();
+
+    /**
+     * @return the number of pointers (variables, fields, array indexes and
+     * mock pointers) this manager has created so far; O(1). This default,
+     * for managers that do not count their pointers, returns -1 (unknown).
+     */
+    default int getNumberOfPointers() {
+        return -1;
+    }
 }

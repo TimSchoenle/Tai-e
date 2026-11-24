@@ -101,6 +101,20 @@ final class WorkList {
         return pointerEntries.isEmpty() && callEdges.isEmpty();
     }
 
+    /**
+     * @return the number of pending pointer entries.
+     */
+    int pointerEntryCount() {
+        return pointerEntries.size();
+    }
+
+    /**
+     * @return the number of pending call edges.
+     */
+    int callEdgeCount() {
+        return callEdges.size();
+    }
+
     interface Entry {
     }
 

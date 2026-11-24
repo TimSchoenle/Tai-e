@@ -144,6 +144,11 @@ public class MapBasedCSManager implements CSManager {
         return objManager;
     }
 
+    @Override
+    public int getNumberOfPointers() {
+        return ptrManager.counter;
+    }
+
     /**
      * @return how many throwable {@link CSObj}s got an index so far, and
      * whether and when their reserved index range ran out.

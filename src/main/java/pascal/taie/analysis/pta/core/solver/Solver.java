@@ -66,6 +66,16 @@ public interface Solver {
     CallGraph<CSCallSite, CSMethod> getCallGraph();
 
     /**
+     * @return the progress counters that plugins may bump; the solver's
+     * progress line (option {@code progress-interval}) reports them.
+     * This default, for solvers without a progress line, returns a new
+     * holder on each call: what plugins set there is never read.
+     */
+    default ProgressCounters getProgressCounters() {
+        return new ProgressCounters();
+    }
+
+    /**
      * Returns the points-to set of given pointer. If the pointer has not
      * been associated with a points-to set, this method will create a
      * new set and associate it with the pointer.
