@@ -71,6 +71,8 @@ class TypeFilterModelTest {
 
     private static int objectCount;
 
+    private static int objectTypeCount;
+
     private static int identityResults;
 
     /**
@@ -93,6 +95,7 @@ class TypeFilterModelTest {
             TypeSystem types = solver.getTypeSystem();
             Set<Type> guards = Sets.newLinkedSet();
             objects.forEach(o -> guards.add(o.getObject().getType()));
+            objectTypeCount = guards.size();
             for (String name : List.of("A", "B", "C", "D", "E", "F", "G", "I", "J",
                     "java.lang.Object", "java.lang.Cloneable")) {
                 Type t = types.getClassType(name);
@@ -116,6 +119,61 @@ class TypeFilterModelTest {
                 }
             }
             probeThrowingCheck(types, objects.get(0));
+            probeChecksPerType(types, objects);
+        }
+
+        /**
+         * Filters every object with a type system that counts its checks,
+         * once all objects in one bit set and once each object alone (the
+         * object-by-object path): objects of one type share the answer, so
+         * each path asks the type system once per distinct object type.
+         */
+        private void probeChecksPerType(TypeSystem types, List<CSObj> objects) {
+            Set<Type> objectTypes = Sets.newLinkedSet();
+            objects.forEach(o -> objectTypes.add(o.getObject().getType()));
+            if (objectTypes.size() >= objects.size()) {
+                FAILURES.add("no two objects share a type");
+            }
+            int[] checks = {0};
+            TypeSystem counting = (TypeSystem) Proxy.newProxyInstance(
+                    TypeSystem.class.getClassLoader(), new Class<?>[]{TypeSystem.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("isAssignable")) {
+                            checks[0]++;
+                        }
+                        return invoke(method, types, args);
+                    });
+            Solver countingSolver = (Solver) Proxy.newProxyInstance(
+                    Solver.class.getClassLoader(), new Class<?>[]{Solver.class},
+                    (proxy, method, args) -> method.getName().equals("getTypeSystem")
+                            ? counting : invoke(method, solver, args));
+            PointsToSet all = solver.makePointsToSet();
+            objects.forEach(all::addObject);
+            if (TypeFilter.representation(all) != 2) {
+                FAILURES.add("all objects are not held in a bit set");
+            }
+            // every object type passes java.lang.Object; some fail A
+            for (String name : List.of("java.lang.Object", "A")) {
+                Type guard = types.getClassType(name);
+                TypeFilter.clearMemos();
+                checks[0] = 0;
+                new TypeFilter(guard, countingSolver).apply(null, all);
+                if (checks[0] != objectTypes.size()) {
+                    FAILURES.add(name + " bit set path: " + checks[0] + " checks for "
+                            + objectTypes.size() + " object types");
+                }
+                TypeFilter.clearMemos();
+                checks[0] = 0;
+                for (CSObj o : objects) {
+                    PointsToSet one = solver.makePointsToSet();
+                    one.addObject(o);
+                    new TypeFilter(guard, countingSolver).apply(null, one);
+                }
+                if (checks[0] != objectTypes.size()) {
+                    FAILURES.add(name + " object-by-object path: " + checks[0]
+                            + " checks for " + objectTypes.size() + " object types");
+                }
+            }
         }
 
         /**
@@ -249,6 +307,8 @@ class TypeFilterModelTest {
     void trialsCoverEveryRepresentation() {
         // more objects than one bit-set block holds
         assertTrue(objectCount > 512, "objects: " + objectCount);
+        // more object types than one word of a type memo holds (64 bits)
+        assertTrue(objectTypeCount > Long.SIZE, "object types: " + objectTypeCount);
         for (int in = 0; in < 3; ++in) {
             for (int want = 0; want < 3; ++want) {
                 if (in < 2 && want > in) {
