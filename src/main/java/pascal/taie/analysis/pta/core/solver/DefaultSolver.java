@@ -181,6 +181,12 @@ public class DefaultSolver implements Solver {
      */
     private boolean solverStateReleased;
 
+    /**
+     * The census taken at the finish with the option {@code census}, or
+     * null if the option is off.
+     */
+    private @Nullable SolverCensus census;
+
     private CSCallGraph callGraph;
 
     private PointerFlowGraph pointerFlowGraph;
@@ -383,6 +389,9 @@ public class DefaultSolver implements Solver {
                     " and the result may be unsound!", timeLimit);
         } else if (timeLimiter != null) { // finish normally but time limiter is still running
             timeLimiter.stop();
+        }
+        if (options.getBoolean("census")) {
+            census = SolverCensus.take(csManager);
         }
         if (options.getBoolean("release-solver-state")) {
             releaseSolverState();

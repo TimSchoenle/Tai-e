@@ -98,6 +98,16 @@ public class SparseBitSet extends AbstractBitSet
     private static final int LENGTH3 = 1 << LEVEL3;
 
     /**
+     * Words per level3 block, for sizing estimates outside this class.
+     */
+    public static final int WORDS_PER_BLOCK = LENGTH3;
+
+    /**
+     * Blocks per level2 area, for sizing estimates outside this class.
+     */
+    public static final int BLOCKS_PER_AREA = LENGTH2;
+
+    /**
      * The shift to create the word index. (I.e., move it to the right end)
      */
     static final int SHIFT3 = ADDRESS_BITS_PER_WORD;
