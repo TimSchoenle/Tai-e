@@ -314,20 +314,66 @@ class PointsToSetInternerTest {
         assertNull(interner.find(small(1, 2)));
         // the table holds the empty set and the one shared set
         assertEquals(2, interner.size());
+        // the shared set counts both pointers, so a change of p1 is made on a copy
+        interner.addAllDiff(p1, small(4));
+        assertSame(target, p2.getPointsToSet());
+        assertEquals(List.of(1, 2, 3), sequence(target));
+        assertSame(target, interner.find(small(1, 2, 3)));
+        assertEquals(List.of(1, 2, 3, 4), sequence(p1.getPointsToSet()));
+    }
+
+    @Test
+    void soleHolderTurnsItsSmallSetLargeInPlace() {
+        Pointer p = TestElements.pointer(1);
+        interner.addAllDiff(p, small(1, 2));
+        PointsToSet sole = p.getPointsToSet();
+        assertFalse(isLarge(sole));
+        int[] more = {3, 4, 5, 6, 7, 8, 9, 10};
+        PointsToSet reference = small(1, 2);
+        PointsToSet referenceDiff = reference.addAllDiff(small(more));
+        PointsToSet diff = interner.addAllDiff(p, small(more));
+        assertSame(sole, p.getPointsToSet());
+        assertTrue(sole.isShared());
+        assertTrue(isLarge(reference));
+        assertTrue(isLarge(sole));
+        assertEquals(sequence(reference), sequence(sole));
+        assertEquals(sequence(referenceDiff), sequence(diff));
+        assertEquals(isLarge(referenceDiff), isLarge(diff));
+        assertSame(sole, interner.find(sole.copy()));
+        assertNull(interner.find(small(1, 2)));
+        assertEquals(2, interner.size());
+    }
+
+    @Test
+    void soleHolderAddsALargeSetToItsLargeSetInPlace() {
+        Pointer p = TestElements.pointer(1);
+        interner.addAllDiff(p, large(1, 2, 3));
+        PointsToSet sole = p.getPointsToSet();
+        assertTrue(isLarge(sole));
+        PointsToSet diff = interner.addAllDiff(p, large(3, 4, 5));
+        assertSame(sole, p.getPointsToSet());
+        assertTrue(sole.isShared());
+        assertTrue(isLarge(sole));
+        assertEquals(List.of(1, 2, 3, 4, 5), sequence(sole));
+        assertEquals(List.of(4, 5), sequence(diff));
+        assertSame(sole, interner.find(large(1, 2, 3, 4, 5)));
+        assertNull(interner.find(large(1, 2, 3)));
+        assertEquals(2, interner.size());
     }
 
     /**
      * Random sequences of changes on several pointers, against a copying
      * interner kept here: after each step every pointer's set has the same
-     * elements, iteration order and form, each difference is the same, and
-     * two pointers share a set exactly when they share one in the copying
-     * interner.
+     * elements, iteration order and form, each difference has the same
+     * elements, order and form, and two pointers share a set exactly when
+     * they share one in the copying interner. The table starts at two slots,
+     * so in-place changes meet its growth and its deletions.
      */
     @Test
     void inPlaceChangeMatchesTheCopyingInterner() {
         for (long seed = 1; seed <= 40; ++seed) {
             Random random = new Random(seed);
-            PointsToSetInterner sharing = new PointsToSetInterner(factory);
+            PointsToSetInterner sharing = new PointsToSetInterner(factory, 2);
             CopyingInterner copying = new CopyingInterner();
             int n = 10;
             Pointer[] pointers = new Pointer[n];
@@ -348,6 +394,12 @@ class PointsToSetInternerTest {
                         asLarge ? large(picked) : small(picked));
                 String at = "seed " + seed + " step " + step;
                 assertEquals(sequence(copyDiff), sequence(diff), at);
+                // a change that adds nothing returns the shared empty set, whose
+                // form differs from an empty large difference; the solver only
+                // asks an empty difference whether it is empty
+                if (!copyDiff.isEmpty()) {
+                    assertEquals(isLarge(copyDiff), isLarge(diff), at);
+                }
                 for (int j = 0; j < n; ++j) {
                     PointsToSet set = pointers[j].getPointsToSet();
                     if (copied[j] == null) {
