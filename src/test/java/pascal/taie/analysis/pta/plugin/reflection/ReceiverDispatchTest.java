@@ -102,6 +102,56 @@ class ReceiverDispatchTest {
         assertEquals(1, calls.get());
     }
 
+    @Test
+    void anEarlierTypeWithoutCalleeIsFoundByOneLookup() {
+        ClassHierarchy hierarchy = World.get().getClassHierarchy();
+        JMethod target = method(hierarchy, "C", "bar");
+        ReceiverDispatch dispatch = new ReceiverDispatch(undispatchable(), target);
+        AtomicInteger hashes = new AtomicInteger();
+        Type a = hashCounting(hashes);
+        Type b = hashCounting(new AtomicInteger());
+        assertNull(dispatch.dispatch(a));
+        assertNull(dispatch.dispatch(b));
+        hashes.set(0);
+        assertNull(dispatch.dispatch(a));
+        assertEquals(1, hashes.get());
+    }
+
+    /**
+     * @return a class hierarchy whose {@code dispatch} answers {@code null}
+     * for every type and that refuses every other call.
+     */
+    private static ClassHierarchy undispatchable() {
+        return (ClassHierarchy) Proxy.newProxyInstance(
+                ClassHierarchy.class.getClassLoader(),
+                new Class<?>[]{ClassHierarchy.class},
+                (proxy, m, args) -> {
+                    if ("dispatch".equals(m.getName())) {
+                        return null;
+                    }
+                    throw new UnsupportedOperationException(m.getName());
+                });
+    }
+
+    /**
+     * @return a type with identity equality that counts its {@code hashCode}
+     * calls in {@code hashes}.
+     */
+    private static Type hashCounting(AtomicInteger hashes) {
+        return (Type) Proxy.newProxyInstance(
+                Type.class.getClassLoader(),
+                new Class<?>[]{Type.class},
+                (proxy, m, args) -> switch (m.getName()) {
+                    case "hashCode" -> {
+                        hashes.incrementAndGet();
+                        yield System.identityHashCode(proxy);
+                    }
+                    case "equals" -> proxy == args[0];
+                    case "toString" -> "CountingType@" + System.identityHashCode(proxy);
+                    default -> throw new UnsupportedOperationException(m.getName());
+                });
+    }
+
     private static JMethod method(ClassHierarchy hierarchy, String className, String name) {
         JClass jclass = hierarchy.getClass(className);
         assertNotNull(jclass, className);

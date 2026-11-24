@@ -44,6 +44,12 @@ import java.util.Map;
  */
 final class ReceiverDispatch {
 
+    /**
+     * Stands for a {@code null} answer in {@link #earlier}, so that one
+     * lookup tells a known type without a callee from an unknown type.
+     */
+    private static final Object NO_CALLEE = new Object();
+
     private final ClassHierarchy hierarchy;
 
     private final JMethod target;
@@ -55,10 +61,11 @@ final class ReceiverDispatch {
     private @Nullable JMethod lastCallee;
 
     /**
-     * Answers of the hierarchy for the types before {@link #lastType},
-     * {@code null} answers included; created at the second type.
+     * Answers of the hierarchy for the types before {@link #lastType}: the
+     * callee, or {@link #NO_CALLEE} for a {@code null} answer; created at the
+     * second type.
      */
-    private @Nullable Map<Type, @Nullable JMethod> earlier;
+    private @Nullable Map<Type, Object> earlier;
 
     ReceiverDispatch(ClassHierarchy hierarchy, JMethod target) {
         this.hierarchy = hierarchy;
@@ -74,16 +81,16 @@ final class ReceiverDispatch {
             return lastCallee;
         }
         if (earlier != null) {
-            JMethod callee = earlier.get(receiverType);
-            if (callee != null || earlier.containsKey(receiverType)) {
-                return callee;
+            Object answer = earlier.get(receiverType);
+            if (answer != null) {
+                return answer == NO_CALLEE ? null : (JMethod) answer;
             }
         }
         if (lastType != null) {
             if (earlier == null) {
                 earlier = new HashMap<>();
             }
-            earlier.put(lastType, lastCallee);
+            earlier.put(lastType, lastCallee != null ? lastCallee : NO_CALLEE);
         }
         if (ref == null) {
             ref = target.getRef();
