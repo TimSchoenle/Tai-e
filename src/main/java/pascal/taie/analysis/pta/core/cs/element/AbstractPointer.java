@@ -77,6 +77,12 @@ abstract class AbstractPointer implements Pointer {
      */
     private Object @Nullable [] edges;
 
+    /**
+     * Marks {@link #edges} as released by {@link #releaseOutEdges()}; its
+     * length 0 is never that of a live array.
+     */
+    private static final Object[] RELEASED_EDGES = new Object[0];
+
     private Set<Predicate<CSObj>> filters = Set.of();
 
     protected AbstractPointer(int index) {
@@ -206,11 +212,36 @@ abstract class AbstractPointer implements Pointer {
     }
 
     /**
+     * Drops {@link #edges} and {@link #successors}; later reads and adds of
+     * out edges throw.
+     */
+    @Override
+    public void releaseOutEdges() {
+        successors = RELEASED;
+        edges = RELEASED_EDGES;
+    }
+
+    /**
+     * @return {@link #edges}
+     * @throws IllegalStateException if {@link #releaseOutEdges()} released it
+     */
+    private Object @Nullable [] liveEdges() {
+        Object[] slots = edges;
+        if (slots == RELEASED_EDGES) {
+            throw new IllegalStateException("the out edges of " + this
+                    + " were released after the fixed point");
+        }
+        return slots;
+    }
+
+    /**
      * @return the number of slots of {@link #edges} in use, found by a
      * binary search for the first unused entry.
+     * @throws IllegalStateException if {@link #releaseOutEdges()} released
+     *                               {@link #edges}
      */
     private int used() {
-        Object[] slots = edges;
+        Object[] slots = liveEdges();
         if (slots == null) {
             return 0;
         }
@@ -260,7 +291,7 @@ abstract class AbstractPointer implements Pointer {
 
     @Override
     public void forEachOutTransfer(TransferAction action) {
-        Object[] slots = edges;
+        Object[] slots = liveEdges();
         if (slots == null) {
             return;
         }

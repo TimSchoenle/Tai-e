@@ -113,6 +113,11 @@ public class CompositePlugin implements Plugin {
     }
 
     @Override
+    public void onRelease() {
+        allPlugins.forEach(Plugin::onRelease);
+    }
+
+    @Override
     public void onFinish() {
         allPlugins.forEach(Plugin::onFinish);
     }
