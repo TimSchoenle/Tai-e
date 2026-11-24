@@ -303,7 +303,7 @@ public class DefaultSolver implements Solver {
     private void initialize() {
         callGraph = new CSCallGraph(csManager);
         pointerFlowGraph = new PointerFlowGraph(csManager);
-        workList = new WorkList(ptsFactory);
+        workList = newWorkList();
         solverStateReleased = false;
         reachableMethods = Sets.newSet();
         initializedClasses = Sets.newSet();
@@ -315,6 +315,10 @@ public class DefaultSolver implements Solver {
             timeLimiter.countDown();
         }
         plugin.onStart();
+    }
+
+    private WorkList newWorkList() {
+        return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"));
     }
 
     private class TimeLimiter {
@@ -358,10 +362,11 @@ public class DefaultSolver implements Solver {
         while (!workList.isEmpty() && !isTimeout) {
             // phase starts
             while (!workList.isEmpty() && !isTimeout) {
-                WorkList.Entry entry = workList.pollEntry();
-                if (entry instanceof WorkList.PointerEntry pEntry) {
-                    Pointer p = pEntry.pointer();
-                    PointsToSet pts = pEntry.pointsToSet();
+                if (workList.hasCallEdge()) {
+                    processCallEdge(workList.pollCallEdge());
+                } else {
+                    Pointer p = workList.pollPointer();
+                    PointsToSet pts = workList.takePolledDelta();
                     PointsToSet diff = propagate(p, pts);
                     if (!diff.isEmpty() && p instanceof CSVar v) {
                         processInstanceStore(v, diff);
@@ -371,13 +376,12 @@ public class DefaultSolver implements Solver {
                         processCall(v, diff);
                         plugin.onNewPointsToSet(v, diff);
                     }
-                } else if (entry instanceof WorkList.CallEdgeEntry eEntry) {
-                    processCallEdge(eEntry.edge());
                 }
             }
             plugin.onPhaseFinish();
         }
         stoppedByTimeLimit = !workList.isEmpty() && isTimeout;
+        logger.info("Work list: {}", workList.countersLine());
         if (stoppedByTimeLimit) {
             logger.warn("Pointer analysis stops early as it reaches time limit ({} seconds)," +
                     " and the result may be unsound!", timeLimit);
@@ -401,7 +405,7 @@ public class DefaultSolver implements Solver {
      */
     private void releaseSolverState() {
         solverStateReleased = true;
-        workList = new WorkList(ptsFactory);
+        workList = newWorkList();
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
         csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
         typeFilters.values().forEach(TypeFilter::releaseMemo);
