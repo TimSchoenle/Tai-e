@@ -187,7 +187,163 @@ class WorkListModelTest {
         assertEquals(1, workList.packs());
         assertEquals(1, workList.unpacks());
         assertEquals("pending_pointers=0 pending_peak=3 new_entries=4"
-                + " merged_entries=3 packs=1 unpacks=1", workList.countersLine());
+                + " merged_entries=3 packs=1 unpacks=1 shared_entries=0 shared_copies=0",
+                workList.countersLine());
+    }
+
+    /**
+     * One fan-out stores each set once: the large set is packed once for
+     * two pointers, the small set copied once for two; a merge into one
+     * holder of the small set leaves the other holder's delta unchanged.
+     */
+    @Test
+    void fanOutStoresEachSetOnceAndCopiesOnWrite() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        Pointer d = pointers.get(3);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet other = factory.make();
+        other.addObject(objects.get(1));
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, true);
+        workList.addFanOutEntry(a, large);
+        workList.addFanOutEntry(c, small);
+        workList.addFanOutEntry(b, large);
+        workList.addFanOutEntry(d, small);
+        workList.endFanOut();
+        // the caller may change its sets after the fan-out
+        small.addObject(objects.get(2));
+        large.removeIf(o -> o == objects.get(3));
+        assertEquals(4, workList.newEntries());
+        assertEquals(1, workList.packs());
+        assertEquals(2, workList.sharedEntries());
+        workList.addEntry(c, other);
+        workList.addEntry(a, other);
+        assertEquals(1, workList.sharedCopies());
+        assertEquals(1, workList.unpacks());
+        assertSame(a, workList.pollPointer());
+        assertEquals(objects, order(workList.takePolledDelta()));
+        assertSame(c, workList.pollPointer());
+        assertEquals(List.of(objects.get(0), objects.get(1)), order(workList.takePolledDelta()));
+        assertSame(b, workList.pollPointer());
+        assertEquals(objects, order(workList.takePolledDelta()));
+        assertSame(d, workList.pollPointer());
+        assertEquals(List.of(objects.get(0)), order(workList.takePolledDelta()));
+        assertEquals(2, workList.unpacks());
+    }
+
+    /**
+     * A set merged in place into its first holder before a second pointer
+     * of the fan-out receives the same source is not reused, and a polled
+     * pointer ends the reuse.
+     */
+    @Test
+    void fanOutDoesNotReuseASetChangedInPlace() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet other = factory.make();
+        other.addObject(objects.get(1));
+        WorkList workList = new WorkList(factory, false);
+        workList.addFanOutEntry(a, small);
+        workList.addEntry(a, other);
+        workList.addFanOutEntry(b, small);
+        workList.endFanOut();
+        assertEquals(0, workList.sharedEntries());
+        assertSame(a, workList.pollPointer());
+        assertEquals(List.of(objects.get(0), objects.get(1)), order(workList.takePolledDelta()));
+        assertSame(b, workList.pollPointer());
+        assertEquals(List.of(objects.get(0)), order(workList.takePolledDelta()));
+        workList.addFanOutEntry(a, small);
+        assertSame(a, workList.pollPointer());
+        PointsToSet polled = workList.takePolledDelta();
+        workList.addFanOutEntry(c, small);
+        workList.addEntry(c, other);
+        workList.endFanOut();
+        assertEquals(0, workList.sharedEntries());
+        assertEquals(List.of(objects.get(0)), order(polled));
+        assertSame(c, workList.pollPointer());
+        assertEquals(List.of(objects.get(0), objects.get(1)), order(workList.takePolledDelta()));
+    }
+
+    @Test
+    void randomFanOutsMatchTheCopyingWorkList() {
+        assertFanOutsMatch(factory, true);
+    }
+
+    @Test
+    void randomFanOutsWithoutPackingMatchTheCopyingWorkList() {
+        assertFanOutsMatch(factory, false);
+    }
+
+    /**
+     * Random fan-outs of a few sets to random pointers, with plain entries
+     * among them (as a transfer that adds work does), polls between the
+     * fan-outs and the callers' sets changed after each fan-out.
+     */
+    private static void assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge) {
+        long shared = 0;
+        long copies = 0;
+        for (int seed = 0; seed < 300; ++seed) {
+            Random random = new Random(seed);
+            WorkList workList = new WorkList(factory, packLarge);
+            CopyingWorkList model = new CopyingWorkList();
+            int range = Math.min(pointers.size(), 4 + random.nextInt(40));
+            int steps = 20 + random.nextInt(120);
+            for (int step = 0; step < steps; ++step) {
+                if (random.nextInt(10) < 6) {
+                    List<PointsToSet> sources = new ArrayList<>();
+                    // up to more sources than one fan-out keeps for reuse
+                    int sourceCount = 1 + random.nextInt(10);
+                    for (int i = 0; i < sourceCount; ++i) {
+                        sources.add(randomSet(factory, random));
+                    }
+                    int targets = 1 + random.nextInt(12);
+                    for (int t = 0; t < targets; ++t) {
+                        Pointer pointer = pointers.get(random.nextInt(range));
+                        if (random.nextInt(8) == 0) {
+                            PointsToSet extra = randomSet(factory, random);
+                            workList.addEntry(pointer, extra);
+                            model.addEntry(pointer, extra);
+                        } else {
+                            PointsToSet source = sources.get(random.nextInt(sourceCount));
+                            workList.addFanOutEntry(pointer, source);
+                            model.addEntry(pointer, source);
+                        }
+                    }
+                    workList.endFanOut();
+                    for (PointsToSet source : sources) {
+                        if (random.nextBoolean()) {
+                            source.addObject(objects.get(random.nextInt(objects.size())));
+                        }
+                    }
+                } else {
+                    int polls = random.nextInt(4);
+                    for (int i = 0; i < polls && !model.isEmpty(); ++i) {
+                        assertSamePoll(model, workList, seed + "/" + step);
+                    }
+                }
+            }
+            while (!model.isEmpty()) {
+                assertSamePoll(model, workList, seed + "/drain");
+            }
+            assertTrue(workList.isEmpty());
+            assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
+            assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
+            assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
+            if (!packLarge) {
+                assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
+            }
+            shared += workList.sharedEntries();
+            copies += workList.sharedCopies();
+        }
+        assertTrue(shared > 1000, "shared entries: " + shared);
+        assertTrue(copies > 100, "shared copies: " + copies);
     }
 
     @Test

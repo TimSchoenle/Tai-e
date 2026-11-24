@@ -41,8 +41,9 @@ import java.util.concurrent.atomic.AtomicLongArray;
  * on its guard type and its input (it ignores the edge; its memo only caches
  * type checks), so the result for every further edge would be equal in
  * contents, iteration order and representation. The solver's consumers only
- * read the passed set: {@link WorkList#addEntry} copies it into a new entry
- * or adds it to an existing one, as it already does for the delta itself,
+ * read the passed set: {@link WorkList#addFanOutEntry} copies it into a new
+ * entry (once per fan-out) or adds it to an existing one, as it already does
+ * for the delta itself,
  * which {@link Identity} passes to every identity edge. Only
  * {@code TypeFilter} itself is shared, not a subclass, which might depend
  * on the edge. The order of the solver's calls (edges, then transfers per
