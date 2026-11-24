@@ -221,6 +221,41 @@ public abstract class AbstractBitSet implements IBitSet {
         return count;
     }
 
+    @Override
+    public int updateMemoAndCount(long[] untested, IBitSet pass, IntPredicate test) {
+        checkPassSet(pass);
+        int count = 0;
+        for (int i = nextSetBit(0); i != -1; i = nextSetBit(i + 1)) {
+            int word = i >>> ADDRESS_BITS_PER_WORD;
+            long bit = 1L << i;
+            if (word < untested.length && (untested[word] & bit) != 0) {
+                // tested before it is cleared: a throwing test leaves the
+                // bit untested
+                boolean passes = test.test(i);
+                untested[word] &= ~bit;
+                if (passes) {
+                    pass.set(i);
+                }
+            }
+            if (pass.get(i)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Checks that the pass set of
+     * {@link #updateMemoAndCount(long[], IBitSet, IntPredicate)} is not
+     * this set.
+     */
+    protected void checkPassSet(IBitSet pass) {
+        if (pass == this) {
+            throw new IllegalArgumentException(
+                    "the input and the pass set must be different sets");
+        }
+    }
+
     /**
      * Checks that this set and the memo sets of
      * {@link #updateMemoAndCount} are three different sets.

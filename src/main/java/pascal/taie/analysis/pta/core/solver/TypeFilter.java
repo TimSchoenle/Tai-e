@@ -33,6 +33,7 @@ import pascal.taie.util.Indexer;
 import pascal.taie.util.collection.AbstractHybridSet;
 import pascal.taie.util.collection.GenericBitSet;
 import pascal.taie.util.collection.IndexerBitSet;
+import pascal.taie.util.collection.SparseBitSet;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,20 +52,22 @@ import java.util.function.Supplier;
  * The result is the objects of the input whose type is assignable to the
  * guard type, in a points-to set of the same representation (singleton,
  * small set up to the hybrid threshold, bit set above it) and the same
- * iteration order as inserting them one by one. Per guard type, a memo
- * remembers which objects were already checked (known) and which passed
- * (pass), both bit sets over the solver's object index, so each
- * (guard type, object) pair is tested at most once per solver. The test of
- * an object goes through a second memo per guard type over dense ids of
- * the objects' types (objects of one type share the answer), so the type
- * system is asked at most once per (guard type, object type). An input
- * held in a bit set is filtered word by word: in one pass over its words
- * only the bits of input AND NOT known are checked (and added to the memo)
- * by their object index, whose type id is read from a flat array (the
- * object itself is read only the first time its type id is assigned),
- * and the bits of input AND pass are counted; the result is the input AND
- * pass (the input itself if all pass). A smaller input
- * is filtered object by object through the same memo. The memos of the
+ * iteration order as inserting them one by one. The test of an object goes
+ * through a memo per guard type over dense ids of the objects' types
+ * (objects of one type share the answer), so the type system is asked at
+ * most once per (guard type, object type). For inputs held in bit sets the
+ * memo also holds the objects that passed (pass), a bit set over the
+ * solver's object index, filled in index order up to a watermark: every
+ * index below it is checked except the holes, the indexes that held no
+ * object when the watermark went past them (an indexer may give a later
+ * object a free lower index). Such an input is filtered word by word: the
+ * watermark first moves up to its highest index, checking each index on
+ * the way by its type id, read from a flat array (the object itself is
+ * read only the first time its type id is assigned); then in one pass over
+ * its words only its bits in the holes are checked, and the bits of input
+ * AND pass are counted; the result is the input AND pass (the input itself
+ * if all pass). A smaller input is filtered object by object through the
+ * type memo. The memos of the
  * last solver are kept until the next solver replaces them or the world is
  * reset (a pointer analysis run as an analysis of the world keeps its
  * result there until then anyway). The
@@ -82,11 +85,24 @@ public class TypeFilter implements Transfer {
 
     private static final AtomicLong VERIFIED = new AtomicLong();
 
+    private static final boolean STATS = Boolean.getBoolean("spd.typefilter.stats");
+
+    private static final AtomicLong STAT_APPLICATIONS = new AtomicLong();
+
+    private static final AtomicLong STAT_LARGE = new AtomicLong();
+
+    private static final AtomicLong STAT_TESTS = new AtomicLong();
+
+    private static final AtomicLong STAT_NANOS = new AtomicLong();
+
     static {
         World.registerResetCallback(TypeFilter::clearMemos);
         if (VERIFY) {
             Runtime.getRuntime().addShutdownHook(new Thread(() ->
                     System.err.println("[spd] TypeFilter verified applications: " + VERIFIED.get())));
+        }
+        if (STATS) {
+            Runtime.getRuntime().addShutdownHook(new Thread(TypeFilter::printStats));
         }
     }
 
@@ -137,6 +153,19 @@ public class TypeFilter implements Transfer {
             return assign(indexer.getObject(index), index);
         }
 
+        /**
+         * @return the type id of the object of the index, or -1 if the
+         * index holds no object (yet).
+         */
+        int idOfIndexOrMissing(int index) {
+            int[] table = idPlusOne;
+            if (index < table.length && table[index] != 0) {
+                return table[index] - 1;
+            }
+            CSObj o = indexer.getObject(index);
+            return o == null ? -1 : assign(o, index);
+        }
+
         Type typeOf(int id) {
             return types.get(id);
         }
@@ -158,26 +187,45 @@ public class TypeFilter implements Transfer {
     }
 
     /**
-     * Memo of one guard type: objects already checked, and those that
-     * passed; and per object type id (see {@link ObjectTypes}) the types
-     * already checked, and those that passed.
+     * Memo of one guard type: the object indexes already checked, and the
+     * objects that passed; and per object type id (see {@link ObjectTypes})
+     * the types already checked, and those that passed. The checked
+     * indexes are those below {@link #watermark} except the {@link #holes}.
      */
     private static final class Memo {
-
-        final IndexerBitSet<CSObj> known;
 
         final IndexerBitSet<CSObj> pass;
 
         final ObjectTypes types;
+
+        /**
+         * Every index below it is checked, except the holes.
+         */
+        int watermark;
+
+        /**
+         * The indexes below {@link #watermark} that held no object when the
+         * watermark went past them, and have not been checked since (an
+         * indexer may give a later object a free lower index), a word per
+         * 64 indexes from index 0.
+         */
+        long[] holes = new long[0];
 
         private long[] typeKnown = new long[0];
 
         private long[] typePass = new long[0];
 
         Memo(Indexer<CSObj> indexer, ObjectTypes types) {
-            known = new IndexerBitSet<>(indexer, true);
             pass = new IndexerBitSet<>(indexer, true);
             this.types = types;
+        }
+
+        void addHole(int index) {
+            int word = index >>> 6;
+            if (word >= holes.length) {
+                holes = Arrays.copyOf(holes, Math.max(word + 1, 2 * holes.length));
+            }
+            holes[word] |= 1L << index;
         }
 
         /**
@@ -236,6 +284,12 @@ public class TypeFilter implements Transfer {
     private long applications;
 
     /**
+     * The objects or object indexes this filter checked so far, counted
+     * only with {@code -Dspd.typefilter.stats=true}.
+     */
+    private long tests;
+
+    /**
      * The delta that a solver is propagating and the result of this filter
      * on it, or null outside a propagation that applied it; set and cleared
      * by {@link DeltaTransfers}.
@@ -270,6 +324,9 @@ public class TypeFilter implements Transfer {
      * builds them again).
      */
     static synchronized void clearMemos() {
+        if (STATS && !memos.isEmpty()) {
+            printStats();
+        }
         memoIndexer = null;
         objectTypes = null;
         memos = new HashMap<>();
@@ -289,6 +346,64 @@ public class TypeFilter implements Transfer {
         return applications;
     }
 
+    /**
+     * @return the number of bits held by the per-object memo sets of the
+     * current memos.
+     */
+    static synchronized long memoBits() {
+        long bits = 0;
+        for (Memo m : memos.values()) {
+            bits += m.pass.size();
+        }
+        return bits;
+    }
+
+    /**
+     * @return an estimate of the bytes of the per-object memo sets of the
+     * current memos (the sparse blocks, areas and tables they need).
+     */
+    private static synchronized long memoBytes() {
+        long bytes = 0;
+        for (Memo m : memos.values()) {
+            bytes += sparseBytes(m.pass, m.types.indexer) + 16 + 8L * m.holes.length;
+        }
+        return bytes;
+    }
+
+    private static long sparseBytes(IndexerBitSet<CSObj> set, Indexer<CSObj> indexer) {
+        int bitsPerBlock = SparseBitSet.WORDS_PER_BLOCK * Long.SIZE;
+        int bitsPerArea = bitsPerBlock * SparseBitSet.BLOCKS_PER_AREA;
+        long blocks = 0;
+        long areas = 0;
+        long lastBlock = -1;
+        long lastArea = -1;
+        long tableLength = 0;
+        for (CSObj o : set) {
+            int index = indexer.getIndex(o);
+            if (index / bitsPerBlock != lastBlock) {
+                lastBlock = index / bitsPerBlock;
+                blocks++;
+            }
+            if (index / bitsPerArea != lastArea) {
+                lastArea = index / bitsPerArea;
+                areas++;
+                tableLength = lastArea + 1;
+            }
+        }
+        // object headers and array headers rounded to 16 bytes, references
+        // of 4 bytes
+        return 64 + 16 + 4 * tableLength + areas * (16 + 4L * SparseBitSet.BLOCKS_PER_AREA)
+                + blocks * (16 + 8L * SparseBitSet.WORDS_PER_BLOCK);
+    }
+
+    private static void printStats() {
+        System.err.println("[spd] TypeFilter stats: applications=" + STAT_APPLICATIONS.get()
+                + " large=" + STAT_LARGE.get() + " tests=" + STAT_TESTS.get()
+                + " filterMs=" + STAT_NANOS.get() / 1_000_000
+                + " memos=" + memos.size() + " memoBits=" + memoBits()
+                + " memoBytes=" + memoBytes());
+    }
+
     @Override
     public PointsToSet apply(PointerFlowEdge edge, PointsToSet input) {
         applications++;
@@ -297,7 +412,22 @@ public class TypeFilter implements Transfer {
             m = memoFor(type, indexer);
             memo = m;
         }
-        PointsToSet result = filter(m, input);
+        PointsToSet result;
+        if (STATS) {
+            long start = System.nanoTime();
+            long testsBefore = tests;
+            result = filter(m, input);
+            STAT_NANOS.addAndGet(System.nanoTime() - start);
+            STAT_TESTS.addAndGet(tests - testsBefore);
+            STAT_APPLICATIONS.incrementAndGet();
+            if (input instanceof DelegatePointsToSet delegate
+                    && delegate.set instanceof AbstractHybridSet<CSObj> hybrid
+                    && hybrid.set instanceof GenericBitSet<CSObj>) {
+                STAT_LARGE.incrementAndGet();
+            }
+        } else {
+            result = filter(m, input);
+        }
         if (VERIFY) {
             verify(input, result);
         }
@@ -330,9 +460,11 @@ public class TypeFilter implements Transfer {
      */
     private @Nullable PointsToSet filterLarge(Memo m, PointsToSet input,
                                               GenericBitSet<CSObj> in, int threshold) {
-        // one pass over the words of the input: only its unchecked objects
-        // are checked (and added to the memo), the passing ones are counted
-        int passing = in.updateMemoAndCountByIndex(m.known, m.pass, checker);
+        // every index up to the input's highest one is checked, then one
+        // pass over the words of the input checks its objects in the holes
+        // and counts the passing ones
+        extendMemo(m, in, in.indexLength());
+        int passing = in.updateMemoAndCountByIndex(m.holes, m.pass, checker);
         if (passing > threshold) {
             if (passing == in.size()) {
                 return input;
@@ -353,22 +485,53 @@ public class TypeFilter implements Transfer {
         return small;
     }
 
+    /**
+     * Moves the watermark of the memo up to the limit (exclusive), in
+     * ascending order. An index is decided if the type memo already answers
+     * for its object's type or if its object is in the input: the type
+     * system is asked only for types of input objects, as checking each
+     * input object would. The objects that pass are added to the memo.
+     * Every other index (no object, or an object of a type not checked yet
+     * that is not in the input) becomes a hole. The watermark moves past
+     * each index once it is done, so a throwing check leaves that index and
+     * the later ones unchecked.
+     */
+    private void extendMemo(Memo m, GenericBitSet<CSObj> input, int limit) {
+        ObjectTypes types = m.types;
+        for (int index = m.watermark; index < limit; ++index) {
+            if (STATS) {
+                tests++;
+            }
+            int typeId = types.idOfIndexOrMissing(index);
+            int known = typeId < 0 ? -1 : m.typeResult(typeId);
+            if (known < 0 && typeId >= 0 && input.containsIndex(index)) {
+                known = checkByType(m, typeId) ? 1 : 0;
+            }
+            if (known < 0) {
+                m.addHole(index);
+            } else if (known == 1) {
+                m.pass.addIndex(index);
+            }
+            m.watermark = index + 1;
+        }
+    }
+
+    /**
+     * Checks one object through the memo of its type id (the
+     * object-by-object path keeps no per-object memo).
+     */
     private boolean passes(Memo m, CSObj o) {
-        if (m.known.contains(o)) {
-            return m.pass.contains(o);
+        if (STATS) {
+            tests++;
         }
-        // checked before it is marked known: a throwing check leaves the
-        // object unknown
-        boolean ok = checkByType(m, m.types.idOf(o));
-        m.known.add(o);
-        if (ok) {
-            m.pass.add(o);
-        }
-        return ok;
+        return checkByType(m, m.types.idOf(o));
     }
 
     private boolean checkIndexWithMemo(int index) {
         Memo m = Objects.requireNonNull(memo);
+        if (STATS) {
+            tests++;
+        }
         return checkByType(m, m.types.idOfIndex(index));
     }
 
