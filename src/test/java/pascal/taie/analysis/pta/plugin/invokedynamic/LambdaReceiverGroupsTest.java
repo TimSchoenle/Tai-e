@@ -28,6 +28,7 @@ import pascal.taie.util.collection.Maps;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -145,6 +146,94 @@ class LambdaReceiverGroupsTest {
         cached.appendAll(groups("A", 2, "A", 3, "A", 4));
         assertEquals(4, cached.listCapacity("A"));
         assertEquals(List.of(1, 2, 3, 4), contents(cached).get("A"));
+    }
+
+    /**
+     * Beyond the linear-scan threshold keys are found through the index; the
+     * order of keys and objects and the single-object form are kept across
+     * add, appendAll and the index rebuilds.
+     */
+    @Test
+    void manyKeysKeepOrderThroughTheIndex() {
+        int keyCount = 20 * ReceiverGroups.INDEX_THRESHOLD;
+        ReceiverGroups<String, Object> cached = new ReceiverGroups<>();
+        ReceiverGroups<String, Object> more = new ReceiverGroups<>();
+        List<String> expectedKeys = new ArrayList<>();
+        for (int i = 0; i < keyCount; ++i) {
+            cached.add("k" + i, i);
+            expectedKeys.add("k" + i);
+            assertEquals(i >= ReceiverGroups.INDEX_THRESHOLD, cached.isIndexed());
+        }
+        for (int i = keyCount + keyCount / 2 - 1; i >= keyCount / 2; --i) {
+            more.add("k" + i, -i);
+        }
+        for (int i = keyCount + keyCount / 2 - 1; i >= keyCount; --i) {
+            expectedKeys.add("k" + i);
+        }
+        cached.appendAll(more);
+        Map<String, List<Object>> m = contents(cached);
+        assertEquals(expectedKeys, new ArrayList<>(m.keySet()));
+        assertEquals(keyCount + keyCount / 2, cached.keyCount());
+        assertEquals(2L * keyCount, cached.objectCount());
+        assertEquals(List.of(0), m.get("k0"));
+        assertSame(0, cached.singleObject("k0"));
+        int half = keyCount / 2;
+        assertEquals(List.of(half, -half), m.get("k" + half));
+        assertEquals(List.of(-keyCount), m.get("k" + keyCount));
+        assertEquals(-1, cached.listCapacity("absent"));
+        assertNull(cached.singleObject("absent"));
+    }
+
+    /**
+     * A seeded random sequence of add and appendAll over keys of which 32
+     * share one hash code (concatenations of "Aa" and "BB"), so the index
+     * probes along one chain, matches an insertion-ordered map of lists.
+     */
+    @Test
+    void randomSequenceWithCollidingKeysMatchesAModel() {
+        List<String> pool = new ArrayList<>(List.of(""));
+        for (int i = 0; i < 5; ++i) {
+            List<String> longer = new ArrayList<>();
+            pool.forEach(s -> {
+                longer.add(s + "Aa");
+                longer.add(s + "BB");
+            });
+            pool = longer;
+        }
+        for (int i = 0; i < 30; ++i) {
+            pool.add("n" + i);
+        }
+        Random random = new Random(115);
+        ReceiverGroups<String, Object> cached = new ReceiverGroups<>();
+        Map<String, List<Object>> model = Maps.newLinkedHashMap();
+        int next = 0;
+        for (int step = 0; step < 400; ++step) {
+            if (random.nextBoolean()) {
+                String key = pool.get(random.nextInt(pool.size()));
+                cached.add(key, next);
+                model.computeIfAbsent(key, k -> new ArrayList<>()).add(next);
+                ++next;
+            } else {
+                ReceiverGroups<String, Object> more = new ReceiverGroups<>();
+                Map<String, List<Object>> moreModel = Maps.newLinkedHashMap();
+                for (int n = random.nextInt(12); n > 0; --n) {
+                    String key = pool.get(random.nextInt(pool.size()));
+                    more.add(key, next);
+                    moreModel.computeIfAbsent(key, k -> new ArrayList<>()).add(next);
+                    ++next;
+                }
+                cached.appendAll(more);
+                moreModel.forEach((key, objs) ->
+                        model.computeIfAbsent(key, k -> new ArrayList<>()).addAll(objs));
+            }
+            // lists of entries, so the order of keys counts too
+            assertEquals(new ArrayList<>(model.entrySet()),
+                    new ArrayList<>(contents(cached).entrySet()));
+        }
+        assertEquals(model.size(), cached.keyCount());
+        assertEquals(next, cached.objectCount());
+        model.forEach((key, objs) -> assertEquals(
+                objs.size() == 1 ? objs.get(0) : null, cached.singleObject(key)));
     }
 
     @Test

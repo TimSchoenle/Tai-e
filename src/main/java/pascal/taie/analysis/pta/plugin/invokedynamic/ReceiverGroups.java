@@ -23,10 +23,8 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import org.jspecify.annotations.Nullable;
-import pascal.taie.util.collection.Maps;
 
 import java.util.Arrays;
-import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -34,6 +32,11 @@ import java.util.Objects;
  * order. Add-only. Most groups hold one object, so a group of one object is
  * held as the object itself; a second object of the key turns it into a
  * list.
+ * <p>
+ * Keys and groups are held in two parallel arrays in first-seen order,
+ * without a map entry per key. Keys are found by a linear scan up to
+ * {@link #INDEX_THRESHOLD} keys, beyond that through an open-addressing
+ * index of key positions. Keys are non-null and compared by {@code equals}.
  *
  * @param <K> type of keys
  * @param <V> type of objects
@@ -41,25 +44,48 @@ import java.util.Objects;
 final class ReceiverGroups<K, V> {
 
     /**
-     * Value: the group's only object, or a {@link Group} of two or more.
-     * {@link Group} is private, so no object can be mistaken for a group.
+     * The largest number of keys found by a linear scan.
      */
-    private final Map<K, Object> groups = Maps.newLinkedHashMap();
+    static final int INDEX_THRESHOLD = 8;
+
+    private static final Object[] EMPTY = {};
+
+    /**
+     * The keys in first-seen order; slots from {@link #size} on are free.
+     */
+    private Object[] keys = EMPTY;
+
+    /**
+     * Per slot of {@link #keys}: the group's only object, or a {@link Group}
+     * of two or more. {@link Group} is private, so no object can be mistaken
+     * for a group.
+     */
+    private Object[] groups = EMPTY;
+
+    private int size;
+
+    /**
+     * Above {@link #INDEX_THRESHOLD} keys: open-addressing table (power of
+     * two length, at most half full) of key positions plus one; 0 marks a
+     * free slot. Null up to the threshold.
+     */
+    private int @Nullable [] index;
 
     /**
      * Adds {@code obj} at the end of the group of {@code key}.
      */
     void add(K key, V obj) {
         Objects.requireNonNull(obj);
-        Object group = groups.putIfAbsent(key, obj);
-        if (group == null) {
+        int pos = indexOf(key);
+        if (pos < 0) {
+            append(key, obj);
             return;
         }
+        Object group = groups[pos];
         if (group instanceof Group list) {
             list.add(obj);
         } else {
-            // replacing the value of a present key keeps its position
-            groups.put(key, new Group(group, obj));
+            groups[pos] = new Group(group, obj);
         }
     }
 
@@ -70,19 +96,24 @@ final class ReceiverGroups<K, V> {
      * Nothing of {@code more} is shared.
      */
     void appendAll(ReceiverGroups<K, V> more) {
-        more.groups.forEach((key, extra) -> {
-            Object group = groups.get(key);
-            if (group == null) {
-                groups.put(key, extra instanceof Group list ? list.copy() : extra);
-            } else if (group instanceof Group list) {
+        for (int i = 0; i < more.size; ++i) {
+            Object key = more.keys[i];
+            Object extra = more.groups[i];
+            int pos = indexOf(key);
+            if (pos < 0) {
+                append(key, extra instanceof Group list ? list.copy() : extra);
+                continue;
+            }
+            Object group = groups[pos];
+            if (group instanceof Group list) {
                 list.addAll(extra);
             } else {
                 Group list = new Group(1 + sizeOf(extra));
                 list.add(group);
                 list.addAll(extra);
-                groups.put(key, list);
+                groups[pos] = list;
             }
-        });
+        }
     }
 
     /**
@@ -112,15 +143,15 @@ final class ReceiverGroups<K, V> {
      */
     @SuppressWarnings("unchecked")
     <S> void forEachGroup(Visitor<? super K, ? super V, S> visitor) {
-        for (Map.Entry<K, Object> entry : groups.entrySet()) {
-            S state = visitor.enter(entry.getKey());
+        for (int i = 0; i < size; ++i) {
+            S state = visitor.enter((K) keys[i]);
             if (state == null) {
                 continue;
             }
-            Object group = entry.getValue();
+            Object group = groups[i];
             if (group instanceof Group list) {
-                for (int i = 0; i < list.size; ++i) {
-                    visitor.accept(state, (V) list.elements[i]);
+                for (int j = 0; j < list.size; ++j) {
+                    visitor.accept(state, (V) list.elements[j]);
                 }
             } else {
                 visitor.accept(state, (V) group);
@@ -132,7 +163,7 @@ final class ReceiverGroups<K, V> {
      * @return the number of keys.
      */
     int keyCount() {
-        return groups.size();
+        return size;
     }
 
     /**
@@ -140,8 +171,8 @@ final class ReceiverGroups<K, V> {
      */
     long objectCount() {
         long count = 0;
-        for (Object group : groups.values()) {
-            count += sizeOf(group);
+        for (int i = 0; i < size; ++i) {
+            count += sizeOf(groups[i]);
         }
         return count;
     }
@@ -153,8 +184,8 @@ final class ReceiverGroups<K, V> {
     @Nullable
     @SuppressWarnings("unchecked")
     V singleObject(K key) {
-        Object group = groups.get(key);
-        return group instanceof Group ? null : (V) group;
+        int pos = indexOf(key);
+        return pos < 0 || groups[pos] instanceof Group ? null : (V) groups[pos];
     }
 
     /**
@@ -162,7 +193,91 @@ final class ReceiverGroups<K, V> {
      * holds a single object or is absent. For tests of the representation.
      */
     int listCapacity(K key) {
-        return groups.get(key) instanceof Group list ? list.elements.length : -1;
+        int pos = indexOf(key);
+        return pos >= 0 && groups[pos] instanceof Group list ? list.elements.length : -1;
+    }
+
+    /**
+     * @return whether keys are found through the index. For tests of the
+     * representation.
+     */
+    boolean isIndexed() {
+        return index != null;
+    }
+
+    /**
+     * @return the position of {@code key} in {@link #keys}, or -1.
+     */
+    private int indexOf(Object key) {
+        int[] table = index;
+        if (table == null) {
+            for (int i = 0; i < size; ++i) {
+                if (key.equals(keys[i])) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+        int mask = table.length - 1;
+        // the table is at most half full, so a free slot ends the probe
+        for (int slot = hash(key) & mask; ; slot = (slot + 1) & mask) {
+            int entry = table[slot];
+            if (entry == 0) {
+                return -1;
+            }
+            if (key.equals(keys[entry - 1])) {
+                return entry - 1;
+            }
+        }
+    }
+
+    /**
+     * Adds {@code key}, absent so far, with {@code group} after the existing
+     * keys.
+     */
+    private void append(Object key, Object group) {
+        Objects.requireNonNull(key);
+        if (size == keys.length) {
+            // the growth of java.util.ArrayList, from capacity one
+            int capacity = size + Math.max(1, size >> 1);
+            keys = Arrays.copyOf(keys, capacity);
+            groups = Arrays.copyOf(groups, capacity);
+        }
+        keys[size] = key;
+        groups[size] = group;
+        ++size;
+        int[] table = index;
+        if (table != null && 2 * size <= table.length) {
+            insert(table, size - 1);
+        } else if (table != null || size > INDEX_THRESHOLD) {
+            rebuildIndex();
+        }
+    }
+
+    /**
+     * Builds the index at a quarter to a half full.
+     */
+    private void rebuildIndex() {
+        int[] table = new int[Integer.highestOneBit(size) << 2];
+        for (int i = 0; i < size; ++i) {
+            insert(table, i);
+        }
+        index = table;
+    }
+
+    private void insert(int[] table, int pos) {
+        int mask = table.length - 1;
+        int slot = hash(keys[pos]) & mask;
+        while (table[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        table[slot] = pos + 1;
+    }
+
+    private static int hash(Object key) {
+        int h = key.hashCode();
+        // the spreading of java.util.HashMap
+        return h ^ (h >>> 16);
     }
 
     private static int sizeOf(Object group) {

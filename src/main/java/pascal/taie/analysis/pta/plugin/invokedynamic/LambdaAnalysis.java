@@ -430,12 +430,36 @@ public class LambdaAnalysis implements Plugin {
         }
     }
 
+    /**
+     * Drops the caches that only serve the solve ({@link #lambdaObjs},
+     * {@link #invoInfos}, {@link #recvByType}): after the release the solver
+     * refuses new methods, points-to sets and call edges, so none of them is
+     * read again. The verify mode's finish check, which reads the solver
+     * state and the size of {@link #recvByType}, runs first.
+     */
+    @Override
+    public void onRelease() {
+        checkFinish();
+        lambdaObjs.clear();
+        invoInfos.clear();
+        recvByType.clear();
+    }
+
     @Override
     public void onFinish() {
+        checkFinish();
+        recvByType.clear();
+    }
+
+    /**
+     * Runs the verify mode's finish check once, at the first of
+     * {@link #onRelease} and {@link #onFinish}.
+     */
+    private void checkFinish() {
         if (verifier != null) {
             verifier.checkState("finish");
+            verifier = null;
         }
-        recvByType.clear();
     }
 
     /**
