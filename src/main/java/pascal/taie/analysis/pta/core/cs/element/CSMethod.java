@@ -27,12 +27,11 @@ import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.util.AbstractResultHolder;
 import pascal.taie.util.ResultHolder;
-import pascal.taie.util.collection.ArraySet;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -66,8 +65,30 @@ public class CSMethod extends AbstractCSElement {
         edges.add(edge);
     }
 
-    public Set<Edge<CSCallSite, CSMethod>> getEdges() {
-        return Collections.unmodifiableSet(new ArraySet<>(edges, true));
+    /**
+     * @return an unmodifiable view of the call edges to this CS method, in
+     * the order they were added; the view holds no duplicate edges and
+     * shows the edges added later
+     */
+    public List<Edge<CSCallSite, CSMethod>> getEdges() {
+        return Collections.unmodifiableList(edges);
+    }
+
+    /**
+     * @return the number of call edges to this CS method.
+     */
+    public int getEdgeCount() {
+        return edges.size();
+    }
+
+    /**
+     * @return the {@code i}-th call edge to this CS method, in the order
+     * the edges were added.
+     * @throws IndexOutOfBoundsException if {@code i} is not below
+     *                                   {@link #getEdgeCount()}
+     */
+    public Edge<CSCallSite, CSMethod> getEdge(int i) {
+        return edges.get(i);
     }
 
     public <R> R getResult(String id, Supplier<R> supplier) {
