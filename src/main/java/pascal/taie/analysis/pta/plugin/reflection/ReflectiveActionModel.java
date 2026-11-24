@@ -201,9 +201,13 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (target != null && !typeMatcher.isUnmatched(invoke, target)) {
                 if (target.isStatic()) {
                     addReflectiveCallEdge(context, invoke, null, target, argsVar);
-                } else {
+                } else if (target.isConstructor()) {
                     recvObjs.forEach(recvObj ->
                             addReflectiveCallEdge(context, invoke, recvObj, target, argsVar));
+                } else if (!recvObjs.isEmpty()) {
+                    ReceiverDispatch dispatch = new ReceiverDispatch(hierarchy, target);
+                    recvObjs.forEach(recvObj -> addDispatchedCallEdge(
+                            context, invoke, recvObj, target, dispatch, argsVar));
                 }
             }
         });
@@ -365,27 +369,54 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         return invokesWithLog.contains(invoke) && !helper.isLogMetaObj(metaObj);
     }
 
+    /**
+     * Whether a new target of {@code callSite} is ignored: the call site has
+     * too many targets to be precise, or Android mode skips the non-application
+     * {@code callee}. The target count is read only when imprecise targets are
+     * ignored at all, and then again for every new target, as each recorded
+     * target raises it.
+     */
+    private boolean isSkippedTarget(Invoke callSite, JMethod callee) {
+        if (ReflectionAnalysis.ignoresImpreciseTargets()
+                && ReflectionAnalysis.ignoreImpreciseTarget(allTargets.get(callSite).size())) {
+            return true;
+        }
+        return ReflectionAnalysis.isAndroidMode() && !callee.isApplication();
+    }
+
+    /**
+     * Adds the call edge of a constructor or a static method, which needs
+     * no dispatch.
+     */
     private void addReflectiveCallEdge(
             Context callerCtx, Invoke callSite,
             @Nullable CSObj recvObj, JMethod callee, Var args) {
-        if (ReflectionAnalysis
-                .ignoreImpreciseTarget(allTargets.get(callSite).size())) {
+        if (isSkippedTarget(callSite, callee)) {
             return;
         }
+        addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+    }
 
-        if (ReflectionAnalysis.isAndroidMode() && (!callee.isApplication())) {
+    /**
+     * Adds the call edge of instance method {@code target} on
+     * {@code recvObj}, dispatched on the receiver's type.
+     */
+    private void addDispatchedCallEdge(
+            Context callerCtx, Invoke callSite, CSObj recvObj,
+            JMethod target, ReceiverDispatch dispatch, Var args) {
+        if (isSkippedTarget(callSite, target)) {
             return;
         }
-
-        if (!callee.isConstructor() && !callee.isStatic()) {
-            // dispatch for instance method (except constructor)
-            assert recvObj != null : "recvObj is required for instance method";
-            callee = hierarchy.dispatch(recvObj.getObject().getType(),
-                    callee.getRef());
-            if (callee == null) {
-                return;
-            }
+        JMethod callee = dispatch.dispatch(recvObj.getObject().getType());
+        if (callee == null) {
+            return;
         }
+        addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+    }
+
+    private void addResolvedCallEdge(
+            Context callerCtx, Invoke callSite,
+            @Nullable CSObj recvObj, JMethod callee, Var args) {
         CSCallSite csCallSite = csManager.getCSCallSite(callerCtx, callSite);
         Context calleeCtx;
         if (callee.isStatic()) {

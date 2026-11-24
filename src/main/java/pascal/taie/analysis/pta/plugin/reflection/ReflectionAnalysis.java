@@ -170,4 +170,12 @@ public class ReflectionAnalysis extends CompositePlugin {
         return ignoreImpreciseTarget && reachesImpreciseThreshold(targetCount);
     }
 
+    /**
+     * @return whether {@link #ignoreImpreciseTarget(int)} can answer
+     * {@code true}; when it cannot, callers need not count the targets.
+     */
+    static boolean ignoresImpreciseTargets() {
+        return ignoreImpreciseTarget;
+    }
+
 }
