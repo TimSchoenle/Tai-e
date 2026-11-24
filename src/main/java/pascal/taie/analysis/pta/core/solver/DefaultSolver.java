@@ -868,6 +868,7 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPointsTo(Pointer pointer, CSObj csObj) {
+        checkAcceptsWork();
         PointsToSet pts = makePointsToSet();
         pts.addObject(csObj);
         addPointsTo(pointer, pts);
@@ -875,21 +876,25 @@ public class DefaultSolver implements Solver {
 
     @Override
     public void addPointsTo(Pointer pointer, Context heapContext, Obj obj) {
+        checkAcceptsWork();
         addPointsTo(pointer, csManager.getCSObj(heapContext, obj));
     }
 
     @Override
     public void addVarPointsTo(Context context, Var var, PointsToSet pts) {
+        checkAcceptsWork();
         addPointsTo(csManager.getCSVar(context, var), pts);
     }
 
     @Override
     public void addVarPointsTo(Context context, Var var, CSObj csObj) {
+        checkAcceptsWork();
         addPointsTo(csManager.getCSVar(context, var), csObj);
     }
 
     @Override
     public void addVarPointsTo(Context context, Var var, Context heapContext, Obj obj) {
+        checkAcceptsWork();
         addPointsTo(csManager.getCSVar(context, var), heapContext, obj);
     }
 

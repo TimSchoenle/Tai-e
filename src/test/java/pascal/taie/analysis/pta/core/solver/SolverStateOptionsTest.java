@@ -34,9 +34,16 @@ import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.analysis.pta.core.cs.context.Context;
+import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.stmt.New;
 import pascal.taie.language.classes.ClassNames;
+import pascal.taie.language.classes.JClass;
+import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.type.Type;
+import pascal.taie.util.collection.Maps;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -89,6 +96,8 @@ public class SolverStateOptionsTest {
         assertNull(Probe.latePointsToFailure);
         assertNull(Probe.lateCallEdgeFailure);
         assertNull(Probe.lateMethodFailure);
+        Probe.lateCreateFailures.forEach((call, failure) ->
+                assertNull(failure, call + " was refused without the release"));
         assertFalse(filtered.isEmpty(), "the reapplied type filters passed no object");
         run("release-solver-state:true;plugins:[" + Probe.class.getName() + "];");
         assertEquals(edges, callEdges());
@@ -126,6 +135,17 @@ public class SolverStateOptionsTest {
             assertTrue(e.getMessage().startsWith("the solver state was released"),
                     "not the release refusal: " + e);
         }
+        assertEquals(List.of("addVarPointsTo(set)", "addVarPointsTo(csObj)",
+                        "addVarPointsTo(obj)", "addPointsTo(obj)", "addEntryPoint",
+                        "addStmts", "initializeClass"),
+                List.copyOf(Probe.lateCreateFailures.keySet()));
+        Probe.lateCreateFailures.forEach((call, failure) -> assertTrue(
+                failure instanceof IllegalStateException
+                        && failure.getMessage().startsWith("the solver state was released"),
+                call + " was not refused by the release: " + failure));
+        // a refused call creates no context-sensitive variable or object and
+        // adds no entry method
+        assertEquals(Probe.csCountsBeforeLateCreate, Probe.csCountsAfterLateCreate);
         assertTrue(Probe.memoRebuilt, "a reapplied type filter did not rebuild its memo");
         assertEquals(Probe.filterCount, Probe.memosAfterReapply);
     }
@@ -187,6 +207,17 @@ public class SolverStateOptionsTest {
 
         static RuntimeException lateMethodFailure;
 
+        /**
+         * The outcome of each late call that names a variable or object
+         * without a context-sensitive element yet, and of the late entry
+         * point, statements and class initialization.
+         */
+        static Map<String, RuntimeException> lateCreateFailures;
+
+        static String csCountsBeforeLateCreate;
+
+        static String csCountsAfterLateCreate;
+
         static List<String> pointerSummary;
 
         static List<String> refiltered;
@@ -216,6 +247,9 @@ public class SolverStateOptionsTest {
             latePointsToFailure = null;
             lateCallEdgeFailure = null;
             lateMethodFailure = null;
+            lateCreateFailures = null;
+            csCountsBeforeLateCreate = null;
+            csCountsAfterLateCreate = null;
             pointerSummary = null;
             refiltered = null;
             memoRebuilt = false;
@@ -289,6 +323,73 @@ public class SolverStateOptionsTest {
             CSMethod reachable = solver.getCallGraph().reachableMethods()
                     .findFirst().orElseThrow();
             lateMethodFailure = attempt(() -> solver.addCSMethod(reachable));
+            addLateCreatingWork(csManager, to, obj, reachable);
+        }
+
+        /**
+         * Gives the solver late work that names a variable and an object of
+         * a method the analysis never reached, so no context-sensitive
+         * variable or object exists for them yet; and a late entry point (a
+         * reachable method that is no entry method, no parameter objects),
+         * an empty statement list and a class that was never initialized and
+         * has no class initializer. Records each outcome and the numbers of
+         * context-sensitive variables, objects and entry methods before and
+         * after.
+         */
+        private void addLateCreatingWork(CSManager csManager, Pointer to, CSObj obj,
+                                         CSMethod reachable) {
+            Set<JMethod> reached = solver.getCallGraph().reachableMethods()
+                    .map(CSMethod::getMethod)
+                    .collect(Collectors.toSet());
+            New alloc = World.get().getClassHierarchy().allClasses()
+                    .flatMap(c -> c.getDeclaredMethods().stream())
+                    .filter(m -> !m.isAbstract() && !m.isNative() && !reached.contains(m))
+                    .flatMap(m -> m.getIR().getStmts().stream())
+                    .filter(s -> s instanceof New)
+                    .map(s -> (New) s)
+                    .filter(s -> csManager.getCSVarsOf(s.getLValue()).isEmpty())
+                    .findFirst()
+                    .orElseThrow();
+            Var var = alloc.getLValue();
+            Obj newObj = solver.getHeapModel().getObj(alloc);
+            Context empty = solver.getContextSelector().getEmptyContext();
+            @SuppressWarnings("unchecked")
+            Set<JClass> initialized = (Set<JClass>) readSolver("initializedClasses");
+            JClass uninitialized = World.get().getClassHierarchy().allClasses()
+                    .filter(c -> !initialized.contains(c) && c.getClinit() == null
+                            && (c.getSuperClass() == null
+                            || initialized.contains(c.getSuperClass())))
+                    .findFirst()
+                    .orElseThrow();
+            Set<JMethod> entries = solver.getCallGraph().entryMethods()
+                    .map(CSMethod::getMethod)
+                    .collect(Collectors.toSet());
+            JMethod lateEntry = reached.stream()
+                    .filter(m -> !entries.contains(m))
+                    .findFirst()
+                    .orElseThrow();
+            csCountsBeforeLateCreate = csCounts(csManager);
+            Map<String, RuntimeException> failures = Maps.newLinkedHashMap();
+            failures.put("addVarPointsTo(set)", attempt(() -> solver.addVarPointsTo(
+                    empty, var, solver.makePointsToSet())));
+            failures.put("addVarPointsTo(csObj)", attempt(() -> solver.addVarPointsTo(
+                    empty, var, obj)));
+            failures.put("addVarPointsTo(obj)", attempt(() -> solver.addVarPointsTo(
+                    empty, var, empty, newObj)));
+            failures.put("addPointsTo(obj)", attempt(() -> solver.addPointsTo(
+                    to, empty, newObj)));
+            failures.put("addEntryPoint", attempt(() -> solver.addEntryPoint(
+                    new EntryPoint(lateEntry, EmptyParamProvider.get()))));
+            failures.put("addStmts", attempt(() -> solver.addStmts(reachable, List.of())));
+            failures.put("initializeClass", attempt(() -> solver.initializeClass(uninitialized)));
+            csCountsAfterLateCreate = csCounts(csManager);
+            lateCreateFailures = failures;
+        }
+
+        private String csCounts(CSManager csManager) {
+            return "variables=" + csManager.getCSVars().size()
+                    + " objects=" + csManager.getObjects().size()
+                    + " entryMethods=" + solver.getCallGraph().entryMethods().count();
         }
 
         private static RuntimeException attempt(Runnable work) {
