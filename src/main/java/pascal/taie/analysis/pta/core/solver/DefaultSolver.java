@@ -548,13 +548,20 @@ public class DefaultSolver implements Solver {
         Context context = recv.getContext();
         Var var = recv.getVar();
         for (Invoke callSite : var.getInvokes()) {
+            // the CS call site, looked up once per call site and only at
+            // its first resolved callee (where the lookup always happened)
+            CSCallSite[] csCallSiteOnce = new CSCallSite[1];
             pts.forEach(recvObj -> {
                 // resolve callee
                 JMethod callee = CallGraphs.resolveCallee(
                         recvObj.getObject().getType(), callSite);
                 if (callee != null) {
                     // select context
-                    CSCallSite csCallSite = csManager.getCSCallSite(context, callSite);
+                    CSCallSite csCallSite = csCallSiteOnce[0];
+                    if (csCallSite == null) {
+                        csCallSite = csManager.getCSCallSite(context, callSite);
+                        csCallSiteOnce[0] = csCallSite;
+                    }
                     Context calleeContext = contextSelector.selectContext(
                             csCallSite, recvObj, callee);
                     // build call edge
