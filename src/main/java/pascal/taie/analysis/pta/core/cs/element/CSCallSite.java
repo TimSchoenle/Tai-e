@@ -25,7 +25,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.ir.stmt.Invoke;
-import pascal.taie.util.collection.Sets;
+import pascal.taie.util.collection.OpenHashSet;
 
 import java.util.Collections;
 import java.util.Set;
@@ -45,7 +45,7 @@ public class CSCallSite extends AbstractCSElement {
     /**
      * Call edges from this call site.
      */
-    private final Set<Edge<CSCallSite, CSMethod>> edges = Sets.newHybridSet();
+    private final Set<Edge<CSCallSite, CSMethod>> edges = new OpenHashSet<>();
 
     CSCallSite(Invoke callSite, Context context, CSMethod container) {
         super(context);
