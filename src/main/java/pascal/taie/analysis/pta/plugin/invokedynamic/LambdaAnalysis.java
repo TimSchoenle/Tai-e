@@ -57,7 +57,6 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -117,7 +116,7 @@ public class LambdaAnalysis implements Plugin {
      * a grouping created inside the window may list those objects twice,
      * which repeats facts but loses none.
      */
-    private final Map<CSVar, Map<Type, List<CSObj>>> recvByType = Maps.newMap();
+    private final Map<CSVar, ReceiverGroups<Type, CSObj>> recvByType = Maps.newMap();
 
     /**
      * System property that turns on {@link GroupingVerifier}.
@@ -247,7 +246,7 @@ public class LambdaAnalysis implements Plugin {
                 }
                 CSVar csRecvVar = csManager.getCSVar(recvCtx, recvVar);
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
-                Map<Type, List<CSObj>> recvObjsByType = recvByType.computeIfAbsent(
+                ReceiverGroups<Type, CSObj> recvObjsByType = recvByType.computeIfAbsent(
                         csRecvVar, v -> groupByType(recvObjs));
                 if (verifier != null) {
                     verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
@@ -360,32 +359,12 @@ public class LambdaAnalysis implements Plugin {
      * @return the objects of {@code objs} grouped by their type, in
      * first-seen order.
      */
-    private static Map<Type, List<CSObj>> groupByType(PointsToSet objs) {
-        Map<Type, List<CSObj>> byType = new LinkedHashMap<>();
+    private static ReceiverGroups<Type, CSObj> groupByType(PointsToSet objs) {
+        ReceiverGroups<Type, CSObj> byType = new ReceiverGroups<>();
         for (CSObj obj : objs) {
-            // most groups hold one object, and a first grouping is kept in
-            // recvByType: start at one slot, not ArrayList's default ten
-            byType.computeIfAbsent(obj.getObject().getType(),
-                    t -> new ArrayList<>(1)).add(obj);
+            byType.add(obj.getObject().getType(), obj);
         }
         return byType;
-    }
-
-    /**
-     * Appends {@code groups} to {@code cached} in place: a group of a new key
-     * is copied into an exactly sized list after the existing keys, a group
-     * of a known key is appended to that key's list. Keys and objects keep
-     * their first-seen order.
-     */
-    static <K, V> void appendGroups(Map<K, List<V>> cached, Map<K, List<V>> groups) {
-        groups.forEach((key, objs) -> {
-            List<V> list = cached.get(key);
-            if (list == null) {
-                cached.put(key, new ArrayList<>(objs));
-            } else {
-                list.addAll(objs);
-            }
-        });
     }
 
     /**
@@ -411,15 +390,18 @@ public class LambdaAnalysis implements Plugin {
      */
     private void addLambdaCallEdges(
             CSCallSite csCallSite, PointsToSet recvObjs,
-            Map<Type, List<CSObj>> recvByType, MethodRef targetRef,
+            ReceiverGroups<Type, CSObj> recvByType, MethodRef targetRef,
             InvokeDynamic indy, Context indyCtx) {
         Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
-        recvByType.forEach((type, objs) -> {
-            JMethod callee = hierarchy.dispatch(type, targetRef);
-            if (callee == null) {
-                return;
+        recvByType.forEachGroup(new ReceiverGroups.Visitor<Type, CSObj, JMethod>() {
+            @Override
+            @Nullable
+            public JMethod enter(Type type) {
+                return hierarchy.dispatch(type, targetRef);
             }
-            for (CSObj recvObj : objs) {
+
+            @Override
+            public void accept(JMethod callee, CSObj recvObj) {
                 Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
                 receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
                         m -> solver.makePointsToSet()).addObject(recvObj);
@@ -585,11 +567,9 @@ public class LambdaAnalysis implements Plugin {
         private String counts() {
             long cachedObjs = 0;
             long cachedTypes = 0;
-            for (Map<Type, List<CSObj>> byType : recvByType.values()) {
-                cachedTypes += byType.size();
-                for (List<CSObj> objs : byType.values()) {
-                    cachedObjs += objs.size();
-                }
+            for (ReceiverGroups<Type, CSObj> byType : recvByType.values()) {
+                cachedTypes += byType.keyCount();
+                cachedObjs += byType.objectCount();
             }
             return "calls=" + calls + " facts=" + facts + " partialCalls=" + partialCalls
                     + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
@@ -678,10 +658,10 @@ public class LambdaAnalysis implements Plugin {
         // grouped once per new points-to set, shared by every lambda
         // invocation on this receiver variable, and appended to the
         // variable's cached grouping (present since its first invocation)
-        Map<Type, List<CSObj>> ptsByType = groupByType(pts);
-        Map<Type, List<CSObj>> cached = Objects.requireNonNull(recvByType.get(csVar),
+        ReceiverGroups<Type, CSObj> ptsByType = groupByType(pts);
+        ReceiverGroups<Type, CSObj> cached = Objects.requireNonNull(recvByType.get(csVar),
                 "no receiver grouping for a lambda receiver variable");
-        appendGroups(cached, ptsByType);
+        cached.appendAll(ptsByType);
         infos.forEach(info -> {
             // handle the case of that new objects reach base variable
             // of lambda invocation
