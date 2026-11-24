@@ -36,6 +36,9 @@
     # that point; points-to sets and the call graph stay readable, a later
     # read of the pointer flow graph (object flow graph, taint analysis,
     # Zipper) fails
+    pack-pending-deltas: true # whether a pending work list delta that is a
+    # large set on arrival is held as packed words (same results either way;
+    # the "Work list:" log line counts packs and unpacks)
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format

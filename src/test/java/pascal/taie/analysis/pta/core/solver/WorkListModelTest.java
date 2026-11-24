@@ -40,12 +40,14 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -121,7 +123,109 @@ class WorkListModelTest {
 
     @Test
     void randomSequencesMatchTheCopyingWorkList() {
-        assertSequencesMatch(factory);
+        assertSequencesMatch(factory, true, 12);
+    }
+
+    @Test
+    void randomSequencesWithoutPackingMatchTheCopyingWorkList() {
+        assertSequencesMatch(factory, false, 12);
+    }
+
+    /**
+     * Every pointer of the program: the ring and the index array grow
+     * while pointers are pending, and the order survives the growth.
+     */
+    @Test
+    void randomSequencesOverAllPointersMatchTheCopyingWorkList() {
+        assertTrue(pointers.size() > 40, "too few pointers: " + pointers.size());
+        int peak = assertSequencesMatch(factory, true, pointers.size());
+        // more pending than the initial ring holds, and pointer indexes past the initial index array
+        assertTrue(peak > 16, "peak: " + peak);
+        assertTrue(pointers.stream().anyMatch(p -> p.getIndex() >= 16));
+    }
+
+    /**
+     * A scripted run: the poll order is the order of first pending
+     * insertion, a merge keeps the place, a pointer polled and added again
+     * goes last; the counters count each step.
+     */
+    @Test
+    void scriptedRunPollsInFirstInsertionOrderAndCounts() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, true);
+        workList.addEntry(c, small);
+        workList.addEntry(a, large);
+        workList.addEntry(b, small);
+        workList.addEntry(c, large);
+        workList.addEntry(a, small);
+        assertEquals(3, workList.pendingPointers());
+        assertEquals(3, workList.newEntries());
+        assertEquals(2, workList.mergedEntries());
+        assertEquals(1, workList.packs());
+        assertEquals(1, workList.unpacks());
+        assertSame(c, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        workList.addEntry(c, small);
+        assertSame(a, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        workList.addEntry(b, large);
+        assertSame(b, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        assertSame(c, workList.pollPointer());
+        assertEquals(List.of(objects.get(0)), order(workList.takePolledDelta()));
+        assertTrue(workList.isEmpty());
+        assertEquals(0, workList.pendingPointers());
+        assertEquals(3, workList.pendingPeak());
+        assertEquals(4, workList.newEntries());
+        assertEquals(3, workList.mergedEntries());
+        assertEquals(1, workList.packs());
+        assertEquals(1, workList.unpacks());
+        assertEquals("pending_pointers=0 pending_peak=3 new_entries=4"
+                + " merged_entries=3 packs=1 unpacks=1", workList.countersLine());
+    }
+
+    @Test
+    void unpackedRunNeitherPacksNorUnpacks() {
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, false);
+        workList.addEntry(pointers.get(0), large);
+        workList.addEntry(pointers.get(1), large);
+        workList.pollPointer();
+        workList.takePolledDelta();
+        assertEquals(0, workList.packs());
+        assertEquals(0, workList.unpacks());
+        WorkList packing = new WorkList(factory, true);
+        packing.addEntry(pointers.get(0), large);
+        packing.addEntry(pointers.get(1), large);
+        packing.pollPointer();
+        packing.takePolledDelta();
+        assertEquals(2, packing.packs());
+        assertEquals(1, packing.unpacks());
+    }
+
+    @Test
+    void emptyPollsAndDoubleTakesThrow() {
+        WorkList workList = new WorkList(factory, true);
+        assertThrows(NoSuchElementException.class, workList::pollPointer);
+        assertThrows(NoSuchElementException.class, workList::pollCallEdge);
+        assertThrows(IllegalStateException.class, workList::takePolledDelta);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        workList.addEntry(pointers.get(0), small);
+        workList.pollPointer();
+        workList.takePolledDelta();
+        assertThrows(IllegalStateException.class, workList::takePolledDelta);
+        workList.addEntry(pointers.get(0), small);
+        workList.addEntry(pointers.get(1), small);
+        workList.pollPointer();
+        assertThrows(IllegalStateException.class, workList::pollPointer);
     }
 
     /**
@@ -130,7 +234,7 @@ class WorkListModelTest {
      */
     @Test
     void multiAreaSequencesMatchTheCopyingWorkList() {
-        assertSequencesMatch(farFactory);
+        assertSequencesMatch(farFactory, true, 12);
         PointsToSet all = farFactory.make();
         objects.forEach(all::addObject);
         long[] words = farFactory.toPackedLarge(all);
@@ -147,15 +251,21 @@ class WorkListModelTest {
         assertEquals(order(all), order(farFactory.ofPackedLarge(words)));
     }
 
-    private static void assertSequencesMatch(PointsToSetFactory factory) {
+    /**
+     * @return the largest number of pointers pending at once over all seeds.
+     */
+    private static int assertSequencesMatch(
+            PointsToSetFactory factory, boolean packLarge, int pointerRange) {
+        int maxPeak = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
-            WorkList workList = new WorkList(factory);
+            WorkList workList = new WorkList(factory, packLarge);
             CopyingWorkList model = new CopyingWorkList();
             int steps = 50 + random.nextInt(400);
             for (int step = 0; step < steps; ++step) {
                 if (random.nextInt(10) < 7) {
-                    Pointer pointer = pointers.get(random.nextInt(Math.min(pointers.size(), 12)));
+                    Pointer pointer = pointers.get(
+                            random.nextInt(Math.min(pointers.size(), pointerRange)));
                     PointsToSet delta = randomSet(factory, random);
                     workList.addEntry(pointer, delta);
                     model.addEntry(pointer, delta);
@@ -172,7 +282,15 @@ class WorkListModelTest {
                 assertSamePoll(model, workList, seed + "/drain");
             }
             assertTrue(workList.isEmpty());
+            assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
+            assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
+            assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
+            if (!packLarge) {
+                assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
+            }
+            maxPeak = Math.max(maxPeak, workList.pendingPeak());
         }
+        return maxPeak;
     }
 
     @Test
@@ -194,10 +312,12 @@ class WorkListModelTest {
 
     private static void assertSamePoll(CopyingWorkList model, WorkList workList, String at) {
         Map.Entry<Pointer, PointsToSet> expected = model.poll();
-        WorkList.PointerEntry actual = (WorkList.PointerEntry) workList.pollEntry();
-        assertSame(expected.getKey(), actual.pointer(), at);
-        assertEquals(order(expected.getValue()), order(actual.pointsToSet()), at);
-        assertEquals(formProbe(expected.getValue()), formProbe(actual.pointsToSet()), at);
+        Pointer actualPointer = workList.pollPointer();
+        PointsToSet actualDelta = workList.takePolledDelta();
+        assertSame(expected.getKey(), actualPointer, at);
+        assertEquals(order(expected.getValue()), order(actualDelta), at);
+        assertEquals(formProbe(expected.getValue()), formProbe(actualDelta), at);
+        assertEquals(model.entries.size(), workList.pendingPointers(), at);
     }
 
     private static List<CSObj> order(PointsToSet pts) {
@@ -288,12 +408,21 @@ class WorkListModelTest {
 
         private final Map<Pointer, PointsToSet> entries = Maps.newLinkedHashMap();
 
+        private long newEntries;
+
+        private long mergedEntries;
+
+        private int peak;
+
         void addEntry(Pointer pointer, PointsToSet pointsToSet) {
             PointsToSet set = entries.get(pointer);
             if (set != null) {
                 set.addAll(pointsToSet);
+                ++mergedEntries;
             } else {
                 entries.put(pointer, pointsToSet.copy());
+                ++newEntries;
+                peak = Math.max(peak, entries.size());
             }
         }
 
