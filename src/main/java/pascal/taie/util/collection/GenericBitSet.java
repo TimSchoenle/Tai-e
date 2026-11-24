@@ -31,7 +31,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.function.Predicate;
+import java.util.function.IntPredicate;
 
 /**
  * Bit set based implementation of {@link java.util.Set}.
@@ -250,20 +250,22 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
      * element of this set that is not in {@code known} is tested once, in
      * the iteration order of this set, and added to {@code known}, and also
      * to {@code pass} if the predicate accepts it. This set is not changed.
+     * The predicate gets the index of the element (see {@link #getIndex}),
+     * so no element is looked up unless the predicate does it.
      * See {@link IBitSet#updateMemoAndCount}.
      *
      * @param known the elements tested so far
      * @param pass  the tested elements that were accepted
-     * @param test  the predicate; it must not change any of the three sets
+     * @param test  the predicate on element indexes; it must not change any
+     *              of the three sets
      * @return the number of elements of this set that are in {@code pass}
      * after the update
      */
-    public int updateMemoAndCount(GenericBitSet<E> known, GenericBitSet<E> pass,
-                                  Predicate<? super E> test) {
+    public int updateMemoAndCountByIndex(GenericBitSet<E> known, GenericBitSet<E> pass,
+                                         IntPredicate test) {
         checkContext(known);
         checkContext(pass);
-        return bitSet.updateMemoAndCount(known.bitSet, pass.bitSet,
-                i -> test.test(getElement(i)));
+        return bitSet.updateMemoAndCount(known.bitSet, pass.bitSet, test);
     }
 
     /**

@@ -25,11 +25,14 @@ package pascal.taie.analysis.pta.core.solver;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import pascal.taie.Main;
+import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
+import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
+import pascal.taie.util.Indexer;
 import pascal.taie.util.collection.Sets;
 
 import java.lang.reflect.InvocationTargetException;
@@ -37,7 +40,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
@@ -120,6 +125,182 @@ class TypeFilterModelTest {
             }
             probeThrowingCheck(types, objects.get(0));
             probeChecksPerType(types, objects);
+            probeTypeIdsBeyondFirstWord(types, objects, true);
+            probeTypeIdsBeyondFirstWord(types, objects, false);
+            probeNoObjectLookupForKnownTypes(types, objects);
+        }
+
+        /**
+         * Gives the types of the objects their ids in two steps, one object
+         * per type each: first 64 types (ids 0 to 63, one word of a type
+         * memo), then the other types (ids of 64 and above). The other
+         * objects of the late types are then filtered with no type check:
+         * their answers come from the type memo beyond its first word, for
+         * a passing and a failing type alike. Either in bit sets or each
+         * object alone (the object-by-object path).
+         */
+        private void probeTypeIdsBeyondFirstWord(TypeSystem types, List<CSObj> objects,
+                                                 boolean bitSets) {
+            String path = bitSets ? "bit set path" : "object-by-object path";
+            Type guard = types.getArrayType(types.getClassType("java.lang.Object"), 3);
+            Map<Type, List<CSObj>> byType = new LinkedHashMap<>();
+            objects.forEach(o -> byType.computeIfAbsent(o.getObject().getType(),
+                    t -> new ArrayList<>()).add(o));
+            Type passing = null;
+            Type failing = null;
+            for (Map.Entry<Type, List<CSObj>> e : byType.entrySet()) {
+                if (e.getValue().size() < 2) {
+                    continue;
+                }
+                if (types.isAssignable(guard, e.getKey())) {
+                    passing = passing == null ? e.getKey() : passing;
+                } else {
+                    failing = failing == null ? e.getKey() : failing;
+                }
+            }
+            if (passing == null || failing == null || byType.size() < Long.SIZE + 2) {
+                FAILURES.add(path + ": no passing and failing type with two objects among "
+                        + byType.size() + " types");
+                return;
+            }
+            List<Type> order = new ArrayList<>(byType.keySet());
+            order.remove(passing);
+            order.remove(failing);
+            order.add(passing);
+            order.add(failing);
+            List<Type> early = order.subList(0, Long.SIZE);
+            List<Type> late = order.subList(Long.SIZE, order.size());
+            int[] checks = {0};
+            Solver counting = countingChecks(types, checks);
+            TypeFilter.clearMemos();
+            List<CSObj> firstEarly = new ArrayList<>();
+            early.forEach(t -> firstEarly.add(byType.get(t).get(0)));
+            List<CSObj> firstLate = new ArrayList<>();
+            List<CSObj> otherLate = new ArrayList<>();
+            for (Type t : late) {
+                List<CSObj> objs = byType.get(t);
+                firstLate.add(objs.get(0));
+                otherLate.addAll(objs.subList(1, objs.size()));
+            }
+            filterAll(guard, counting, firstEarly, bitSets);
+            filterAll(guard, counting, firstLate, bitSets);
+            if (checks[0] != order.size()) {
+                FAILURES.add(path + ": " + checks[0] + " checks for the first objects of "
+                        + order.size() + " types");
+            }
+            checks[0] = 0;
+            List<CSObj> got = filterAll(guard, counting, otherLate, bitSets);
+            if (checks[0] != 0) {
+                FAILURES.add(path + ": " + checks[0]
+                        + " checks for objects of types with ids of 64 and above");
+            }
+            List<CSObj> want = otherLate.stream()
+                    .filter(o -> types.isAssignable(guard, o.getObject().getType()))
+                    .toList();
+            if (!Set.copyOf(want).equals(Set.copyOf(got)) || want.size() != got.size()) {
+                FAILURES.add(path + ": late types filtered to " + got + ", expected " + want);
+            }
+            Type pass = passing;
+            Type fail = failing;
+            if (got.stream().noneMatch(o -> o.getObject().getType().equals(pass))
+                    || got.stream().anyMatch(o -> o.getObject().getType().equals(fail))) {
+                FAILURES.add(path + ": late passing type " + pass + " or failing type "
+                        + fail + " read wrongly from the type memo: " + got);
+            }
+        }
+
+        /**
+         * Filters the objects with a new filter of the guard, all in one
+         * points-to set or each object alone.
+         *
+         * @return the objects that passed
+         */
+        private List<CSObj> filterAll(Type guard, Solver s, List<CSObj> objs, boolean bitSets) {
+            List<CSObj> passed = new ArrayList<>();
+            if (bitSets) {
+                PointsToSet pts = solver.makePointsToSet();
+                objs.forEach(pts::addObject);
+                if (TypeFilter.representation(pts) != 2) {
+                    FAILURES.add("a set of " + objs.size() + " objects is not a bit set");
+                }
+                passed.addAll(new TypeFilter(guard, s).apply(null, pts).getObjects());
+            } else {
+                for (CSObj o : objs) {
+                    PointsToSet one = solver.makePointsToSet();
+                    one.addObject(o);
+                    passed.addAll(new TypeFilter(guard, s).apply(null, one).getObjects());
+                }
+            }
+            return passed;
+        }
+
+        /**
+         * Filters all objects in one bit set with a new guard type after
+         * another guard gave every object its type id: the bit-set path
+         * then reads no object from the object indexer to check it (only
+         * the objects of a result too small for a bit set are read, to
+         * collect them).
+         */
+        private void probeNoObjectLookupForKnownTypes(TypeSystem types, List<CSObj> objects) {
+            Indexer<CSObj> real = solver.getCSManager().getObjectIndexer();
+            int[] lookups = {0};
+            Indexer<CSObj> counting = new Indexer<>() {
+                @Override
+                public int getIndex(CSObj o) {
+                    return real.getIndex(o);
+                }
+
+                @Override
+                public CSObj getObject(int index) {
+                    lookups[0]++;
+                    return real.getObject(index);
+                }
+            };
+            PointsToSetFactory factory = new PointsToSetFactory(counting);
+            CSManager csManager = (CSManager) Proxy.newProxyInstance(
+                    CSManager.class.getClassLoader(), new Class<?>[]{CSManager.class},
+                    (proxy, method, args) -> method.getName().equals("getObjectIndexer")
+                            ? counting : invoke(method, solver.getCSManager(), args));
+            Solver countingSolver = (Solver) Proxy.newProxyInstance(
+                    Solver.class.getClassLoader(), new Class<?>[]{Solver.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getCSManager" -> csManager;
+                        case "makePointsToSet" -> factory.make();
+                        default -> invoke(method, solver, args);
+                    });
+            PointsToSet all = factory.make();
+            objects.forEach(all::addObject);
+            if (TypeFilter.representation(all) != 2) {
+                FAILURES.add("the objects of the lookup probe are not held in a bit set");
+            }
+            TypeFilter.clearMemos();
+            new TypeFilter(types.getClassType("java.lang.Object"), countingSolver)
+                    .apply(null, all);
+            lookups[0] = 0;
+            PointsToSet result = new TypeFilter(types.getClassType("A"), countingSolver)
+                    .apply(null, all);
+            int collected = TypeFilter.representation(result) == 2 ? 0 : result.size();
+            if (lookups[0] != collected) {
+                FAILURES.add("bit set path with known type ids: " + lookups[0]
+                        + " object lookups for " + objects.size() + " objects, "
+                        + result.size() + " passing");
+            }
+            TypeFilter.clearMemos();
+        }
+
+        private Solver countingChecks(TypeSystem types, int[] checks) {
+            TypeSystem counting = (TypeSystem) Proxy.newProxyInstance(
+                    TypeSystem.class.getClassLoader(), new Class<?>[]{TypeSystem.class},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("isAssignable")) {
+                            checks[0]++;
+                        }
+                        return invoke(method, types, args);
+                    });
+            return (Solver) Proxy.newProxyInstance(
+                    Solver.class.getClassLoader(), new Class<?>[]{Solver.class},
+                    (proxy, method, args) -> method.getName().equals("getTypeSystem")
+                            ? counting : invoke(method, solver, args));
         }
 
         /**

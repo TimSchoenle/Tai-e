@@ -41,7 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Predicate;
+import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 
 /**
@@ -60,6 +60,8 @@ import java.util.function.Supplier;
  * system is asked at most once per (guard type, object type). An input
  * held in a bit set is filtered word by word: in one pass over its words
  * only the bits of input AND NOT known are checked (and added to the memo)
+ * by their object index, whose type id is read from a flat array (the
+ * object itself is read only the first time its type id is assigned),
  * and the bits of input AND pass are counted; the result is the input AND
  * pass (the input itself if all pass). A smaller input
  * is filtered object by object through the same memo. The memos of the
@@ -92,13 +94,18 @@ public class TypeFilter implements Transfer {
      * Dense ids of the types of the objects checked so far, shared by the
      * memos created between two resets. The type of an object is looked up in a
      * map once per object; later reads take its id from a flat array over
-     * the object index.
+     * the object index, without reading the object.
      */
     private static final class ObjectTypes {
 
         private final Indexer<CSObj> indexer;
 
         private final Map<Type, Integer> ids = new HashMap<>();
+
+        /**
+         * The type of each id.
+         */
+        private final List<Type> types = new ArrayList<>();
 
         /**
          * The type id plus one per object index; 0 if not assigned yet.
@@ -118,12 +125,29 @@ public class TypeFilter implements Transfer {
             return assign(o, index);
         }
 
+        /**
+         * @return the type id of the object of the index; the object is read
+         * from the indexer only if its id is not assigned yet.
+         */
+        int idOfIndex(int index) {
+            int[] table = idPlusOne;
+            if (index < table.length && table[index] != 0) {
+                return table[index] - 1;
+            }
+            return assign(indexer.getObject(index), index);
+        }
+
+        Type typeOf(int id) {
+            return types.get(id);
+        }
+
         private int assign(CSObj o, int index) {
             Type type = o.getObject().getType();
             Integer id = ids.get(type);
             if (id == null) {
                 id = ids.size();
                 ids.put(type, id);
+                types.add(type);
             }
             if (index >= idPlusOne.length) {
                 idPlusOne = Arrays.copyOf(idPlusOne, Math.max(index + 1, 2 * idPlusOne.length));
@@ -202,9 +226,10 @@ public class TypeFilter implements Transfer {
     private final Indexer<CSObj> indexer;
 
     /**
-     * {@link #checkWithMemo} as a predicate, created once per filter.
+     * {@link #checkIndexWithMemo} as a predicate on object indexes, created
+     * once per filter.
      */
-    private final Predicate<CSObj> checker = this::checkWithMemo;
+    private final IntPredicate checker = this::checkIndexWithMemo;
 
     private @Nullable Memo memo;
 
@@ -307,7 +332,7 @@ public class TypeFilter implements Transfer {
                                               GenericBitSet<CSObj> in, int threshold) {
         // one pass over the words of the input: only its unchecked objects
         // are checked (and added to the memo), the passing ones are counted
-        int passing = in.updateMemoAndCount(m.known, m.pass, checker);
+        int passing = in.updateMemoAndCountByIndex(m.known, m.pass, checker);
         if (passing > threshold) {
             if (passing == in.size()) {
                 return input;
@@ -334,7 +359,7 @@ public class TypeFilter implements Transfer {
         }
         // checked before it is marked known: a throwing check leaves the
         // object unknown
-        boolean ok = checkByType(m, o);
+        boolean ok = checkByType(m, m.types.idOf(o));
         m.known.add(o);
         if (ok) {
             m.pass.add(o);
@@ -342,24 +367,24 @@ public class TypeFilter implements Transfer {
         return ok;
     }
 
-    private boolean checkWithMemo(CSObj o) {
-        return checkByType(Objects.requireNonNull(memo), o);
+    private boolean checkIndexWithMemo(int index) {
+        Memo m = Objects.requireNonNull(memo);
+        return checkByType(m, m.types.idOfIndex(index));
     }
 
     /**
-     * Checks the object through the memo of its type: objects of one type
+     * Checks an object through the memo of its type id: objects of one type
      * share the answer, so each (guard type, object type) pair is checked
      * at most once.
      */
-    private boolean checkByType(Memo m, CSObj o) {
-        int typeId = m.types.idOf(o);
+    private boolean checkByType(Memo m, int typeId) {
         int known = m.typeResult(typeId);
         if (known >= 0) {
             return known == 1;
         }
         // checked before the type is recorded: a throwing check leaves the
         // type unknown
-        boolean ok = check(o);
+        boolean ok = typeSystem.isAssignable(type, m.types.typeOf(typeId));
         m.recordType(typeId, ok);
         return ok;
     }
