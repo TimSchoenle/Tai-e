@@ -22,6 +22,8 @@
 
 package pascal.taie.analysis.pta.plugin.exception;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import pascal.taie.analysis.exception.CatchAnalysis;
 import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.Edge;
@@ -31,6 +33,7 @@ import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
+import pascal.taie.analysis.pta.core.cs.element.MapBasedCSManager;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
@@ -50,6 +53,8 @@ import pascal.taie.util.collection.SetEx;
 import pascal.taie.util.collection.Sets;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,12 +64,24 @@ import java.util.function.Supplier;
 
 public class ExceptionAnalysis implements Plugin {
 
+    private static final Logger logger = LoggerFactory.getLogger(ExceptionAnalysis.class);
+
+    private static final Comparator<CSObj> BY_GLOBAL_INDEX =
+            Comparator.comparingInt(CSObj::getIndex);
+
     private Solver solver;
 
     private CSManager csManager;
 
     private TypeSystem typeSystem;
 
+    private ExceptionObjIndexer exceptionIndexer;
+
+    /**
+     * Creates the sets of exception objects; every set it creates is over
+     * {@link #exceptionIndexer}, so a set from elsewhere (such as a
+     * points-to set) enters them element by element.
+     */
     private Supplier<SetEx<CSObj>> setFactory;
 
     /**
@@ -96,7 +113,10 @@ public class ExceptionAnalysis implements Plugin {
         this.typeSystem = solver.getTypeSystem();
         // use sparse bit set only when exception objects are NOT merged
         boolean isSparse = !solver.getOptions().getBoolean("merge-exception-objects");
-        this.setFactory = () -> new IndexerBitSet<>(csManager.getObjectIndexer(), isSparse);
+        // number exception objects locally, so that the width of a set
+        // follows the number of exception objects, not the global indexes
+        this.exceptionIndexer = new ExceptionObjIndexer();
+        this.setFactory = () -> new IndexerBitSet<>(exceptionIndexer, isSparse);
     }
 
     /**
@@ -139,8 +159,13 @@ public class ExceptionAnalysis implements Plugin {
             Context ctx = csVar.getContext();
             JMethod currentMethod = exceptionRef.getMethod();
             CSMethod currentCSMethod = csManager.getCSMethod(ctx, currentMethod);
+            // copy element by element: pts is numbered by the global indexer
+            SetEx<CSObj> thrown = setFactory.get();
+            for (CSObj obj : pts) {
+                thrown.add(obj);
+            }
             throwStmts.forEach(throwStmt -> workList.add(
-                    new Entry(currentCSMethod, throwStmt, pts.getObjects())));
+                    new Entry(currentCSMethod, throwStmt, thrown)));
             propagateExceptions();
         }
     }
@@ -227,9 +252,10 @@ public class ExceptionAnalysis implements Plugin {
                 .get(currentStmt);
         if (entries != null) {
             Context ctx = csMethod.getContext();
+            Iterable<CSObj> toCheck = inGlobalIndexOrder(newExceptions);
             for (ExceptionEntry entry : entries) {
                 Set<CSObj> uncaughtExceptions = Sets.newHybridSet();
-                newExceptions.forEach(newException -> {
+                for (CSObj newException : toCheck) {
                     Obj exObj = newException.getObject();
                     if (typeSystem.isSubtype(entry.catchType(), exObj.getType())) {
                         Catch catchStmt = entry.handler();
@@ -238,15 +264,32 @@ public class ExceptionAnalysis implements Plugin {
                     } else {
                         uncaughtExceptions.add(newException);
                     }
-                });
+                }
                 newExceptions = uncaughtExceptions;
+                toCheck = uncaughtExceptions;
             }
         }
         return newExceptions;
     }
 
+    /**
+     * @return the given objects in the order of their global indexes, the
+     * iteration order of sets over the global {@link CSObj} indexer, so the
+     * solver receives caught objects in the same order whichever indexer
+     * numbers the exception sets.
+     */
+    private static Iterable<CSObj> inGlobalIndexOrder(Set<CSObj> objs) {
+        if (objs.size() < 2) {
+            return objs;
+        }
+        CSObj[] sorted = objs.toArray(new CSObj[0]);
+        Arrays.sort(sorted, BY_GLOBAL_INDEX);
+        return Arrays.asList(sorted);
+    }
+
     @Override
     public void onFinish() {
+        logCensus();
         if (!solver.getOptions().getBoolean("collect-throw-results")) {
             clear();
             return;
@@ -263,6 +306,26 @@ public class ExceptionAnalysis implements Plugin {
         }
         solver.getResult().storeResult(getClass().getName(), throwResult);
         clear();
+    }
+
+    /**
+     * Logs one line: how many exception objects got a local index and, for a
+     * {@link MapBasedCSManager}, how many throwable objects got a global
+     * index and whether and when they ran out of their reserved range.
+     */
+    private void logCensus() {
+        if (csManager instanceof MapBasedCSManager mapBased) {
+            MapBasedCSManager.ThrowableCensus census = mapBased.getThrowableCensus();
+            logger.info("Exception objects: {} indexed by exception analysis;"
+                            + " throwable objects: {} (reserved indexes {}, {})",
+                    exceptionIndexer.size(), census.throwableObjects(), census.budget(),
+                    census.budgetExceeded()
+                            ? "exceeded after " + census.budgetExceededAfterMillis() + " ms"
+                            : "not exceeded");
+        } else {
+            logger.info("Exception objects: {} indexed by exception analysis",
+                    exceptionIndexer.size());
+        }
     }
 
     private void clear() {

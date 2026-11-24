@@ -41,6 +41,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 /**
@@ -141,6 +142,38 @@ public class MapBasedCSManager implements CSManager {
     @Override
     public Indexer<CSObj> getObjectIndexer() {
         return objManager;
+    }
+
+    /**
+     * @return how many throwable {@link CSObj}s got an index so far, and
+     * whether and when their reserved index range ran out.
+     */
+    public ThrowableCensus getThrowableCensus() {
+        return objManager.getThrowableCensus();
+    }
+
+    /**
+     * Census of the throwable {@link CSObj}s of this manager.
+     *
+     * @param throwableObjects          number of throwable {@link CSObj}s
+     *                                  that got an index
+     * @param budget                    number of indexes reserved for
+     *                                  throwable objects
+     * @param budgetExceededAfterMillis milliseconds from the creation of
+     *                                  this manager until the first throwable
+     *                                  object took an index outside the
+     *                                  reserved range; -1 if none did
+     */
+    public record ThrowableCensus(int throwableObjects, int budget,
+                                  long budgetExceededAfterMillis) {
+
+        /**
+         * @return whether a throwable object took an index outside the
+         * reserved range.
+         */
+        public boolean budgetExceeded() {
+            return budgetExceededAfterMillis >= 0;
+        }
     }
 
     @Override
@@ -281,6 +314,28 @@ public class MapBasedCSManager implements CSManager {
          */
         private CSObj[] objs = new CSObj[65536];
 
+        /**
+         * Time of creation of this manager, for {@link #budgetExceededAfterMillis}.
+         */
+        private final long createdNanos = System.nanoTime();
+
+        /**
+         * Number of throwable objects that got an index, inside or outside
+         * the reserved range.
+         */
+        private int throwableObjects = 0;
+
+        /**
+         * Milliseconds from {@link #createdNanos} until the first throwable
+         * object took an index outside the reserved range; -1 if none did.
+         */
+        private long budgetExceededAfterMillis = -1;
+
+        ThrowableCensus getThrowableCensus() {
+            return new ThrowableCensus(throwableObjects, THROWABLE_BUDGET,
+                    budgetExceededAfterMillis);
+        }
+
         CSObj getCSObj(Context heapContext, Obj obj) {
             return objMap.computeIfAbsent(obj, heapContext, (o, c) -> {
                 int index = getCSObjIndex(o);
@@ -291,9 +346,16 @@ public class MapBasedCSManager implements CSManager {
         }
 
         private int getCSObjIndex(Obj obj) {
-            if (typeSystem.isSubtype(throwable, obj.getType()) &&
-                    throwableCounter < THROWABLE_BUDGET) {
-                return throwableCounter++;
+            if (typeSystem.isSubtype(throwable, obj.getType())) {
+                ++throwableObjects;
+                if (throwableCounter < THROWABLE_BUDGET) {
+                    return throwableCounter++;
+                }
+                if (budgetExceededAfterMillis < 0) {
+                    budgetExceededAfterMillis = TimeUnit.NANOSECONDS.toMillis(
+                            System.nanoTime() - createdNanos);
+                }
+                return counter++;
             } else if (obj.getType().equals(string) &&
                     stringCounter < THROWABLE_BUDGET + STRING_BUDGET) {
                 return stringCounter++;
