@@ -34,4 +34,13 @@ class InvokeDynamicCallEdge extends OtherEdge<CSCallSite, CSMethod> {
     InvokeDynamicCallEdge(CSCallSite csCallSite, CSMethod callee) {
         super(csCallSite, callee);
     }
+
+    /**
+     * @return true: the invokedynamic instruction calls the target method,
+     * and what the target throws leaves that instruction.
+     */
+    @Override
+    public boolean propagatesExceptions() {
+        return true;
+    }
 }

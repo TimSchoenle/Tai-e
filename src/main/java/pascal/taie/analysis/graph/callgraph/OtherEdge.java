@@ -37,6 +37,16 @@ public abstract class OtherEdge<CallSite, Method>
     }
 
     /**
+     * @return whether an exception that the callee does not catch leaves
+     * the call site of this edge, as it does for a regular call. False by
+     * default: the caller of the callee is not the call site, e.g., the
+     * virtual machine or a framework calls it.
+     */
+    public boolean propagatesExceptions() {
+        return false;
+    }
+
+    /**
      * @return String representation of information for this edge.
      * It contains simple name of the edge class to distinguish
      * from other classes of {@link CallKind#OTHER} call edges.
