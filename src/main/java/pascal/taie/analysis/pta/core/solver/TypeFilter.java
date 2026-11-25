@@ -37,10 +37,14 @@ import pascal.taie.util.collection.IndexerBitSet;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntPredicate;
 import java.util.function.Supplier;
@@ -237,6 +241,24 @@ public class TypeFilter implements Transfer {
     private long applications;
 
     /**
+     * Whether the measurement counters below are kept; set by the solver
+     * for each solve (see {@link #setStats}). They change no result and no
+     * order.
+     */
+    private static boolean stats;
+
+    /**
+     * Applications that took the bit set path, objects in the inputs of
+     * all applications, and the assignability tests made for an object
+     * type the memo did not know yet.
+     */
+    private long largeApplications;
+
+    private long inputBits;
+
+    private long typeTests;
+
+    /**
      * The delta that a solver is propagating and the result of this filter
      * on it, or null outside a propagation that applied it; set and cleared
      * by {@link DeltaTransfers}.
@@ -318,6 +340,62 @@ public class TypeFilter implements Transfer {
     }
 
     /**
+     * Turns the measurement counters of all type filters on or off.
+     */
+    static void setStats(boolean on) {
+        stats = on;
+    }
+
+    long largeApplications() {
+        return largeApplications;
+    }
+
+    long inputBits() {
+        return inputBits;
+    }
+
+    long typeTests() {
+        return typeTests;
+    }
+
+    /**
+     * Sums the measurement counters of the filters, with the objects their
+     * memos know and those that pass, each shared memo counted once.
+     *
+     * @return the summary line, or the empty text if the counters are off.
+     */
+    static String statsLine(Collection<TypeFilter> filters) {
+        if (!stats) {
+            return "";
+        }
+        long apps = 0;
+        long large = 0;
+        long bits = 0;
+        long tests = 0;
+        long memoKnown = 0;
+        long memoPass = 0;
+        Set<Memo> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (TypeFilter f : filters) {
+            apps += f.applications;
+            large += f.largeApplications;
+            bits += f.inputBits;
+            tests += f.typeTests;
+            Memo m = f.memo;
+            if (m != null && seen.add(m)) {
+                memoKnown += m.known.size();
+                memoPass += m.pass.size();
+            }
+        }
+        return "filters=" + filters.size()
+                + " applications=" + apps
+                + " large_applications=" + large
+                + " input_bits=" + bits
+                + " type_tests=" + tests
+                + " memo_known_objects=" + memoKnown
+                + " memo_pass_objects=" + memoPass;
+    }
+
+    /**
      * @return the tag of this filter and the kind, the same object for
      * every call with the same kind (the edges of a solver are added by
      * one thread; two threads racing on the first use of a kind would each
@@ -355,6 +433,9 @@ public class TypeFilter implements Transfer {
             m = memoFor(type, indexer);
             memo = m;
         }
+        if (stats) {
+            inputBits += input.size();
+        }
         PointsToSet result = filter(m, input);
         if (VERIFY) {
             verify(input, result);
@@ -388,6 +469,9 @@ public class TypeFilter implements Transfer {
      */
     private @Nullable PointsToSet filterLarge(Memo m, PointsToSet input,
                                               GenericBitSet<CSObj> in, int threshold) {
+        if (stats) {
+            ++largeApplications;
+        }
         // one pass over the words of the input: only its unchecked objects
         // are checked (and added to the memo), the passing ones are counted
         int passing = in.updateMemoAndCountByIndex(m.known, m.pass, checker);
@@ -442,6 +526,9 @@ public class TypeFilter implements Transfer {
         }
         // checked before the type is recorded: a throwing check leaves the
         // type unknown
+        if (stats) {
+            ++typeTests;
+        }
         boolean ok = typeSystem.isAssignable(type, m.types.typeOf(typeId));
         m.recordType(typeId, ok);
         return ok;

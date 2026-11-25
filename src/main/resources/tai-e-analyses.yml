@@ -44,7 +44,10 @@
     # the "Work list:" log line counts packs and unpacks)
     census: false # whether log, at the finish before any release, the SCC
     # census of the pointer flow graph's unfiltered edges and the block
-    # census of the points-to sets (measurement only; walks every pointer)
+    # census of the points-to sets and the census of the context-sensitive
+    # objects (measurement only; walks every pointer), and keep the solver's
+    # measurement counters during the solve (also with the system property
+    # taie.pta.counters; they change no result and no order but cost time)
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format

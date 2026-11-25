@@ -165,13 +165,52 @@ final class WorkList {
     private long sharedCopies;
 
     /**
+     * Whether the measurement counters below are kept; they change no
+     * result and no order.
+     */
+    private final boolean counting;
+
+    /**
+     * Objects in the polled deltas and in the differences their
+     * propagations made, and the polls whose difference was empty
+     * (see {@link #recordPropagation}).
+     */
+    private long polledBits;
+
+    private long diffBits;
+
+    private long emptyDiffPolls;
+
+    /**
+     * Estimated bytes of the packed words of the deltas made by packing
+     * a large set.
+     */
+    private long packedBytes;
+
+    /**
+     * Merges into a pending delta that already held every object added.
+     */
+    private long mergesUnchanged;
+
+    /**
      * @param ptsFactory the factory of the pending sets
      * @param packLarge  whether a pending delta that is a large set on
      *                   arrival is held as packed words
      */
     WorkList(PointsToSetFactory ptsFactory, boolean packLarge) {
+        this(ptsFactory, packLarge, false);
+    }
+
+    /**
+     * @param ptsFactory the factory of the pending sets
+     * @param packLarge  whether a pending delta that is a large set on
+     *                   arrival is held as packed words
+     * @param counting   whether the measurement counters are kept
+     */
+    WorkList(PointsToSetFactory ptsFactory, boolean packLarge, boolean counting) {
         this.ptsFactory = ptsFactory;
         this.packLarge = packLarge;
+        this.counting = counting;
     }
 
     /**
@@ -306,8 +345,11 @@ final class WorkList {
             ++unpacks;
             ringDeltas[slot] = set;
         }
-        set.addAll(pointsToSet);
+        boolean changed = set.addAll(pointsToSet);
         ++mergedEntries;
+        if (counting && !changed) {
+            ++mergesUnchanged;
+        }
     }
 
     /**
@@ -328,6 +370,9 @@ final class WorkList {
             long[] packed = ptsFactory.toPackedLarge(pointsToSet);
             if (packed != null) {
                 ++packs;
+                if (counting) {
+                    packedBytes += longArrayBytes(packed);
+                }
                 return packed;
             }
         }
@@ -493,7 +538,7 @@ final class WorkList {
      * @return the counters of the pointer entries, for the log.
      */
     String countersLine() {
-        return "pending_pointers=" + size
+        String line = "pending_pointers=" + size
                 + " pending_peak=" + pendingPeak
                 + " new_entries=" + newEntries
                 + " merged_entries=" + mergedEntries
@@ -501,5 +546,90 @@ final class WorkList {
                 + " unpacks=" + unpacks
                 + " shared_entries=" + sharedEntries
                 + " shared_copies=" + sharedCopies;
+        if (!counting) {
+            return line;
+        }
+        long[] pending = pendingFootprint();
+        return line
+                + " polled_bits=" + polledBits
+                + " diff_bits=" + diffBits
+                + " empty_diff_polls=" + emptyDiffPolls
+                + " packed_bytes=" + packedBytes
+                + " merges_unchanged=" + mergesUnchanged
+                + " pending_packed_bytes=" + pending[0]
+                + " pending_set_objects=" + pending[1];
+    }
+
+    /**
+     * @return whether the measurement counters are kept.
+     */
+    boolean isCounting() {
+        return counting;
+    }
+
+    /**
+     * Counts one propagation of a polled delta when the counters are kept.
+     *
+     * @param polledSize the objects in the polled delta
+     * @param diffSize   the objects in the difference its propagation made
+     */
+    void recordPropagation(int polledSize, int diffSize) {
+        if (counting) {
+            polledBits += polledSize;
+            diffBits += diffSize;
+            if (diffSize == 0) {
+                ++emptyDiffPolls;
+            }
+        }
+    }
+
+    long polledBits() {
+        return polledBits;
+    }
+
+    long diffBits() {
+        return diffBits;
+    }
+
+    long emptyDiffPolls() {
+        return emptyDiffPolls;
+    }
+
+    long packedBytes() {
+        return packedBytes;
+    }
+
+    long mergesUnchanged() {
+        return mergesUnchanged;
+    }
+
+    /**
+     * Walks the pending entries; an entry that shares its delta counts it
+     * again.
+     *
+     * @return the estimated bytes of the pending packed deltas, and the
+     * objects in the pending deltas held as sets.
+     */
+    long[] pendingFootprint() {
+        long packedPending = 0;
+        long setObjects = 0;
+        int mask = ringPointers.length - 1;
+        for (int i = 0; i < size; ++i) {
+            Object pending = ringDeltas[(headSeq + i) & mask];
+            if (pending instanceof long[] packed) {
+                packedPending += longArrayBytes(packed);
+            } else if (pending instanceof PointsToSet set) {
+                setObjects += set.size();
+            }
+        }
+        return new long[]{packedPending, setObjects};
+    }
+
+    /**
+     * @return the estimated bytes of a {@code long[]} on a 64-bit JVM
+     * with compressed oops: a 16-byte header and eight bytes a word.
+     */
+    private static long longArrayBytes(long[] words) {
+        return 16L + 8L * words.length;
     }
 }

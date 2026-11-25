@@ -83,6 +83,28 @@ public final class PointsToSetInterner {
 
     private long probeHits;
 
+    /**
+     * Whether the copies are counted by form (see {@link #formCopiesLine()});
+     * the counts change no result and no order.
+     */
+    private boolean formCounting;
+
+    /**
+     * Copies made by {@link #addAllDiff}, and the objects in the copied
+     * held sets, indexed by {@link #formIndex}.
+     */
+    private final long[] formCopies = new long[FORMS];
+
+    private final long[] formCopyObjects = new long[FORMS];
+
+    /**
+     * The (held form, delta form) pairs, small or large each.
+     */
+    private static final int FORMS = 4;
+
+    private static final String[] FORM_NAMES = {
+            "small_small", "small_large", "large_small", "large_large"};
+
     public PointsToSetInterner(PointsToSetFactory factory) {
         this(factory, INITIAL_CAPACITY);
     }
@@ -156,6 +178,11 @@ public final class PointsToSetInterner {
                     return diff;
                 }
             }
+        }
+        if (formCounting) {
+            int form = formIndex(held, pts);
+            ++formCopies[form];
+            formCopyObjects[form] += held.size();
         }
         PointsToSet next = held.copy();
         PointsToSet diff = next.addAllDiff(pts);
@@ -322,6 +349,38 @@ public final class PointsToSetInterner {
                            long twoHolderWrites, long manyHolderWrites,
                            long copies, long copyHits,
                            long probes, long probeHits) {
+    }
+
+    /**
+     * Starts counting the copies of {@link #addAllDiff} by the forms of
+     * the held set and of the delta.
+     */
+    public void enableFormCounters() {
+        formCounting = true;
+    }
+
+    /**
+     * @return the copies counted by form, as
+     * {@code copies_<held>_<delta>=<copies>/<objects copied>} pairs, or the
+     * empty text if they are not counted.
+     */
+    public String formCopiesLine() {
+        if (!formCounting) {
+            return "";
+        }
+        StringBuilder line = new StringBuilder();
+        for (int i = 0; i < FORMS; ++i) {
+            if (i > 0) {
+                line.append(' ');
+            }
+            line.append("copies_").append(FORM_NAMES[i]).append('=')
+                    .append(formCopies[i]).append('/').append(formCopyObjects[i]);
+        }
+        return line.toString();
+    }
+
+    private static int formIndex(PointsToSet held, PointsToSet pts) {
+        return (asDelegate(held).isLarge() ? 2 : 0) + (asDelegate(pts).isLarge() ? 1 : 0);
     }
 
     private static DelegatePointsToSet asDelegate(PointsToSet set) {
