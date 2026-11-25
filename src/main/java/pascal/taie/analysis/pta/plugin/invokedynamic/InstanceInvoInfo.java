@@ -22,7 +22,6 @@
 
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
-import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.ir.proginfo.MethodRef;
@@ -32,12 +31,15 @@ class InstanceInvoInfo {
 
     private final CSCallSite csCallSite;
 
-    private final InvokeDynamic lambdaIndy;
-
-    private final Context lambdaContext;
+    /**
+     * The invokedynamic that created the lambda objects and the context of
+     * their captured variables; the source of this invocation's call edges.
+     */
+    private final LambdaSource lambdaSource;
 
     /**
-     * The target method reference of the method handle of {@link #lambdaIndy}.
+     * The target method reference of the method handle of the
+     * invokedynamic of {@link #lambdaSource}.
      */
     private final MethodRef targetRef;
 
@@ -54,18 +56,17 @@ class InstanceInvoInfo {
     private final int argsToInstance;
 
     /**
-     * The derived fields are functions of {@code csCallSite} and
-     * {@code lambdaIndy}, so they take no part in equality.
+     * The derived fields are functions of {@code csCallSite} and the
+     * invokedynamic of {@code lambdaSource}, so they take no part in
+     * equality.
      */
     InstanceInvoInfo(CSCallSite csCallSite,
-                     InvokeDynamic lambdaIndy,
-                     Context lambdaContext,
+                     LambdaSource lambdaSource,
                      MethodRef targetRef,
                      int argsToStatic,
                      int argsToInstance) {
         this.csCallSite = csCallSite;
-        this.lambdaIndy = lambdaIndy;
-        this.lambdaContext = lambdaContext;
+        this.lambdaSource = lambdaSource;
         this.targetRef = targetRef;
         this.argsToStatic = argsToStatic;
         this.argsToInstance = argsToInstance;
@@ -88,11 +89,11 @@ class InstanceInvoInfo {
     }
 
     InvokeDynamic getLambdaIndy() {
-        return lambdaIndy;
+        return lambdaSource.getIndy();
     }
 
-    Context getLambdaContext() {
-        return lambdaContext;
+    LambdaSource getLambdaSource() {
+        return lambdaSource;
     }
 
     @Override
@@ -105,12 +106,11 @@ class InstanceInvoInfo {
         }
         InstanceInvoInfo that = (InstanceInvoInfo) o;
         return csCallSite.equals(that.csCallSite) &&
-                lambdaIndy.equals(that.lambdaIndy) &&
-                lambdaContext.equals(that.lambdaContext);
+                lambdaSource.equals(that.lambdaSource);
     }
 
     @Override
     public int hashCode() {
-        return Hashes.hash(csCallSite, lambdaIndy, lambdaContext);
+        return Hashes.hash(csCallSite, lambdaSource.getIndy(), lambdaSource.getContext());
     }
 }

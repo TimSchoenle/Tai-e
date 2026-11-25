@@ -26,7 +26,7 @@ import pascal.taie.analysis.graph.callgraph.OtherEdge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
-import pascal.taie.ir.exp.InvokeDynamic;
+import pascal.taie.analysis.pta.core.cs.element.SourcedEdge;
 import pascal.taie.ir.exp.Var;
 
 import java.util.List;
@@ -34,27 +34,31 @@ import java.util.List;
 /**
  * Represents call edge on lambda functional object.
  * The edge carries the information about invokedynamic invocation site
- * where the lambda functional object was created.
+ * where the lambda functional object was created, as its
+ * {@link LambdaSource}; call sites and callees hold the edge as that source
+ * and rebuild it on read.
  */
-class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod> {
+final class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod>
+        implements SourcedEdge {
 
-    private final InvokeDynamic lambdaIndy;
+    private final LambdaSource source;
 
-    private final Context lambdaContext;
-
-    LambdaCallEdge(CSCallSite csCallSite, CSMethod callee,
-                   InvokeDynamic lambdaIndy, Context lambdaContext) {
+    LambdaCallEdge(CSCallSite csCallSite, CSMethod callee, LambdaSource source) {
         super(csCallSite, callee);
-        this.lambdaIndy = lambdaIndy;
-        this.lambdaContext = lambdaContext;
+        this.source = source;
     }
 
     List<Var> getCapturedArgs() {
-        return lambdaIndy.getArgs();
+        return source.getIndy().getArgs();
     }
 
     Context getLambdaContext() {
-        return lambdaContext;
+        return source.getContext();
+    }
+
+    @Override
+    public LambdaSource getSource() {
+        return source;
     }
 
     /**
@@ -78,15 +82,11 @@ class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod> {
             return false;
         }
         LambdaCallEdge that = (LambdaCallEdge) o;
-        return lambdaIndy.equals(that.lambdaIndy) &&
-                lambdaContext.equals(that.lambdaContext);
+        return source.equals(that.source);
     }
 
     @Override
     public int hashCode() {
-        int result = super.hashCode();
-        result = 31 * result + lambdaIndy.hashCode();
-        result = 31 * result + lambdaContext.hashCode();
-        return result;
+        return source.edgeHashCode(super.hashCode());
     }
 }

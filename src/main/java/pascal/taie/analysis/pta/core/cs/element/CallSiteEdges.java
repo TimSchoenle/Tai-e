@@ -29,6 +29,7 @@ import pascal.taie.util.Hashes;
 import pascal.taie.util.collection.OpenHashSet;
 
 import java.util.AbstractSet;
+import java.util.Arrays;
 import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -42,11 +43,14 @@ import java.util.Objects;
  * codes. So the slots, and the iteration order, equal those of an
  * {@link OpenHashSet} that receives the same {@link #add} calls.
  * <p>
- * A plain edge (see {@link #isPlain}) is held as its callee alone and
- * rebuilt on read as an equal {@link Edge}, with the same hash code; every
- * other edge is held as the object that was added. Membership follows
- * {@link Edge#equals}: a plain edge never equals another edge, and two
- * plain edges are equal exactly when their callees are the same.
+ * A plain edge (see {@link #isPlain}) is held as its callee alone, a
+ * sourced edge (see {@link #sourceOf}) as its callee and, at the same index
+ * of a parallel array, its {@link EdgeSource}; both are rebuilt on read as
+ * an equal edge of the same class, with the same hash code. Every other
+ * edge is held as the object that was added. Membership follows
+ * {@link Edge#equals}: a plain edge never equals another edge, two plain
+ * edges are equal exactly when their callees are the same, and two sourced
+ * edges exactly when their callees are the same and their sources equal.
  */
 final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
 
@@ -61,16 +65,32 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
     private final @Nullable CallKind plainKind;
 
     /**
-     * Each element is a {@link CSMethod} (the callee of a plain edge) or an
+     * Each element is a {@link CSMethod} (the callee of a plain edge, or of
+     * a sourced edge if {@link #sources} holds a source at its index) or an
      * {@link Edge}.
      */
     private Object[] table = EMPTY;
 
+    /**
+     * The sources of the sourced edges. While {@link #table} is empty: the
+     * {@link EdgeSource} of {@link #single}, or null if it is not a sourced
+     * edge. Otherwise an {@code EdgeSource[]} as long as {@link #table},
+     * with the sources at the indices of their callees, or null while no
+     * sourced edge is in {@link #table}. One field for both, so that the set
+     * takes no more space than without sourced edges.
+     */
+    private @Nullable Object sources;
+
+    /**
+     * The only element while {@link #table} is empty and one edge is held.
+     */
     private Object single;
 
+    /**
+     * Number of edges held; as the set is add-only, it also counts the
+     * modifications, for the iterators' fail-fast check.
+     */
     private int size;
-
-    private int modCount;
 
     CallSiteEdges(CSCallSite site, @Nullable CallKind plainKind) {
         this.site = site;
@@ -98,54 +118,93 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         return new Edge<>(plainKind, site, callee);
     }
 
+    /**
+     * @return the source of {@code edge} if it is a sourced edge of this
+     * call site: a {@link SourcedEdge} with a source, from this call site to
+     * a {@link CSMethod}; otherwise null. Such an edge equals
+     * {@code sourceOf(edge).edge(site, edge.getCallee())}.
+     */
+    @Nullable
+    EdgeSource sourceOf(Edge<?, ?> edge) {
+        return edge instanceof SourcedEdge sourced
+                && edge.getCallSite() == site
+                && edge.getCallee() instanceof CSMethod
+                ? sourced.getSource()
+                : null;
+    }
+
     @Override
     public boolean add(Edge<CSCallSite, CSMethod> edge) {
         Objects.requireNonNull(edge, "CallSiteEdges does not permit null");
-        Object e = compact(edge);
+        EdgeSource source = sourceOf(edge);
+        Object e = source != null ? edge.getCallee() : compact(edge);
         if (table == EMPTY) {
-            if (size == 0) {
-                single = e;
-            } else if (matches(single, e)) {
-                return false;
-            } else {
-                table = new Object[] {single, e};
-                single = null;
-            }
-            ++size;
-            ++modCount;
-            return true;
+            return addToSingle(e, source);
         }
         int slot;
         if (isDense()) {
-            if (containsDense(e)) {
+            if (containsDense(e, source)) {
                 return false;
             }
             if (size < OpenHashSet.SMALL_LIMIT) {
                 if (size == table.length) {
-                    Object[] grown = new Object[Math.max(1,
-                            Math.min(OpenHashSet.SMALL_LIMIT, size * 2))];
-                    System.arraycopy(table, 0, grown, 0, size);
-                    table = grown;
+                    int capacity = Math.max(1,
+                            Math.min(OpenHashSet.SMALL_LIMIT, size * 2));
+                    table = Arrays.copyOf(table, capacity);
+                    EdgeSource[] srcs = tableSources();
+                    if (srcs != null) {
+                        sources = Arrays.copyOf(srcs, capacity);
+                    }
                 }
-                table[size++] = e;
-                ++modCount;
-                return true;
+                slot = size;
+            } else {
+                rehash(OpenHashSet.SMALL_LIMIT * 2);
+                slot = findSlot(table, tableSources(), e, source);
             }
-            rehash(OpenHashSet.SMALL_LIMIT * 2);
-            slot = findSlot(table, e);
         } else {
-            slot = findSlot(table, e);
+            slot = findSlot(table, tableSources(), e, source);
             if (table[slot] != null) {
                 return false;
             }
             if ((size + 1) * 3L > table.length * 2L) {
                 rehash(table.length * 2);
-                slot = findSlot(table, e);
+                slot = findSlot(table, tableSources(), e, source);
             }
         }
         table[slot] = e;
+        if (source != null) {
+            EdgeSource[] srcs = tableSources();
+            if (srcs == null) {
+                srcs = new EdgeSource[table.length];
+                sources = srcs;
+            }
+            srcs[slot] = source;
+        }
         ++size;
-        ++modCount;
+        return true;
+    }
+
+    /**
+     * {@link #add} while {@link #table} is empty, so at most one edge is
+     * held, in {@link #single} with its source in {@link #sources}.
+     */
+    private boolean addToSingle(Object e, @Nullable EdgeSource source) {
+        if (size == 0) {
+            single = e;
+            sources = source;
+            size = 1;
+            return true;
+        }
+        EdgeSource singleSource = (EdgeSource) sources;
+        if (matches(single, singleSource, e, source)) {
+            return false;
+        }
+        table = new Object[] {single, e};
+        single = null;
+        sources = singleSource == null && source == null
+                ? null
+                : new EdgeSource[] {singleSource, source};
+        size = 2;
         return true;
     }
 
@@ -154,14 +213,15 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         if (!(o instanceof Edge<?, ?> edge) || size == 0) {
             return false;
         }
-        Object e = compact(edge);
+        EdgeSource source = sourceOf(edge);
+        Object e = source != null ? edge.getCallee() : compact(edge);
         if (table == EMPTY) {
-            return matches(single, e);
+            return matches(single, (EdgeSource) sources, e, source);
         }
         if (isDense()) {
-            return containsDense(e);
+            return containsDense(e, source);
         }
-        return table[findSlot(table, e)] != null;
+        return table[findSlot(table, tableSources(), e, source)] != null;
     }
 
     @Override
@@ -173,11 +233,16 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
     public Iterator<Edge<CSCallSite, CSMethod>> iterator() {
         return new Iterator<>() {
 
-            private final int expectedModCount = modCount;
+            private final int expectedSize = size;
 
             private final Object[] tab = table;
 
+            private final EdgeSource @Nullable [] srcs = tableSources();
+
             private Object pendingSingle = tab == EMPTY ? single : null;
+
+            private final @Nullable EdgeSource singleSource =
+                    tab == EMPTY ? (EdgeSource) sources : null;
 
             private int index = advance(0);
 
@@ -196,53 +261,82 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
 
             @Override
             public Edge<CSCallSite, CSMethod> next() {
-                if (modCount != expectedModCount) {
+                if (size != expectedSize) {
                     throw new ConcurrentModificationException();
                 }
                 if (pendingSingle != null) {
                     Object e = pendingSingle;
                     pendingSingle = null;
-                    return expand(e);
+                    return expand(e, singleSource);
                 }
                 if (index >= tab.length) {
                     throw new NoSuchElementException();
                 }
-                Object e = tab[index];
-                index = advance(index + 1);
-                return expand(e);
+                int i = index;
+                index = advance(i + 1);
+                return expand(tab[i], srcs == null ? null : srcs[i]);
             }
         };
     }
 
     /**
-     * @return the element that holds {@code edge}: its callee if it is
-     * plain, otherwise the edge itself.
+     * @return the parallel array of the sources of the edges in
+     * {@link #table}, or null if none of them is a sourced edge or the
+     * table is empty.
+     */
+    private EdgeSource @Nullable [] tableSources() {
+        return table == EMPTY ? null : (EdgeSource[]) sources;
+    }
+
+    /**
+     * @return the element that holds {@code edge}, not a sourced one: its
+     * callee if it is plain, otherwise the edge itself.
      */
     private Object compact(Edge<?, ?> edge) {
         return isPlain(edge) ? edge.getCallee() : edge;
     }
 
+    /**
+     * @return the edge that the element {@code e} with the source
+     * {@code source} (null if none) holds.
+     */
     @SuppressWarnings("unchecked")
-    private Edge<CSCallSite, CSMethod> expand(Object e) {
+    private Edge<CSCallSite, CSMethod> expand(Object e, @Nullable EdgeSource source) {
+        if (source != null) {
+            return source.edge(site, (CSMethod) e);
+        }
         return e instanceof CSMethod callee
                 ? plainEdge(callee)
                 : (Edge<CSCallSite, CSMethod>) e;
     }
 
     /**
-     * @return the hash code of the edge that {@code e} holds.
+     * @return the hash code of the edge that the element {@code e} with the
+     * source {@code source} (null if none) holds.
      */
-    private int hash(Object e) {
+    private int hash(Object e, @Nullable EdgeSource source) {
+        if (source != null) {
+            return source.edgeHashCode(site, (CSMethod) e);
+        }
         return e instanceof CSMethod callee
                 ? Hashes.hash(plainKind, site, callee)
                 : e.hashCode();
     }
 
     /**
-     * @return whether the edge held by {@code stored} equals the one held by
-     * {@code e}, as {@code stored.equals(e)} of the edges themselves.
+     * @return whether the edge held by {@code stored} with the source
+     * {@code storedSource} equals the one held by {@code e} with the source
+     * {@code source}, as {@code stored.equals(e)} of the edges themselves.
      */
-    private static boolean matches(Object stored, Object e) {
+    private static boolean matches(Object stored, @Nullable EdgeSource storedSource,
+                                   Object e, @Nullable EdgeSource source) {
+        if (source != null) {
+            return storedSource != null && stored == e
+                    && (storedSource == source || storedSource.equals(source));
+        }
+        if (storedSource != null) {
+            return false;
+        }
         if (e instanceof CSMethod) {
             return stored == e;
         }
@@ -253,9 +347,10 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         return table.length <= OpenHashSet.SMALL_LIMIT;
     }
 
-    private boolean containsDense(Object e) {
+    private boolean containsDense(Object e, @Nullable EdgeSource source) {
+        EdgeSource[] srcs = tableSources();
         for (int i = 0; i < size; ++i) {
-            if (matches(table[i], e)) {
+            if (matches(table[i], srcs == null ? null : srcs[i], e, source)) {
                 return true;
             }
         }
@@ -264,21 +359,32 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
 
     private void rehash(int capacity) {
         Object[] old = table;
+        EdgeSource[] oldSources = tableSources();
         Object[] fresh = new Object[capacity];
-        for (Object e : old) {
+        EdgeSource[] freshSources = oldSources == null ? null : new EdgeSource[capacity];
+        for (int i = 0; i < old.length; ++i) {
+            Object e = old[i];
             if (e != null) {
-                fresh[findSlot(fresh, e)] = e;
+                EdgeSource source = oldSources == null ? null : oldSources[i];
+                int slot = findSlot(fresh, freshSources, e, source);
+                fresh[slot] = e;
+                if (freshSources != null) {
+                    freshSources[slot] = source;
+                }
             }
         }
         table = fresh;
+        sources = freshSources;
     }
 
-    private int findSlot(Object[] tab, Object e) {
-        int h = hash(e);
+    private int findSlot(Object[] tab, EdgeSource @Nullable [] srcs,
+                         Object e, @Nullable EdgeSource source) {
+        int h = hash(e, source);
         int mask = tab.length - 1;
         int i = (h ^ (h >>> 16)) & mask;
         Object cur;
-        while ((cur = tab[i]) != null && !matches(cur, e)) {
+        while ((cur = tab[i]) != null
+                && !matches(cur, srcs == null ? null : srcs[i], e, source)) {
             i = (i + 1) & mask;
         }
         return i;
