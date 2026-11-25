@@ -127,7 +127,7 @@ public class LambdaAnalysis implements Plugin {
      * instance invocation sites. When new objects reach the receiver variable,
      * this information will be used to build lambda call edges.
      */
-    private final MultiMap<CSVar, InstanceInvoInfo> invoInfos = Maps.newMultiMap();
+    private final Map<CSVar, InstanceInvoInfos> invoInfos = Maps.newMap();
 
     /**
      * Map from each receiver variable of {@link #invoInfos} to its points-to
@@ -361,14 +361,12 @@ public class LambdaAnalysis implements Plugin {
                 if (verifier != null) {
                     verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
                 }
-                InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, source,
-                        targetRef, argsToStatic(csCallSite, indy),
-                        argsToInstance(csCallSite, indy));
-                addLambdaCallEdges(info, recvObjs, groupKnownByCallee(
+                addLambdaCallEdges(csCallSite, source, recvObjs, groupKnownByCallee(
                         csCallSite, targetRef, recvObjsByType, targets));
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
-                invoInfos.put(csRecvVar, info);
+                invoInfos.computeIfAbsent(csRecvVar, v -> new InstanceInvoInfos())
+                        .add(csCallSite, source);
             }
             case REF_invokeStatic -> // targetRef is static method
                     addLambdaCallEdge(csCallSite, null, targetRef, source);
@@ -702,31 +700,31 @@ public class LambdaAnalysis implements Plugin {
 
     /**
      * Adds the facts of {@code receiversByCallee} (a {@link CalleeGrouper}
-     * grouping for the call site and target of {@code info})
-     * for {@code info}: per callee, in the map's order, the points-to update
+     * grouping for the call site and target of the instance invocation at
+     * {@code csCallSite} on the lambda objects of {@code source})
+     * for that invocation: per callee, in the map's order, the points-to update
      * of the callee's this variable and, if the arguments fit, the call edge.
      * The map and its sets are only read, so one grouping may serve several
      * invocations whose grouping it equals.
      */
     private void addLambdaCallEdges(
-            InstanceInvoInfo info, PointsToSet recvObjs,
+            CSCallSite csCallSite, LambdaSource source, PointsToSet recvObjs,
             Map<CSMethod, PointsToSet> receiversByCallee) {
-        CSCallSite csCallSite = info.getCSCallSite();
-        MethodRef targetRef = info.getTargetRef();
-        InvokeDynamic indy = info.getLambdaIndy();
+        InvokeDynamic indy = source.getIndy();
         if (verifier != null) {
-            verifier.checkGrouping(csCallSite, recvObjs, targetRef, indy,
+            verifier.checkGrouping(csCallSite, recvObjs, targetRefOf(source), indy,
                     receiversByCallee);
         }
+        int argsToStatic = argsToStatic(csCallSite, indy);
+        int argsToInstance = argsToInstance(csCallSite, indy);
         receiversByCallee.forEach((csCallee, receivers) -> {
             JMethod callee = csCallee.getMethod();
             // pass receiver objects to 'this' variable of callee
             solver.addVarPointsTo(csCallee.getContext(),
                     callee.getIR().getThis(), receivers);
-            if (fitsParameterCount(callee, info.getArgsToStatic(),
-                    info.getArgsToInstance())) {
+            if (fitsParameterCount(callee, argsToStatic, argsToInstance)) {
                 solver.addCallEdge(new LambdaCallEdge(
-                        csCallSite, csCallee, info.getLambdaSource()));
+                        csCallSite, csCallee, source));
             }
         });
     }
@@ -1026,8 +1024,8 @@ public class LambdaAnalysis implements Plugin {
 
     @Override
     public void onNewPointsToSet(CSVar csVar, PointsToSet pts) {
-        Set<InstanceInvoInfo> infos = invoInfos.get(csVar);
-        if (infos.isEmpty()) {
+        InstanceInvoInfos infos = invoInfos.get(csVar);
+        if (infos == null) {
             return;
         }
         // grouped once per new points-to set, shared by every lambda
@@ -1047,8 +1045,9 @@ public class LambdaAnalysis implements Plugin {
         if (callSiteFreeContexts && infos.size() > 1) {
             addSharedLambdaCallEdges(infos, pts, ptsByType, targets);
         } else {
-            infos.forEach(info -> addLambdaCallEdges(info, pts, groupDeltaByCallee(
-                    info.getCSCallSite(), targetOf(targets, info), ptsByType)));
+            infos.forEach((csCallSite, source) -> addLambdaCallEdges(
+                    csCallSite, source, pts, groupDeltaByCallee(
+                            csCallSite, targetOf(targets, targetRefOf(source)), ptsByType)));
         }
         // the delta slots belong to one event at a time: a nested event
         // would have replaced them before the groupings above read them
@@ -1059,12 +1058,22 @@ public class LambdaAnalysis implements Plugin {
     }
 
     /**
-     * @return the target of {@code info} among {@code targets}, the targets
-     * of its receiver variable, which got it with the invocation.
+     * @return the target method reference of the instance invocations on
+     * the lambda objects of {@code source}: that of the method handle of
+     * its invokedynamic.
+     */
+    private static MethodRef targetRefOf(LambdaSource source) {
+        return getMethodHandle(source.getIndy()).getMethodRef();
+    }
+
+    /**
+     * @return the target of {@code targetRef} among {@code targets}, the
+     * targets of a receiver variable, which got it with the first invocation
+     * of {@code targetRef} on the variable.
      */
     private static ReceiverTargets.Target targetOf(
-            ReceiverTargets targets, InstanceInvoInfo info) {
-        return Objects.requireNonNull(targets.get(info.getTargetRef()),
+            ReceiverTargets targets, MethodRef targetRef) {
+        return Objects.requireNonNull(targets.get(targetRef),
                 "no target for a lambda invocation");
     }
 
@@ -1081,15 +1090,15 @@ public class LambdaAnalysis implements Plugin {
      * its context-sensitive callees were created by the first grouping.
      */
     private void addSharedLambdaCallEdges(
-            Set<InstanceInvoInfo> infos, PointsToSet pts,
+            InstanceInvoInfos infos, PointsToSet pts,
             ReceiverGroups<Type, CSObj> ptsByType, ReceiverTargets targets) {
         Map<MethodRef, Map<CSMethod, PointsToSet>> groupingByTarget = new HashMap<>();
-        for (InstanceInvoInfo info : infos) {
+        infos.forEach((csCallSite, source) -> {
             Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
-                    info.getTargetRef(),
-                    targetRef -> groupDeltaByCallee(info.getCSCallSite(),
-                            targetOf(targets, info), ptsByType));
-            addLambdaCallEdges(info, pts, receiversByCallee);
-        }
+                    targetRefOf(source),
+                    targetRef -> groupDeltaByCallee(csCallSite,
+                            targetOf(targets, targetRef), ptsByType));
+            addLambdaCallEdges(csCallSite, source, pts, receiversByCallee);
+        });
     }
 }
