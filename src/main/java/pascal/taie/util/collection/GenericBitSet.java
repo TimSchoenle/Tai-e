@@ -282,6 +282,24 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
         return 16L + 8L * words;
     }
 
+    /**
+     * Adds the storage shape of the bits of this set to {@code shape}: see
+     * {@link SparseBitSet#addShape(long[])}; a bit set that is not sparse
+     * adds its words up to {@link IBitSet#length()} as non-zero words, and
+     * its set bits.
+     *
+     * @return whether the bits are a {@link SparseBitSet}
+     */
+    public boolean addShape(long[] shape) {
+        if (bitSet instanceof SparseBitSet sparse) {
+            sparse.addShape(shape);
+            return true;
+        }
+        shape[SparseBitSet.SHAPE_WORDS] += (bitSet.length() + (long) Long.SIZE - 1) / Long.SIZE;
+        shape[SparseBitSet.SHAPE_BITS] += bitSet.cardinality();
+        return false;
+    }
+
     @Override
     public SetEx<E> copy() {
         GenericBitSet<E> copy = newSet();

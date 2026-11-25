@@ -1562,6 +1562,85 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * Index into the array of {@link #addShape(long[])}: the allocated
+     * level3 blocks of an unpacked set (all-zero ones included), or the
+     * block headers of a packed set.
+     */
+    public static final int SHAPE_BLOCKS = 0;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the non-zero words.
+     */
+    public static final int SHAPE_WORDS = 1;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the allocated
+     * level2 areas of an unpacked set.
+     */
+    public static final int SHAPE_AREAS = 2;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the length of the
+     * level1 table of an unpacked set.
+     */
+    public static final int SHAPE_TABLE = 3;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the length of the
+     * packed words of a packed set.
+     */
+    public static final int SHAPE_PACKED_WORDS = 4;
+
+    /**
+     * Length of the array of {@link #addShape(long[])}.
+     */
+    public static final int SHAPE_LENGTH = 6;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the set bits.
+     */
+    public static final int SHAPE_BITS = 5;
+
+    /**
+     * Adds the storage shape of this set, in the form it is stored in, to
+     * {@code shape} (indexed by the {@code SHAPE_} constants). A
+     * measurement: it reads the arrays only (unlike {@link #size()}, it
+     * does not refresh the state, which drops all-zero blocks) and
+     * allocates nothing.
+     *
+     * @param shape an array of at least {@link #SHAPE_LENGTH} elements
+     */
+    public void addShape(long[] shape) {
+        long[] packedWords = packed;
+        if (packedWords != null) {
+            shape[SHAPE_BLOCKS] += packedBlocks;
+            shape[SHAPE_WORDS] += packedWords.length - packedBlocks;
+            shape[SHAPE_PACKED_WORDS] += packedWords.length;
+            for (int w = packedBlocks; w < packedWords.length; ++w) {
+                shape[SHAPE_BITS] += Long.bitCount(packedWords[w]);
+            }
+            return;
+        }
+        shape[SHAPE_TABLE] += table.length;
+        for (long[][] area : table) {
+            if (area != null) {
+                ++shape[SHAPE_AREAS];
+                for (long[] block : area) {
+                    if (block != null) {
+                        ++shape[SHAPE_BLOCKS];
+                        for (long word : block) {
+                            if (word != 0) {
+                                ++shape[SHAPE_WORDS];
+                                shape[SHAPE_BITS] += Long.bitCount(word);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Restores the blocks of a packed set; the state stays as it is, as the
      * contents do not change.
      */
