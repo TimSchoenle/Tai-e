@@ -31,30 +31,49 @@ import java.util.Arrays;
  * <p>
  * Layout: {@code null} is the empty set. Otherwise slot 0 holds the size and
  * every other slot holds {@code element + 1}, where 0 marks a free slot.
+ * Every element-slot count is odd, so every array has an even length and,
+ * with the 16-byte array header of the JVMs in use (no compact object
+ * headers), 4-byte slots and 8-byte alignment, no alignment padding.
  * An array with at most {@link #LINEAR_CAPACITY} element slots keeps its
  * elements in slots {@code 1..size} and is searched linearly (capacities
- * 2, 4, 8). A larger array is an open-addressing hash table: its element-slot
- * count is a power of two, an element's home slot comes from a multiplicative
- * (Fibonacci) hash, collisions probe linearly, and the table doubles before an
- * insertion would raise its load above 3/4, so a table is between 3/8 and 3/4
- * full once it exists. Elements are never removed.
+ * 1, 3, 5, 7, 9). A larger array is an open-addressing hash table of any odd
+ * element-slot count: an element's home slot comes from a multiplicative
+ * (Fibonacci) hash scaled to the slot count, collisions probe linearly with
+ * wrap-around, and the table grows by about a quarter before an insertion
+ * would raise its load above 85 %, so a table is about 68 % to 85 % full once
+ * it exists. Elements are never removed.
  */
 public final class IntArraySets {
 
     /**
      * Largest element-slot count that is searched linearly.
      */
-    private static final int LINEAR_CAPACITY = 8;
+    private static final int LINEAR_CAPACITY = 9;
 
-    private static final int FIRST_CAPACITY = 2;
+    /**
+     * Element slots a full linear array gains when it grows; even, so its
+     * capacity stays odd.
+     */
+    private static final int LINEAR_STEP = 2;
 
     /**
      * The table grows when {@code (size + 1) * MAX_LOAD_DENOMINATOR}
      * exceeds {@code capacity * MAX_LOAD_NUMERATOR}.
      */
-    private static final int MAX_LOAD_NUMERATOR = 3;
+    private static final int MAX_LOAD_NUMERATOR = 17;
 
-    private static final int MAX_LOAD_DENOMINATOR = 4;
+    private static final int MAX_LOAD_DENOMINATOR = 20;
+
+    /**
+     * A growing table gains at least {@code capacity / GROWTH_DIVISOR}
+     * element slots.
+     */
+    private static final int GROWTH_DIVISOR = 4;
+
+    /**
+     * Largest array length the JVMs in use allocate.
+     */
+    private static final int MAX_ARRAY_LENGTH = Integer.MAX_VALUE - 8;
 
     /**
      * 2^32 divided by the golden ratio, the multiplier of Fibonacci hashing.
@@ -73,11 +92,13 @@ public final class IntArraySets {
      * the set with the element, which is {@code set} itself or a new array
      * that replaces it
      * @throws IllegalArgumentException if the element is out of range
+     * @throws IllegalStateException    if the set would outgrow the array
+     *                                  length limit
      */
     public static int[] add(int[] set, int element) {
         int key = keyOf(element);
         if (set == null) {
-            int[] created = new int[1 + FIRST_CAPACITY];
+            int[] created = new int[2];
             created[0] = 1;
             created[1] = key;
             return created;
@@ -96,19 +117,19 @@ public final class IntArraySets {
                 return set;
             }
             if (capacity < LINEAR_CAPACITY) {
-                int[] grown = Arrays.copyOf(set, 1 + 2 * capacity);
+                int[] grown = Arrays.copyOf(set, 1 + capacity + LINEAR_STEP);
                 grown[size + 1] = key;
                 grown[0] = size + 1;
                 return grown;
             }
-            return insertAbsent(rehash(set, 2 * LINEAR_CAPACITY), key);
+            return insertAbsent(rehash(set, grownCapacity(capacity, size + 1)), key);
         }
         int slot = probe(set, key);
         if (set[slot] == key) {
             return null;
         }
         if ((size + 1L) * MAX_LOAD_DENOMINATOR > (long) capacity * MAX_LOAD_NUMERATOR) {
-            return insertAbsent(rehash(set, 2 * capacity), key);
+            return insertAbsent(rehash(set, grownCapacity(capacity, size + 1)), key);
         }
         set[slot] = key;
         set[0] = size + 1;
@@ -158,16 +179,37 @@ public final class IntArraySets {
      * {@code key}, or of the free slot where {@code key} belongs
      */
     private static int probe(int[] table, int key) {
-        int mask = table.length - 2;
-        int shift = Integer.numberOfLeadingZeros(table.length - 1) + 1;
-        int i = ((key - 1) * HASH_MULTIPLIER) >>> shift;
+        int capacity = table.length - 1;
+        // the high bits of the 32-bit hash, scaled to [0, capacity)
+        int i = (int) (((key * HASH_MULTIPLIER) & 0xFFFF_FFFFL) * capacity >>> 32);
         while (true) {
             int value = table[1 + i];
             if (value == 0 || value == key) {
                 return 1 + i;
             }
-            i = (i + 1) & mask;
+            if (++i == capacity) {
+                i = 0;
+            }
         }
+    }
+
+    /**
+     * @return the odd element-slot count of the table that replaces a full
+     * array of {@code capacity} element slots: at least a quarter larger,
+     * and large enough to hold {@code size} elements within the load limit
+     * @throws IllegalStateException if that table exceeds the array length
+     *                               limit
+     */
+    private static int grownCapacity(int capacity, int size) {
+        long grown = capacity + (long) (capacity / GROWTH_DIVISOR);
+        long needed = (size * (long) MAX_LOAD_DENOMINATOR + MAX_LOAD_NUMERATOR - 1)
+                / MAX_LOAD_NUMERATOR;
+        long odd = Math.max(grown, needed) | 1L;
+        if (1 + odd > MAX_ARRAY_LENGTH) {
+            throw new IllegalStateException(
+                    "set of " + size + " elements exceeds the array length limit");
+        }
+        return (int) odd;
     }
 
     /**
