@@ -54,7 +54,7 @@ public class MapBasedCSManager implements CSManager {
 
     private final CSObjManager objManager = new CSObjManager();
 
-    private final TwoKeyMap<Invoke, Context, CSCallSite> callSites = Maps.newTwoKeyMap();
+    private final ContextElementMap<Invoke, CSCallSite> callSites = new ContextElementMap<>();
 
     private final TwoKeyMap<JMethod, Context, CSMethod> methods = Maps.newTwoKeyMap();
 
@@ -183,10 +183,13 @@ public class MapBasedCSManager implements CSManager {
 
     @Override
     public CSCallSite getCSCallSite(Context context, Invoke callSite) {
-        return callSites.computeIfAbsent(callSite, context, (cs, ctx) -> {
-            CSMethod container = getCSMethod(ctx, cs.getContainer());
-            return new CSCallSite(cs, ctx, container);
-        });
+        CSCallSite csCallSite = callSites.get(callSite, context);
+        if (csCallSite == null) {
+            CSMethod container = getCSMethod(context, callSite.getContainer());
+            csCallSite = new CSCallSite(callSite, context, container);
+            callSites.add(callSite, csCallSite);
+        }
+        return csCallSite;
     }
 
     @Override
@@ -196,7 +199,7 @@ public class MapBasedCSManager implements CSManager {
 
     private static class PointerManager {
 
-        private final TwoKeyMap<Var, Context, CSVar> vars = Maps.newTwoKeyMap();
+        private final ContextElementMap<Var, CSVar> vars = new ContextElementMap<>();
 
         private final Map<JField, StaticField> staticFields = Maps.newMap();
 
@@ -217,8 +220,12 @@ public class MapBasedCSManager implements CSManager {
         private int counter = 0;
 
         private CSVar getCSVar(Context context, Var var) {
-            return vars.computeIfAbsent(var, context,
-                    (v, c) -> new CSVar(v, c, counter++));
+            CSVar csVar = vars.get(var, context);
+            if (csVar == null) {
+                csVar = new CSVar(var, context, counter++);
+                vars.add(var, csVar);
+            }
+            return csVar;
         }
 
         private StaticField getStaticField(JField field) {
@@ -252,8 +259,7 @@ public class MapBasedCSManager implements CSManager {
         }
 
         private Collection<CSVar> getCSVarsOf(Var var) {
-            var csVars = vars.get(var);
-            return csVars != null ? csVars.values() : Set.of();
+            return vars.valuesOf(var);
         }
 
         private Collection<StaticField> getStaticFields() {
