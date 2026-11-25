@@ -109,6 +109,17 @@ class IntArraySetsTest {
         assertTrue(IntArraySets.contains(set, 0));
         assertFalse(IntArraySets.contains(set, 1));
         assertNull(IntArraySets.add(set, 0));
+        // the same extremes in a hash table
+        int[] table = null;
+        for (int element = 1; element <= 20; element++) {
+            table = IntArraySets.add(table, element);
+        }
+        table = IntArraySets.add(IntArraySets.add(table, largest), 0);
+        assertEquals(22, IntArraySets.size(table));
+        assertTrue(IntArraySets.contains(table, largest));
+        assertTrue(IntArraySets.contains(table, 0));
+        assertNull(IntArraySets.add(table, largest));
+        assertNull(IntArraySets.add(table, 0));
         assertThrows(IllegalArgumentException.class,
                 () -> IntArraySets.add(null, -1));
         assertThrows(IllegalArgumentException.class,
@@ -125,12 +136,60 @@ class IntArraySetsTest {
 
     @Test
     void addWithRoomReturnsTheSameArray() {
-        int[] set = IntArraySets.add(null, 1);
-        assertSame(set, IntArraySets.add(set, 2));
-        for (int element = 3; element <= 10; element++) {
+        int[] set = IntArraySets.add(IntArraySets.add(null, 1), 2);
+        // two elements: a linear array of 3 slots with room left
+        assertSame(set, IntArraySets.add(set, 3));
+        for (int element = 4; element <= 10; element++) {
             set = IntArraySets.add(set, element);
         }
-        // ten elements: a hash table of 16 slots with room left
+        // ten elements: a hash table of 13 slots with room left
         assertSame(set, IntArraySets.add(set, 11));
+    }
+
+    /**
+     * An int array of even length has no alignment padding (16-byte header,
+     * 4-byte elements, 8-byte alignment), so every slot paid for is usable.
+     */
+    @Test
+    void everyArrayHasEvenLength() {
+        Random random = new Random(20261125L);
+        int[] set = null;
+        for (int op = 0; op < 20_000; op++) {
+            int[] after = IntArraySets.add(set, random.nextInt(Integer.MAX_VALUE));
+            if (after != null) {
+                set = after;
+                assertEquals(0, set.length % 2,
+                        "odd length " + set.length + " at size " + set[0]);
+            }
+        }
+    }
+
+    /**
+     * A hash table holds at most 85 % of its slots and grows by about a
+     * quarter, so it stays at least 60 % full once it exists.
+     */
+    @Test
+    void hashTableStaysDense() {
+        int[] set = null;
+        int growths = 0;
+        for (int element = 0; element < 100_000; element++) {
+            int[] after = IntArraySets.add(set, element * 7919);
+            int capacity = after.length - 1;
+            int size = after[0];
+            if (capacity > 9) {
+                assertTrue(size * 100L <= capacity * 85L,
+                        size + " elements in " + capacity + " slots");
+                assertTrue(size * 100L >= capacity * 60L,
+                        size + " elements in " + capacity + " slots");
+                if (after != set && set.length - 1 > 9) {
+                    ++growths;
+                    // a quarter more, plus rounding up to an odd count
+                    assertTrue(capacity * 4L <= (set.length - 1) * 5L + 8,
+                            "grew from " + (set.length - 1) + " to " + capacity);
+                }
+            }
+            set = after;
+        }
+        assertTrue(growths > 10, "only " + growths + " table growths");
     }
 }

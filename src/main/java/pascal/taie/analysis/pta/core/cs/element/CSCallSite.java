@@ -24,6 +24,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 
 import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.CallGraphs;
+import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.ir.stmt.Invoke;
@@ -76,6 +77,16 @@ public class CSCallSite extends AbstractCSElement {
 
     public boolean addEdge(Edge<CSCallSite, CSMethod> edge) {
         return edges.add(edge);
+    }
+
+    /**
+     * @return whether this call site already has the edge
+     * {@code new Edge<>(kind, this, callee)}, checked without allocating
+     * it. Answers false (unknown) unless {@code kind} is this call site's
+     * own kind, {@link CallGraphs#findCallKind(Invoke)}.
+     */
+    public boolean hasPlainEdge(CallKind kind, CSMethod callee) {
+        return edges.containsPlain(kind, callee);
     }
 
     /**

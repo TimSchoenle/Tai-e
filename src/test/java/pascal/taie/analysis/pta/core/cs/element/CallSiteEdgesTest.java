@@ -84,6 +84,46 @@ public class CallSiteEdgesTest {
         assertFalse(site.addEdge(new Edge<>(CallKind.STATIC, site, callee)));
     }
 
+    /**
+     * The allocation-free lookup agrees with {@code contains} of a new plain
+     * edge while the set is a single element, dense and a hash table.
+     */
+    @Test
+    void hasPlainEdgeAgreesWithContainsInEveryLayout() {
+        CSCallSite site = staticSite();
+        List<CSMethod> callees = new ArrayList<>();
+        for (int i = 0; i < 4 * OpenHashSet.SMALL_LIMIT; i++) {
+            callees.add(new CSMethod(null, context));
+        }
+        for (int added = 0; added < callees.size(); added++) {
+            for (int i = 0; i < callees.size(); i++) {
+                CSMethod callee = callees.get(i);
+                boolean expected = site.getEdges().contains(
+                        new Edge<>(CallKind.STATIC, site, callee));
+                assertEquals(i < added, expected);
+                assertEquals(expected, site.hasPlainEdge(CallKind.STATIC, callee));
+            }
+            site.addEdge(new Edge<>(CallKind.STATIC, site, callees.get(added)));
+        }
+        assertTrue(site.hasPlainEdge(CallKind.STATIC, callees.get(0)));
+        // another kind is not this site's plain kind: unknown, so false
+        assertFalse(site.hasPlainEdge(CallKind.VIRTUAL, callees.get(0)));
+    }
+
+    @Test
+    void hasPlainEdgeIgnoresEdgesThatAreNotPlain() {
+        CSCallSite site = staticSite();
+        CSMethod callee = new CSMethod(null, context);
+        site.addEdge(new Edge<>(CallKind.OTHER, site, callee));
+        site.addEdge(new TestOtherEdge(site, callee));
+        site.addEdge(new Edge<>(CallKind.STATIC, staticSite(), callee));
+        assertFalse(site.hasPlainEdge(CallKind.STATIC, callee));
+        assertFalse(site.hasPlainEdge(CallKind.OTHER, callee));
+        CSCallSite unknownKind = new CSCallSite(null, context, caller);
+        unknownKind.addEdge(new Edge<>(CallKind.STATIC, unknownKind, callee));
+        assertFalse(unknownKind.hasPlainEdge(CallKind.STATIC, callee));
+    }
+
     @Test
     void otherEdgesAreHeldAsAdded() {
         CSCallSite site = staticSite();
