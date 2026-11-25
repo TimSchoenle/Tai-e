@@ -63,9 +63,12 @@ import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 import static pascal.taie.analysis.graph.flowgraph.FlowKind.INSTANCE_STORE;
 import static pascal.taie.analysis.graph.flowgraph.FlowKind.PARAMETER_PASSING;
@@ -131,9 +134,23 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
      */
     private final MultiMap<Invoke, Object> allTargets = Maps.newMultiMap();
 
+    private final SupertypeClosure supertypes;
+
+    /**
+     * The state of each {@code Method.invoke} call site in each context.
+     */
+    private final Map<CSCallSite, InstanceSite<JMethod>> invokeSites = Maps.newMap();
+
+    /**
+     * The state of each {@code Field.get} and {@code Field.set} call site in
+     * each context.
+     */
+    private final Map<CSCallSite, InstanceSite<JField>> fieldSites = Maps.newMap();
+
     ReflectiveActionModel(Solver solver, MetaObjHelper helper,
                           TypeMatcher typeMatcher, Set<Invoke> invokesWithLog) {
         super(solver);
+        supertypes = new SupertypeClosure(hierarchy);
         initNoArg = Subsignature.getNoArgInit();
         this.helper = helper;
         this.typeMatcher = typeMatcher;
@@ -189,33 +206,42 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         return csNewObj;
     }
 
+    /**
+     * {@code Method.invoke} pairs every Method object with every receiver,
+     * and is called again whenever either set grows. Each instance target
+     * meets each receiver of a subtype of its declaring class once, when
+     * the later of the two arrives (see {@link MemberReceiverIndex}); a
+     * receiver of another type makes the JVM throw, and
+     * {@code ClassHierarchy.dispatch} answers {@code null} for it.
+     */
     @InvokeHandler(signature = "<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>", argIndexes = {BASE, 0})
     public void methodInvoke(Context context, Invoke invoke,
                              PointsToSet mtdObjs, PointsToSet recvObjs) {
         Var argsVar = invoke.getInvokeExp().getArg(1);
-        ReceiverDispatch<CSObj> receivers = new ReceiverDispatch<>(
-                hierarchy, recvObjs, recvObjs.size(), recvObj -> recvObj.getObject().getType());
-        mtdObjs.forEach(mtdObj -> {
+        InstanceSite<JMethod> site = site(invokeSites, context, invoke, JMethod::getDeclaringClass);
+        MemberReceiverIndex.PairAction<JMethod, CSObj> call = (target, type, receivers) ->
+                addDispatchedCallEdges(context, invoke, target, type, receivers, argsVar);
+        site.index().addReceivers(
+                site.receivers().unseen(recvObjs, argPointsTo(context, invoke, 0)), call);
+        for (CSObj mtdObj : site.members().unseen(mtdObjs, argPointsTo(context, invoke, BASE))) {
             if (isInvalidTarget(invoke, mtdObj)) {
-                return;
+                continue;
             }
             JMethod target = CSObjs.toMethod(mtdObj);
             if (target != null && !typeMatcher.isUnmatched(invoke, target)) {
                 if (target.isStatic()) {
                     addReflectiveCallEdge(context, invoke, null, target, argsVar);
-                } else if (target.isConstructor()) {
-                    recvObjs.forEach(recvObj ->
-                            addReflectiveCallEdge(context, invoke, recvObj, target, argsVar));
-                } else if (!recvObjs.isEmpty()) {
-                    receivers.startTarget(target);
-                    for (int i = 0, n = receivers.size(); i < n; ++i) {
-                        addDispatchedCallEdge(context, invoke, target, receivers, i, argsVar);
-                    }
+                } else {
+                    site.index().addMember(target, call);
                 }
             }
-        });
+        }
     }
 
+    /**
+     * {@code Field.get}: pairs fields and base objects like
+     * {@link #methodInvoke}.
+     */
     @InvokeHandler(signature = "<java.lang.reflect.Field: java.lang.Object get(java.lang.Object)>", argIndexes = {BASE, 0})
     public void fieldGet(Context context, Invoke invoke,
                          PointsToSet fldObjs, PointsToSet baseObjs) {
@@ -224,62 +250,103 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             return;
         }
         CSVar to = csManager.getCSVar(context, result);
-        fldObjs.forEach(fldObj -> {
-            if (isInvalidTarget(invoke, fldObj)) {
-                return;
-            }
-            JField field = CSObjs.toField(fldObj);
-            if (field != null) {
-                if (field.isStatic()) {
-                    initializeDeclaringClass(field);
+        accessFields(context, invoke, fldObjs, baseObjs,
+                field -> {
                     StaticField sField = csManager.getStaticField(field);
                     solver.addPFGEdge(sField, to, FlowKind.STATIC_LOAD);
-                } else {
-                    Type declType = field.getDeclaringClass().getType();
-                    baseObjs.forEach(baseObj -> {
-                        Type objType = baseObj.getObject().getType();
-                        if (typeSystem.isSubtype(declType, objType)) {
-                            InstanceField ifield = csManager.getInstanceField(baseObj, field);
-                            solver.addPFGEdge(ifield, to, FlowKind.INSTANCE_LOAD);
-                            allTargets.put(invoke, field); // record target
-                        }
-                    });
-                }
-            }
-        });
+                },
+                (field, type, bases) -> {
+                    for (CSObj baseObj : bases) {
+                        InstanceField ifield = csManager.getInstanceField(baseObj, field);
+                        solver.addPFGEdge(ifield, to, FlowKind.INSTANCE_LOAD);
+                        allTargets.put(invoke, field); // record target
+                    }
+                });
     }
 
+    /**
+     * {@code Field.set}: pairs fields and base objects like
+     * {@link #methodInvoke}.
+     */
     @InvokeHandler(signature = "<java.lang.reflect.Field: void set(java.lang.Object,java.lang.Object)>", argIndexes = {BASE, 0})
     public void fieldSet(Context context, Invoke invoke,
                          PointsToSet fldObjs, PointsToSet baseObjs) {
         CSVar from = csManager.getCSVar(context, invoke.getInvokeExp().getArg(1));
-        fldObjs.forEach(fldObj -> {
+        accessFields(context, invoke, fldObjs, baseObjs,
+                field -> {
+                    StaticField sfield = csManager.getStaticField(field);
+                    solver.addPFGEdge(new PointerFlowEdge(
+                            STATIC_STORE, from, sfield),
+                            sfield.getType());
+                },
+                (field, type, bases) -> {
+                    for (CSObj baseObj : bases) {
+                        InstanceField ifield = csManager.getInstanceField(baseObj, field);
+                        solver.addPFGEdge(new PointerFlowEdge(
+                                INSTANCE_STORE, from, ifield),
+                                ifield.getType());
+                        allTargets.put(invoke, field); // record target
+                    }
+                });
+    }
+
+    /**
+     * Applies {@code staticAccess} to each new static field (after
+     * initializing its class) and {@code instanceAccess} to each new pair of
+     * an instance field and a base object of a subtype of its declaring
+     * class.
+     */
+    private void accessFields(Context context, Invoke invoke,
+                              PointsToSet fldObjs, PointsToSet baseObjs,
+                              Consumer<JField> staticAccess,
+                              MemberReceiverIndex.PairAction<JField, CSObj> instanceAccess) {
+        InstanceSite<JField> site = site(fieldSites, context, invoke, JField::getDeclaringClass);
+        site.index().addReceivers(
+                site.receivers().unseen(baseObjs, argPointsTo(context, invoke, 0)), instanceAccess);
+        for (CSObj fldObj : site.members().unseen(fldObjs, argPointsTo(context, invoke, BASE))) {
             if (isInvalidTarget(invoke, fldObj)) {
-                return;
+                continue;
             }
             JField field = CSObjs.toField(fldObj);
             if (field != null) {
                 if (field.isStatic()) {
                     initializeDeclaringClass(field);
-                    StaticField sfield = csManager.getStaticField(field);
-                    solver.addPFGEdge(new PointerFlowEdge(
-                            STATIC_STORE, from, sfield),
-                            sfield.getType());
+                    staticAccess.accept(field);
                 } else {
-                    Type declType = field.getDeclaringClass().getType();
-                    baseObjs.forEach(baseObj -> {
-                        Type objType = baseObj.getObject().getType();
-                        if (typeSystem.isSubtype(declType, objType)) {
-                            InstanceField ifield = csManager.getInstanceField(baseObj, field);
-                            solver.addPFGEdge(new PointerFlowEdge(
-                                    INSTANCE_STORE, from, ifield),
-                                    ifield.getType());
-                            allTargets.put(invoke, field); // record target
-                        }
-                    });
+                    site.index().addMember(field, instanceAccess);
                 }
             }
-        });
+        }
+    }
+
+    /**
+     * The state of one {@code Method.invoke}, {@code Field.get} or
+     * {@code Field.set} call site in one context: the member objects and
+     * receiver objects taken so far, and the instance members paired with
+     * the receivers.
+     */
+    private record InstanceSite<M>(SeenObjs members, SeenObjs receivers,
+                                   MemberReceiverIndex<M, CSObj> index) {
+    }
+
+    private <M> InstanceSite<M> site(Map<CSCallSite, InstanceSite<M>> sites,
+                                     Context context, Invoke invoke,
+                                     Function<? super M, JClass> declaringClassOf) {
+        CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
+        InstanceSite<M> site = sites.get(csCallSite);
+        if (site == null) {
+            site = new InstanceSite<>(
+                    new SeenObjs(solver.makePointsToSet()),
+                    new SeenObjs(solver.makePointsToSet()),
+                    new MemberReceiverIndex<>(supertypes, declaringClassOf,
+                            recvObj -> recvObj.getObject().getType()));
+            sites.put(csCallSite, site);
+        }
+        return site;
+    }
+
+    private PointsToSet argPointsTo(Context context, Invoke invoke, int index) {
+        return SeenObjs.livePointsTo(solver, context, invoke, index);
     }
 
     @InvokeHandler(signature = {
@@ -417,22 +484,23 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
     }
 
     /**
-     * Adds the call edge of instance method {@code target} on the
-     * {@code i}-th receiver of {@code receivers}, dispatched on the
-     * receiver's type. The skip check stays per receiver: each edge added
-     * raises the call site's target count that it reads.
+     * Adds the call edges of instance method {@code target} on
+     * {@code receivers}, all of type {@code type}, dispatched once on that
+     * type. The skip check stays per receiver: each edge added raises the
+     * call site's target count that it reads.
      */
-    private void addDispatchedCallEdge(
+    private void addDispatchedCallEdges(
             Context callerCtx, Invoke callSite, JMethod target,
-            ReceiverDispatch<CSObj> receivers, int i, Var args) {
-        if (isSkippedTarget(callSite, target)) {
-            return;
-        }
-        JMethod callee = receivers.dispatch(i);
+            Type type, Collection<CSObj> receivers, Var args) {
+        JMethod callee = hierarchy.dispatch(type, target.getRef());
         if (callee == null) {
             return;
         }
-        addResolvedCallEdge(callerCtx, callSite, receivers.receiver(i), callee, args);
+        for (CSObj recvObj : receivers) {
+            if (!isSkippedTarget(callSite, target)) {
+                addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+            }
+        }
     }
 
     private void addResolvedCallEdge(
