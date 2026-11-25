@@ -497,7 +497,7 @@ public class DefaultSolver implements Solver {
             plugin.onPhaseFinish();
         }
         stoppedByTimeLimit = !workList.isEmpty() && isTimeout;
-        logger.info("Work list: {}", workList.countersLine());
+        logger.info("Work list: {}", workListCountersLine());
         if (stoppedByTimeLimit) {
             logger.warn("Pointer analysis stops early as it reaches time limit ({} seconds)," +
                     " and the result may be unsound!", timeLimit);
@@ -516,6 +516,14 @@ public class DefaultSolver implements Solver {
             plugin.onRelease();
         }
         plugin.onFinish();
+    }
+
+    /**
+     * @return the counters of the work list's pointer entries, as logged at
+     * the end of the solve
+     */
+    String workListCountersLine() {
+        return workList.countersLine();
     }
 
     /**
@@ -610,9 +618,12 @@ public class DefaultSolver implements Solver {
                     .collect(ptsFactory::make, PointsToSet::addObject, PointsToSet::addAll);
         }
         PointsToSetInterner sharing = interner;
-        PointsToSet diff = sharing != null
+        PointsToSet computed = sharing != null
                 ? sharing.addAllDiff(pointer, pointsToSet)
                 : getPointsToSetOf(pointer).addAllDiff(pointsToSet);
+        PointsToSet diff = filters.isEmpty()
+                ? sameLargeSetOr(computed, pointsToSet)
+                : computed;
         if (!diff.isEmpty()) {
             try {
                 pointer.forEachOutTransfer((edge, target, transfer) ->
@@ -622,6 +633,24 @@ public class DefaultSolver implements Solver {
                 workList.endFanOut();
                 deltaTransfers.finish(pointer, diff);
             }
+        }
+        return diff;
+    }
+
+    /**
+     * The difference is a subset of the propagated delta, so a difference
+     * of the delta's size equals the delta. When both are large sets, which
+     * iterate in index order, the delta serves as the difference: the work
+     * list can then pass the same set on to the successors by reference
+     * (see {@link WorkList#addFanOutEntry}).
+     *
+     * @return {@code delta} if it equals {@code diff} and both are large,
+     * else {@code diff}
+     */
+    private PointsToSet sameLargeSetOr(PointsToSet diff, PointsToSet delta) {
+        if (diff != delta && ptsFactory.isLarge(delta) && ptsFactory.isLarge(diff)
+                && diff.size() == delta.size()) {
+            return delta;
         }
         return diff;
     }

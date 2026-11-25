@@ -68,6 +68,17 @@ import java.util.Queue;
  * holds it and copied on its first merge there. A delta handed out by
  * {@link #takePolledDelta()} may thus be the pending delta of other
  * pointers: the caller only reads it.
+ * <p>
+ * The delta handed out last is never changed either, so, when packing is
+ * off, a fan-out entry that receives that very set stores it by reference,
+ * flagged shared, instead of a copy, when it is a large set: a delta that
+ * passes a pointer unchanged travels on as one object. With packing on
+ * the entry packs it as before, since the set in its blocks would wait
+ * in place of the smaller packed words. A large set
+ * iterates in index order like its copy; a small set iterates in an order
+ * its copy need not keep, so it is still copied. A merge of a large set
+ * into the slot that already holds that same set changes nothing and is
+ * skipped.
  */
 final class WorkList {
 
@@ -156,6 +167,12 @@ final class WorkList {
      */
     private @Nullable PointsToSet polledDelta;
 
+    /**
+     * The delta handed out by the last {@link #takePolledDelta()}, until the
+     * next {@link #pollPointer()}.
+     */
+    private @Nullable PointsToSet takenDelta;
+
     private int pendingPeak;
 
     private long newEntries;
@@ -182,6 +199,16 @@ final class WorkList {
     private long sharedEntries;
 
     private long sharedCopies;
+
+    /**
+     * The new entries that stored the delta handed out last by reference.
+     */
+    private long referencedEntries;
+
+    /**
+     * The merges skipped as the slot already held the merged set.
+     */
+    private long skippedMerges;
 
     /**
      * @param ptsFactory the factory of the pending sets
@@ -224,13 +251,19 @@ final class WorkList {
                 return;
             }
         }
-        Object stored = newDelta(pointsToSet);
+        boolean referenced = !packLarge && pointsToSet == takenDelta
+                && ptsFactory.isLarge(pointsToSet);
+        Object stored = referenced ? pointsToSet : newDelta(pointsToSet);
         int seq = insert(pointer, stored);
+        if (referenced) {
+            ringShared[seq & (ringPointers.length - 1)] = true;
+            ++referencedEntries;
+        }
         if (fanSize < FAN_OUT_SOURCES) {
             fanSources[fanSize] = pointsToSet;
             fanStored[fanSize] = stored;
             fanFirstSeq[fanSize] = seq;
-            fanFlagged[fanSize] = false;
+            fanFlagged[fanSize] = referenced;
             ++fanSize;
         }
     }
@@ -307,6 +340,11 @@ final class WorkList {
 
     private void merge(int slot, PointsToSet pointsToSet) {
         Object pending = ringDeltas[slot];
+        if (pending == pointsToSet && ptsFactory.isLarge(pointsToSet)) {
+            ++mergedEntries;
+            ++skippedMerges;
+            return;
+        }
         PointsToSet set;
         if (pending instanceof PointsToSet held) {
             if (ringShared[slot]) {
@@ -436,6 +474,7 @@ final class WorkList {
         if (polledDelta != null) {
             throw new IllegalStateException("polled pointer delta not taken");
         }
+        takenDelta = null;
         int slot = headSeq & (ringPointers.length - 1);
         Pointer pointer = ringPointers[slot];
         Object pending = ringDeltas[slot];
@@ -458,7 +497,8 @@ final class WorkList {
     /**
      * @return the delta of the pointer returned by the last
      * {@link #pollPointer()}; it can be taken once. The caller only reads
-     * it: other pending pointers may hold the same set.
+     * it and does not change it later: other pending pointers may hold the
+     * same set, and fan-out entries may store it by reference.
      */
     PointsToSet takePolledDelta() {
         PointsToSet delta = polledDelta;
@@ -466,6 +506,7 @@ final class WorkList {
             throw new IllegalStateException("no polled pointer delta");
         }
         polledDelta = null;
+        takenDelta = delta;
         return delta;
     }
 
@@ -547,6 +588,21 @@ final class WorkList {
     }
 
     /**
+     * @return the new entries that stored the delta handed out last by
+     * reference
+     */
+    long referencedEntries() {
+        return referencedEntries;
+    }
+
+    /**
+     * @return the merges skipped as the slot already held the merged set
+     */
+    long skippedMerges() {
+        return skippedMerges;
+    }
+
+    /**
      * @return the counters of the pointer entries, for the log.
      */
     String countersLine() {
@@ -560,6 +616,8 @@ final class WorkList {
                 + " shared_copies=" + sharedCopies
                 + " packed_by_reference=" + packedByReference
                 + " packed_copy_bytes=" + packedCopyBytes()
-                + " packed_reference_bytes=" + packedReferenceBytes();
+                + " packed_reference_bytes=" + packedReferenceBytes()
+                + " referenced_entries=" + referencedEntries
+                + " skipped_merges=" + skippedMerges;
     }
 }
