@@ -49,14 +49,18 @@ import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.language.classes.ClassHierarchy;
+import pascal.taie.language.classes.ClassNames;
+import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.classes.Signatures;
+import pascal.taie.language.type.ArrayType;
 import pascal.taie.language.type.ClassType;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -128,6 +132,45 @@ public class LambdaAnalysis implements Plugin {
     private final Map<CSVar, ReceiverGroups<Type, CSObj>> recvByType = Maps.newMap();
 
     /**
+     * Map from each receiver variable of {@link #invoInfos} to the targets
+     * of its invocations, with per target the slots of the variable's
+     * grouping in {@link #recvByType} (known slots) and of the grouping of
+     * the new points-to set being handled (delta slots) whose type may
+     * dispatch the target. Created with the variable's grouping; a target
+     * gets its known slots at the first invocation of the target on the
+     * variable ({@link #groupKnownByCallee}), and the slots of each later
+     * type from {@link #matchTargets}.
+     */
+    private final Map<CSVar, ReceiverTargets> targetsByVar = Maps.newMap();
+
+    /**
+     * The class {@code java.lang.Object}: every receiver class is its
+     * subclass, so its methods are candidates for every receiver type.
+     */
+    private JClass objectClass;
+
+    /**
+     * Number of the new points-to set being handled by
+     * {@link #onNewPointsToSet}; tags the delta slots of
+     * {@link #targetsByVar}.
+     */
+    private long event;
+
+    /**
+     * Number of dispatches of a receiver type for a target while grouping
+     * receivers by callee (the groupings' {@link ReceiverGroups.Visitor#enter}
+     * calls), without those of the verify mode.
+     */
+    private long enterCalls;
+
+    /**
+     * Number of dispatches the same groupings would make by dispatching on
+     * every receiver type of the grouping, for comparison with
+     * {@link #enterCalls}.
+     */
+    private long enterFullScan;
+
+    /**
      * System property that turns on {@link GroupingVerifier}.
      */
     private static final String VERIFY_PROPERTY = "spd.lambda.verify";
@@ -147,6 +190,8 @@ public class LambdaAnalysis implements Plugin {
         this.hierarchy = solver.getHierarchy();
         this.csManager = solver.getCSManager();
         this.callSiteFreeContexts = selector.isInstanceContextCallSiteFree();
+        this.objectClass = Objects.requireNonNull(hierarchy.getJREClass(ClassNames.OBJECT),
+                "no class " + ClassNames.OBJECT);
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
@@ -258,13 +303,16 @@ public class LambdaAnalysis implements Plugin {
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
                 ReceiverGroups<Type, CSObj> recvObjsByType = recvByType.computeIfAbsent(
                         csRecvVar, v -> groupByType(recvObjs));
+                ReceiverTargets targets = targetsByVar.computeIfAbsent(
+                        csRecvVar, v -> new ReceiverTargets());
                 if (verifier != null) {
                     verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
                 }
                 InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, indy, indyCtx,
                         targetRef, argsToStatic(csCallSite, indy),
                         argsToInstance(csCallSite, indy));
-                addLambdaCallEdges(info, recvObjs, recvObjsByType);
+                addLambdaCallEdges(info, recvObjs, groupKnownByCallee(
+                        csCallSite, targetRef, recvObjsByType, targets));
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
                 invoInfos.put(csRecvVar, info);
@@ -400,11 +448,13 @@ public class LambdaAnalysis implements Plugin {
     }
 
     /**
-     * Adds the same facts as {@link #addLambdaCallEdge} for each receiver
-     * object, with the receivers grouped by their context-sensitive callee
-     * first: per callee, one points-to update of the callee's this variable
-     * with the whole group, and (if the arguments fit) one call edge, instead
-     * of one update and one equal edge per receiver object. The work list
+     * Groups receivers by their context-sensitive callee for a target at a
+     * call site, callees in first-seen order: a receiver whose type does not
+     * dispatch the target is left out. {@link #addLambdaCallEdges} then adds
+     * the same facts as {@link #addLambdaCallEdge} for each receiver object:
+     * per callee, one points-to update of the callee's this variable with
+     * the whole group, and (if the arguments fit) one call edge, instead of
+     * one update and one equal edge per receiver object. The work list
      * merges updates of one pointer and the call graph keeps equal edges
      * once, so the points-to facts and call edges added are the same sets.
      * What may differ is the order of work-list entries and, when a pending
@@ -415,49 +465,174 @@ public class LambdaAnalysis implements Plugin {
      * the solver's fixpoint, which does not depend on propagation order as
      * long as the plugins are monotone and the time limit is not hit.
      * <p>
-     * Dispatch depends only on the receiver's type and {@code targetRef}, so
-     * the receivers come grouped by type ({@code recvByType}, the objects of
-     * {@code recvObjs}) and each type is dispatched once. {@code recvObjs}
-     * itself is read only by the verify mode.
+     * Dispatch depends only on the receiver's type and the target, so the
+     * receivers come grouped by type ({@link ReceiverGroups}) and each type
+     * is dispatched once ({@link #enter}). A grouping over some slots of the
+     * types sees the same receivers in the same order as one over every
+     * type, as long as the slots left out are of types that do not dispatch
+     * the target.
      */
-    private void addLambdaCallEdges(
-            InstanceInvoInfo info, PointsToSet recvObjs,
-            ReceiverGroups<Type, CSObj> recvByType) {
-        addLambdaCallEdges(info, recvObjs, groupByCallee(
-                info.getCSCallSite(), info.getTargetRef(), recvByType));
+    private final class CalleeGrouper
+            implements ReceiverGroups.Visitor<Type, CSObj, JMethod> {
+
+        private final CSCallSite csCallSite;
+
+        private final MethodRef targetRef;
+
+        /**
+         * Receives the slot of each type that dispatches the target, when
+         * the grouping visits every type; otherwise null.
+         */
+        private final ReceiverTargets.@Nullable SlotList hits;
+
+        /**
+         * Whether the dispatches count in {@link #enterCalls} (not in the
+         * verify mode).
+         */
+        private final boolean counted;
+
+        private final Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
+
+        private int slot;
+
+        private CalleeGrouper(CSCallSite csCallSite, MethodRef targetRef,
+                              ReceiverTargets.@Nullable SlotList hits, boolean counted) {
+            this.csCallSite = csCallSite;
+            this.targetRef = targetRef;
+            this.hits = hits;
+            this.counted = counted;
+        }
+
+        @Override
+        @Nullable
+        public JMethod enter(Type type) {
+            if (counted) {
+                ++enterCalls;
+            }
+            JMethod callee = hierarchy.dispatch(type, targetRef);
+            if (hits != null) {
+                if (callee != null) {
+                    hits.addLast(slot);
+                }
+                ++slot;
+            }
+            return callee;
+        }
+
+        @Override
+        public void accept(JMethod callee, CSObj recvObj) {
+            Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
+            receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
+                    m -> solver.makePointsToSet()).addObject(recvObj);
+        }
     }
 
     /**
-     * @return the receivers of {@code recvByType} grouped by their
-     * context-sensitive callee for {@code targetRef} at {@code csCallSite},
-     * callees in first-seen order (the grouping of
-     * {@link #addLambdaCallEdges(InstanceInvoInfo, PointsToSet, ReceiverGroups)}).
-     * A receiver whose type does not dispatch {@code targetRef} is left out.
+     * @return the receivers of {@code recvByType} (the grouping of a receiver
+     * variable's whole points-to set, {@link #recvByType}) grouped by their
+     * context-sensitive callee for {@code targetRef} at {@code csCallSite}
+     * ({@link CalleeGrouper}). For a target the variable already has, only
+     * the target's known slots are dispatched; otherwise every type is, and
+     * the slots of the types that dispatch it become its known slots.
      */
-    private Map<CSMethod, PointsToSet> groupByCallee(
+    private Map<CSMethod, PointsToSet> groupKnownByCallee(
             CSCallSite csCallSite, MethodRef targetRef,
-            ReceiverGroups<Type, CSObj> recvByType) {
-        Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
-        recvByType.forEachGroup(new ReceiverGroups.Visitor<Type, CSObj, JMethod>() {
-            @Override
-            @Nullable
-            public JMethod enter(Type type) {
-                return hierarchy.dispatch(type, targetRef);
-            }
-
-            @Override
-            public void accept(JMethod callee, CSObj recvObj) {
-                Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
-                receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
-                        m -> solver.makePointsToSet()).addObject(recvObj);
-            }
-        });
-        return receiversByCallee;
+            ReceiverGroups<Type, CSObj> recvByType, ReceiverTargets targets) {
+        enterFullScan += recvByType.keyCount();
+        ReceiverTargets.Target target = targets.get(targetRef);
+        CalleeGrouper grouper;
+        if (target == null) {
+            target = targets.add(targetRef);
+            grouper = new CalleeGrouper(csCallSite, targetRef, target.known(), true);
+            recvByType.forEachGroup(grouper);
+        } else {
+            grouper = new CalleeGrouper(csCallSite, targetRef, null, true);
+            ReceiverTargets.SlotList known = target.known();
+            recvByType.forEachGroup(known.slots(), known.count(), grouper);
+        }
+        if (verifier != null) {
+            verifier.checkInversion(csCallSite, targetRef, recvByType,
+                    grouper.receiversByCallee);
+        }
+        return grouper.receiversByCallee;
     }
 
     /**
-     * Adds the facts of {@code receiversByCallee} (the result of
-     * {@link #groupByCallee} for the call site and target of {@code info})
+     * @return the receivers of {@code ptsByType} (the grouping of the new
+     * points-to set of {@link #event}) grouped by their context-sensitive
+     * callee for {@code target} at {@code csCallSite}
+     * ({@link CalleeGrouper}), dispatching only the target's delta slots
+     * ({@link #matchTargets}).
+     */
+    private Map<CSMethod, PointsToSet> groupDeltaByCallee(
+            CSCallSite csCallSite, ReceiverTargets.Target target,
+            ReceiverGroups<Type, CSObj> ptsByType) {
+        enterFullScan += ptsByType.keyCount();
+        CalleeGrouper grouper = new CalleeGrouper(csCallSite, target.ref(), null, true);
+        ptsByType.forEachGroup(target.deltaSlots(), target.deltaCount(event), grouper);
+        if (verifier != null) {
+            verifier.checkInversion(csCallSite, target.ref(), ptsByType,
+                    grouper.receiversByCallee);
+        }
+        return grouper.receiversByCallee;
+    }
+
+    /**
+     * Gives each target of {@code targets} its delta slots of {@link #event}
+     * in {@code ptsByType}, and its known slots of the types new to the
+     * variable's grouping {@code known} (those at {@code knownSize} or
+     * later, where {@code ptsByType} was appended): per type, in slot order,
+     * the targets declared in the type's class, its superclasses, their
+     * superinterfaces or {@code java.lang.Object}, the only declaring
+     * classes for which {@link ClassHierarchy#dispatch} may find a method
+     * (it requires the receiver class to be a subclass of the target's
+     * declaring class).
+     */
+    private void matchTargets(ReceiverTargets targets, ReceiverGroups<Type, CSObj> ptsByType,
+                              ReceiverGroups<Type, CSObj> known, int knownSize) {
+        for (int slot = 0; slot < ptsByType.keyCount(); ++slot) {
+            Type type = ptsByType.keyAt(slot);
+            int knownSlot = known.slotOf(type);
+            // the known slots of a target cover the types the variable had
+            int newKnownSlot = knownSlot >= knownSize ? knownSlot : -1;
+            JClass receiverClass = type instanceof ClassType classType
+                    ? classType.getJClass()
+                    : type instanceof ArrayType ? objectClass : null;
+            for (JClass c = receiverClass; c != null; c = c.getSuperClass()) {
+                matchDeclaringClass(targets, c, slot, newKnownSlot);
+                for (JClass iface : c.getInterfaces()) {
+                    matchInterface(targets, iface, slot, newKnownSlot);
+                }
+            }
+            matchDeclaringClass(targets, objectClass, slot, newKnownSlot);
+        }
+    }
+
+    private void matchInterface(ReceiverTargets targets, JClass iface,
+                                int slot, int newKnownSlot) {
+        matchDeclaringClass(targets, iface, slot, newKnownSlot);
+        for (JClass superIface : iface.getInterfaces()) {
+            matchInterface(targets, superIface, slot, newKnownSlot);
+        }
+    }
+
+    private void matchDeclaringClass(ReceiverTargets targets, JClass declaringClass,
+                                     int slot, int newKnownSlot) {
+        ReceiverTargets.Target[] declared = targets.declaredIn(declaringClass);
+        if (declared == null) {
+            return;
+        }
+        for (ReceiverTargets.Target target : declared) {
+            target.addDelta(event, slot);
+            if (newKnownSlot >= 0) {
+                target.known().addLast(newKnownSlot);
+            }
+        }
+    }
+
+    /**
+     * Adds the facts of {@code receiversByCallee} (a {@link CalleeGrouper}
+     * grouping for the call site and target of {@code info})
      * for {@code info}: per callee, in the map's order, the points-to update
      * of the callee's this variable and, if the arguments fit, the call edge.
      * The map and its sets are only read, so one grouping may serve several
@@ -495,10 +670,11 @@ public class LambdaAnalysis implements Plugin {
 
     /**
      * Drops the caches that only serve the solve ({@link #lambdaObjs},
-     * {@link #invoInfos}, {@link #recvByType}): after the release the solver
-     * refuses new methods, points-to sets and call edges, so none of them is
-     * read again. The verify mode's finish check, which reads the solver
-     * state and the size of {@link #recvByType}, runs first.
+     * {@link #invoInfos}, {@link #recvByType}, {@link #targetsByVar}): after
+     * the release the solver refuses new methods, points-to sets and call
+     * edges, so none of them is read again. The verify mode's finish check,
+     * which reads the solver state and the size of {@link #recvByType}, runs
+     * first.
      */
     @Override
     public void onRelease() {
@@ -506,12 +682,14 @@ public class LambdaAnalysis implements Plugin {
         lambdaObjs.clear();
         invoInfos.clear();
         recvByType.clear();
+        targetsByVar.clear();
     }
 
     @Override
     public void onFinish() {
         checkFinish();
         recvByType.clear();
+        targetsByVar.clear();
     }
 
     /**
@@ -570,6 +748,8 @@ public class LambdaAnalysis implements Plugin {
         private long partialCalls;
 
         private long partialMissing;
+
+        private long inversionChecks;
 
         private GroupingVerifier(boolean stateChecks) {
             this.stateChecks = stateChecks;
@@ -630,6 +810,39 @@ public class LambdaAnalysis implements Plugin {
             }
         }
 
+        /**
+         * (c) A grouping that dispatched only some slots of {@code groups}
+         * must equal, callees and receivers in the same order, the grouping
+         * that dispatches every type of {@code groups}.
+         */
+        private void checkInversion(
+                CSCallSite csCallSite, MethodRef targetRef, ReceiverGroups<Type, CSObj> groups,
+                Map<CSMethod, PointsToSet> receiversByCallee) {
+            CalleeGrouper everyType = new CalleeGrouper(csCallSite, targetRef, null, false);
+            groups.forEachGroup(everyType);
+            if (!orderOf(everyType.receiversByCallee).equals(orderOf(receiversByCallee))) {
+                throw new AnalysisException("[spd] lambda verify: grouping of " + targetRef
+                        + " at " + csCallSite + " differs from the one over every type: "
+                        + everyType.receiversByCallee + " vs " + receiversByCallee);
+            }
+            ++inversionChecks;
+        }
+
+        /**
+         * @return per callee in order, the callee followed by its receivers
+         * in iteration order.
+         */
+        private static List<List<Object>> orderOf(Map<CSMethod, PointsToSet> receiversByCallee) {
+            List<List<Object>> order = new ArrayList<>(receiversByCallee.size());
+            receiversByCallee.forEach((callee, receivers) -> {
+                List<Object> entry = new ArrayList<>(1 + receivers.size());
+                entry.add(callee);
+                receivers.forEach(entry::add);
+                order.add(entry);
+            });
+            return order;
+        }
+
         private void checkState(String when) {
             for (ThisFact f : pendingThis) {
                 CSVar thisVar = csManager.getCSVar(f.callee().getContext(),
@@ -661,7 +874,9 @@ public class LambdaAnalysis implements Plugin {
             return "calls=" + calls + " facts=" + facts + " partialCalls=" + partialCalls
                     + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
                     + " checkedFacts=" + checkedFacts + " cachedVars=" + recvByType.size()
-                    + " cachedTypes=" + cachedTypes + " cachedObjs=" + cachedObjs;
+                    + " cachedTypes=" + cachedTypes + " cachedObjs=" + cachedObjs
+                    + " inversionChecks=" + inversionChecks + " enterCalls=" + enterCalls
+                    + " enterFullScan=" + enterFullScan;
         }
     }
 
@@ -748,21 +963,43 @@ public class LambdaAnalysis implements Plugin {
         ReceiverGroups<Type, CSObj> ptsByType = groupByType(pts);
         ReceiverGroups<Type, CSObj> cached = Objects.requireNonNull(recvByType.get(csVar),
                 "no receiver grouping for a lambda receiver variable");
+        ReceiverTargets targets = Objects.requireNonNull(targetsByVar.get(csVar),
+                "no targets for a lambda receiver variable");
+        int knownSize = cached.keyCount();
         cached.appendAll(ptsByType);
+        long thisEvent = ++event;
+        matchTargets(targets, ptsByType, cached, knownSize);
         // handle the case of that new objects reach base variable
         // of lambda invocation
         if (callSiteFreeContexts && infos.size() > 1) {
-            addSharedLambdaCallEdges(infos, pts, ptsByType);
+            addSharedLambdaCallEdges(infos, pts, ptsByType, targets);
         } else {
-            infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType));
+            infos.forEach(info -> addLambdaCallEdges(info, pts, groupDeltaByCallee(
+                    info.getCSCallSite(), targetOf(targets, info), ptsByType)));
+        }
+        // the delta slots belong to one event at a time: a nested event
+        // would have replaced them before the groupings above read them
+        if (event != thisEvent) {
+            throw new IllegalStateException("lambda receiver event " + thisEvent
+                    + " interrupted by event " + event);
         }
     }
 
     /**
-     * The same facts, in the same order, as
-     * {@link #addLambdaCallEdges(InstanceInvoInfo, PointsToSet, ReceiverGroups)}
-     * for each of {@code infos} in turn, with one grouping per target method
-     * reference instead of one per invocation. A grouping reads the call site
+     * @return the target of {@code info} among {@code targets}, the targets
+     * of its receiver variable, which got it with the invocation.
+     */
+    private static ReceiverTargets.Target targetOf(
+            ReceiverTargets targets, InstanceInvoInfo info) {
+        return Objects.requireNonNull(targets.get(info.getTargetRef()),
+                "no target for a lambda invocation");
+    }
+
+    /**
+     * The same facts, in the same order, as {@link #addLambdaCallEdges} with
+     * a {@link #groupDeltaByCallee} grouping for each of {@code infos} in
+     * turn, with one grouping per target method reference instead of one
+     * per invocation. A grouping reads the call site
      * only through the callee context, which the selector selects without the
      * call site ({@link #callSiteFreeContexts}), and the dispatch of the
      * target; so the invocations of one target have equal groupings, in equal
@@ -772,12 +1009,13 @@ public class LambdaAnalysis implements Plugin {
      */
     private void addSharedLambdaCallEdges(
             Set<InstanceInvoInfo> infos, PointsToSet pts,
-            ReceiverGroups<Type, CSObj> ptsByType) {
+            ReceiverGroups<Type, CSObj> ptsByType, ReceiverTargets targets) {
         Map<MethodRef, Map<CSMethod, PointsToSet>> groupingByTarget = new HashMap<>();
         for (InstanceInvoInfo info : infos) {
             Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
                     info.getTargetRef(),
-                    targetRef -> groupByCallee(info.getCSCallSite(), targetRef, ptsByType));
+                    targetRef -> groupDeltaByCallee(info.getCSCallSite(),
+                            targetOf(targets, info), ptsByType));
             addLambdaCallEdges(info, pts, receiversByCallee);
         }
     }
