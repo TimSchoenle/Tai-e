@@ -22,6 +22,11 @@
     share-points-to-sets: false # share equal points-to sets between pointers
     # (immutable sets, copy on write; same results, less memory)
     handle-invokedynamic: false
+    lambda-heap-context: method # heap context of lambda objects (with
+    # handle-invokedynamic): the context of the creating method | captured
+    # (the empty context for a lambda without captured variables; same call
+    # graph and object points-to sets under limit-1 selectors unless a lambda
+    # object is a field or array base, fewer callee contexts under limit 2)
     propagate-types: [ reference ] # ,null,int,long,...(other primitive types)
     advanced: null # specify advanced analysis:
     # zipper | zipper-e | zipper-e=PV

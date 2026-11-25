@@ -96,6 +96,24 @@ public class LambdaAnalysis implements Plugin {
     private boolean callSiteFreeContexts;
 
     /**
+     * Option that selects the heap context of lambda functional objects:
+     * {@code method} (the context of the method that created the object) or
+     * {@code captured} ({@link #capturedArgsContext}: the empty context when
+     * the lambda captures no variable). Under context selectors of limit 1
+     * {@code captured} keeps the call graph and the points-to sets projected
+     * to objects, unless a lambda object is the base of a field or array
+     * access; a selector of limit 2 puts the receiver's heap context into
+     * the callee context, so calls on capture-free lambda objects (default
+     * methods, lambda self receivers) then have fewer callee contexts.
+     */
+    private static final String HEAP_CONTEXT_OPTION = "lambda-heap-context";
+
+    /**
+     * Whether the option {@link #HEAP_CONTEXT_OPTION} is {@code captured}.
+     */
+    private boolean capturedHeapContext;
+
+    /**
      * Map from method to the lambda functional objects created in the method.
      */
     private final MultiMap<JMethod, Obj> lambdaObjs = Maps.newMultiMap();
@@ -147,10 +165,27 @@ public class LambdaAnalysis implements Plugin {
         this.hierarchy = solver.getHierarchy();
         this.csManager = solver.getCSManager();
         this.callSiteFreeContexts = selector.isInstanceContextCallSiteFree();
+        this.capturedHeapContext = isCapturedHeapContext(
+                solver.getOptions().getString(HEAP_CONTEXT_OPTION));
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
         }
+    }
+
+    /**
+     * @return whether {@code option}, the value of
+     * {@link #HEAP_CONTEXT_OPTION}, selects the captured-arguments context.
+     * @throws IllegalArgumentException if {@code option} is neither
+     *                                  {@code method} nor {@code captured}
+     */
+    private static boolean isCapturedHeapContext(String option) {
+        return switch (option) {
+            case "method" -> false;
+            case "captured" -> true;
+            default -> throw new IllegalArgumentException(
+                    "Illegal " + HEAP_CONTEXT_OPTION + " option: " + option);
+        };
     }
 
     @Override
@@ -194,8 +229,13 @@ public class LambdaAnalysis implements Plugin {
             assert ret != null;
             // here we use full method context as the heap context of
             // lambda object, so that it can be directly used to obtain
-            // context-sensitive captured values later.
-            solver.addVarPointsTo(context, ret, context, lambdaObj);
+            // context-sensitive captured values later. With the option
+            // captured, a lambda without captured variables, which reads
+            // nothing under that context, gets the empty heap context.
+            Context heapContext = capturedHeapContext
+                    ? capturedArgsContext((InvokeDynamic) invoke.getInvokeExp(), context)
+                    : context;
+            solver.addVarPointsTo(context, ret, heapContext, lambdaObj);
         });
     }
 
