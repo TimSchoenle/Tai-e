@@ -756,8 +756,12 @@ public class DefaultSolver implements Solver {
                             csCallSite, recvObj, callee);
                     // build call edge
                     CSMethod csCallee = csManager.getCSMethod(calleeContext, callee);
-                    addCallEdge(new Edge<>(CallGraphs.getCallKind(callSite),
-                            csCallSite, csCallee));
+                    CallKind kind = CallGraphs.getCallKind(callSite);
+                    // an edge already in the call graph would be a no-op
+                    // when polled (processCallEdge), so it is not allocated
+                    if (!csCallSite.hasPlainEdge(kind, csCallee)) {
+                        addCallEdge(new Edge<>(kind, csCallSite, csCallee));
+                    }
                     // pass receiver object to *this* variable
                     if (!isIgnored(callee)) {
                         addVarPointsTo(calleeContext, callee.getIR().getThis(),

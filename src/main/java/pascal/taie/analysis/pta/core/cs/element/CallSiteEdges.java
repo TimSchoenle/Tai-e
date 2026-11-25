@@ -164,6 +164,24 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         return table[findSlot(table, e)] != null;
     }
 
+    /**
+     * @return whether this set holds the plain edge of {@code kind} to
+     * {@code callee}, found without an edge object; false if {@code kind}
+     * is not the kind of the plain edges of this call site
+     */
+    boolean containsPlain(CallKind kind, CSMethod callee) {
+        if (kind != plainKind || size == 0) {
+            return false;
+        }
+        if (table == EMPTY) {
+            return matches(single, callee);
+        }
+        if (isDense()) {
+            return containsDense(callee);
+        }
+        return table[findSlot(table, callee)] != null;
+    }
+
     @Override
     public int size() {
         return size;
