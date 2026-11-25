@@ -49,6 +49,8 @@ import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.analysis.pta.plugin.exception.CSMethodThrowResult;
+import pascal.taie.analysis.pta.pts.HeapOwnerCensus;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.analysis.pta.pts.PointsToSetInterner;
@@ -120,6 +122,8 @@ public class DefaultSolver implements Solver {
     private static final long PROGRESS_CHECK_MASK = (1L << 13) - 1;
 
     private static final long NANOS_PER_SECOND = 1_000_000_000L;
+
+    private static final long NANOS_PER_MS = 1_000_000L;
 
     private static final long BYTES_PER_MB = 1L << 20;
 
@@ -240,6 +244,26 @@ public class DefaultSolver implements Solver {
     private @Nullable SolverCensus census;
 
     /**
+     * The heap owner census taken with {@link #census}, or null.
+     */
+    private @Nullable HeapOwnerCensus owners;
+
+    /**
+     * When a census is taken during the solve (see {@link LiveCensusClock}).
+     */
+    private LiveCensusClock liveCensusClock;
+
+    /**
+     * The censuses taken during the last solve, and the last of them, or
+     * null if none was taken.
+     */
+    private long liveCensuses;
+
+    private @Nullable SolverCensus lastLiveCensus;
+
+    private @Nullable HeapOwnerCensus lastLiveOwners;
+
+    /**
      * Whether the measurement counters of the solver, its work list, its
      * interner and the type filters are kept and logged (with the option
      * {@code census} or the system property {@value #COUNTERS_PROPERTY});
@@ -248,6 +272,22 @@ public class DefaultSolver implements Solver {
     private final boolean counting;
 
     static final String COUNTERS_PROPERTY = "taie.pta.counters";
+
+    /**
+     * The guards listed in the type filter block at the finish (see
+     * {@link TypeFilter#guardsBlock}).
+     */
+    private static final int GUARD_LINES = 20;
+
+    /**
+     * @return whether the measurement counters are kept for a pointer
+     * analysis with these options: with the option {@code census} or the
+     * system property {@value #COUNTERS_PROPERTY}. Plugins that keep
+     * counters of their own ask this too.
+     */
+    public static boolean countersEnabled(AnalysisOptions options) {
+        return options.getBoolean("census") || Boolean.getBoolean(COUNTERS_PROPERTY);
+    }
 
     /**
      * The origins of new points-to work that the counters tell apart, an
@@ -306,7 +346,7 @@ public class DefaultSolver implements Solver {
         ptsFactory = new PointsToSetFactory(csManager.getObjectIndexer());
         interner = options.getBoolean("share-points-to-sets")
                 ? new PointsToSetInterner(ptsFactory) : null;
-        counting = options.getBoolean("census") || Boolean.getBoolean(COUNTERS_PROPERTY);
+        counting = countersEnabled(options);
         if (counting && interner != null) {
             interner.enableFormCounters();
         }
@@ -462,9 +502,12 @@ public class DefaultSolver implements Solver {
         progressCounters.reset();
         addOrigin = ORIGIN_OTHER;
         Arrays.fill(addsByOrigin, 0);
-        TypeFilter.setStats(counting);
         solveStartNanos = System.nanoTime();
         lastProgressNanos = solveStartNanos;
+        liveCensusClock = LiveCensusClock.of(options.getInt("census-interval"), solveStartNanos);
+        liveCensuses = 0;
+        lastLiveCensus = null;
+        lastLiveOwners = null;
         if (timeLimit != UNLIMITED) {
             timeLimiter = new TimeLimiter(timeLimit);
             timeLimiter.countDown();
@@ -517,9 +560,13 @@ public class DefaultSolver implements Solver {
         while (!workList.isEmpty() && !isTimeout) {
             // phase starts
             while (!workList.isEmpty() && !isTimeout) {
-                if ((++iterations & progressCheckMask) == 0
-                        && progressIntervalNanos != 0) {
-                    checkProgress();
+                if ((++iterations & progressCheckMask) == 0) {
+                    if (progressIntervalNanos != 0) {
+                        checkProgress();
+                    }
+                    if (liveCensusClock.isOn()) {
+                        checkLiveCensus();
+                    }
                 }
                 if (workList.hasCallEdge()) {
                     processCallEdge(workList.pollCallEdge());
@@ -566,15 +613,70 @@ public class DefaultSolver implements Solver {
         }
         if (counting) {
             logger.info("Solver counters: {}", countersLine());
+            logger.info("Type filter guards: {}",
+                    TypeFilter.guardsBlock(typeFilters.values(), true, GUARD_LINES));
         }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager);
+            owners = takeOwners();
         }
         if (options.getBoolean("release-solver-state")) {
             releaseSolverState();
             plugin.onRelease();
         }
         plugin.onFinish();
+    }
+
+    /**
+     * Takes a census when {@link #liveCensusClock} says one is due: at the
+     * point between two polls of the work list, where no transfer is half
+     * done. The census only reads the solver state, so the solve goes on
+     * with the same results and the same order (a time limit, if set,
+     * also counts the time of the census).
+     */
+    private void checkLiveCensus() {
+        long start = System.nanoTime();
+        String reason = liveCensusClock.due(start);
+        if (reason == null) {
+            return;
+        }
+        logger.info("Census during the solve at {} s ({}), iteration {}",
+                (start - solveStartNanos) / NANOS_PER_SECOND, reason, iterations);
+        lastLiveCensus = SolverCensus.take(csManager);
+        lastLiveOwners = takeOwners();
+        if (counting) {
+            logger.info("Work list: {}", workList.countersLine());
+            if (interner != null) {
+                logger.info("Points-to set interner: {} shared sets, {}",
+                        interner.size(), interner.counters());
+            }
+            logger.info("Solver counters: {}", countersLine());
+        }
+        ++liveCensuses;
+        long end = System.nanoTime();
+        liveCensusClock.taken(end);
+        logger.info("Census during the solve took {} ms", (end - start) / NANOS_PER_MS);
+    }
+
+    /**
+     * Takes and logs the heap owner census of the pointers' points-to sets
+     * (mock pointers included), the pending work list deltas and the
+     * exception sets of the reachable methods' throw results.
+     */
+    private HeapOwnerCensus takeOwners() {
+        HeapOwnerCensus heap = new HeapOwnerCensus();
+        csManager.pointers().forEach(p -> heap.addPointer(p.getPointsToSet()));
+        csManager.mockPointers().forEach(p -> heap.addPointer(p.getPointsToSet()));
+        workList.addPendingTo(heap);
+        callGraph.reachableMethods().forEach(m -> {
+            CSMethodThrowResult result = m.getThrowResult();
+            if (result != null) {
+                result.addTo(heap);
+            }
+        });
+        heap.finish();
+        logger.info("{}", heap);
+        return heap;
     }
 
     /**
@@ -635,7 +737,8 @@ public class DefaultSolver implements Solver {
      */
     String countersLine() {
         StringBuilder line = new StringBuilder(addsLine());
-        line.append("; type filters ").append(TypeFilter.statsLine(typeFilters.values()));
+        line.append("; type filters ")
+                .append(TypeFilter.statsLine(typeFilters.values(), counting));
         if (interner != null) {
             line.append("; interner ").append(interner.formCopiesLine());
         }
@@ -1250,6 +1353,9 @@ public class DefaultSolver implements Solver {
         TypeFilter filter = typeFilters.get(type);
         if (filter == null) {
             filter = new TypeFilter(type, this);
+            if (counting) {
+                filter.enableStats();
+            }
             typeFilters.put(type, filter);
         }
         addPFGEdge(edge, filter);

@@ -1652,6 +1652,17 @@ public class SparseBitSet extends AbstractBitSet
         public int length() {
             return words.length;
         }
+
+        /**
+         * Adds the storage shape of the snapshotted packed words to
+         * {@code shape}, as {@link SparseBitSet#addShape(long[])} does for
+         * a packed set. A measurement: reads the words only.
+         *
+         * @param shape an array of at least {@link #SHAPE_LENGTH} elements
+         */
+        public void addShape(long[] shape) {
+            addPackedShape(words, blocks, shape);
+        }
     }
 
     /**
@@ -1677,6 +1688,93 @@ public class SparseBitSet extends AbstractBitSet
         set.fillFromPacked(snapshot.words, snapshot.blocks);
         set.invalidateState();
         return set;
+    }
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the allocated
+     * level3 blocks of an unpacked set (all-zero ones included), or the
+     * block headers of a packed set.
+     */
+    public static final int SHAPE_BLOCKS = 0;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the non-zero words.
+     */
+    public static final int SHAPE_WORDS = 1;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the allocated
+     * level2 areas of an unpacked set.
+     */
+    public static final int SHAPE_AREAS = 2;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the length of the
+     * level1 table of an unpacked set.
+     */
+    public static final int SHAPE_TABLE = 3;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the length of the
+     * packed words of a packed set.
+     */
+    public static final int SHAPE_PACKED_WORDS = 4;
+
+    /**
+     * Length of the array of {@link #addShape(long[])}.
+     */
+    public static final int SHAPE_LENGTH = 6;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the set bits.
+     */
+    public static final int SHAPE_BITS = 5;
+
+    /**
+     * Adds the storage shape of this set, in the form it is stored in, to
+     * {@code shape} (indexed by the {@code SHAPE_} constants). A
+     * measurement: it reads the arrays only (unlike {@link #size()}, it
+     * does not refresh the state, which drops all-zero blocks) and
+     * allocates nothing.
+     *
+     * @param shape an array of at least {@link #SHAPE_LENGTH} elements
+     */
+    public void addShape(long[] shape) {
+        long[] packedWords = packed;
+        if (packedWords != null) {
+            addPackedShape(packedWords, packedBlocks, shape);
+            return;
+        }
+        shape[SHAPE_TABLE] += table.length;
+        for (long[][] area : table) {
+            if (area != null) {
+                ++shape[SHAPE_AREAS];
+                for (long[] block : area) {
+                    if (block != null) {
+                        ++shape[SHAPE_BLOCKS];
+                        for (long word : block) {
+                            if (word != 0) {
+                                ++shape[SHAPE_WORDS];
+                                shape[SHAPE_BITS] += Long.bitCount(word);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Adds the shape of packed words, {@code blocks} of them block headers,
+     * to {@code shape} (see {@link #addShape(long[])}).
+     */
+    private static void addPackedShape(long[] packedWords, int blocks, long[] shape) {
+        shape[SHAPE_BLOCKS] += blocks;
+        shape[SHAPE_WORDS] += packedWords.length - blocks;
+        shape[SHAPE_PACKED_WORDS] += packedWords.length;
+        for (int w = blocks; w < packedWords.length; ++w) {
+            shape[SHAPE_BITS] += Long.bitCount(packedWords[w]);
+        }
     }
 
     /**

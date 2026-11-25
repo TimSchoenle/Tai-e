@@ -23,7 +23,10 @@
 package pascal.taie.analysis.pta.pts;
 
 import org.jspecify.annotations.Nullable;
+import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.util.collection.AbstractHybridSet;
+import pascal.taie.util.collection.GenericBitSet;
 import pascal.taie.util.collection.SparseBitSet;
 
 /**
@@ -98,6 +101,12 @@ public final class PointsToSetInterner {
     private final long[] formCopies = new long[FORMS];
 
     private final long[] formCopyObjects = new long[FORMS];
+
+    /**
+     * The estimated bytes of the copied held sets (see {@link #copiedBytes}),
+     * indexed by {@link #formIndex}.
+     */
+    private final long[] formCopyBytes = new long[FORMS];
 
     /**
      * The (held form, delta form) pairs, small or large each.
@@ -203,6 +212,7 @@ public final class PointsToSetInterner {
             int form = formIndex(held, pts);
             ++formCopies[form];
             formCopyObjects[form] += held.size();
+            formCopyBytes[form] += copiedBytes(held);
         }
         PointsToSet next = held.copy();
         PointsToSet diff = next.addAllDiff(pts);
@@ -403,8 +413,9 @@ public final class PointsToSetInterner {
 
     /**
      * @return the copies counted by form, as
-     * {@code copies_<held>_<delta>=<copies>/<objects copied>} pairs, or the
-     * empty text if they are not counted.
+     * {@code copies_<held>_<delta>=<copies>/<objects copied>} pairs followed
+     * by {@code copied_bytes_<held>_<delta>=<bytes>} (see
+     * {@link #copiedBytes}), or the empty text if they are not counted.
      */
     public String formCopiesLine() {
         if (!formCounting) {
@@ -418,7 +429,26 @@ public final class PointsToSetInterner {
             line.append("copies_").append(FORM_NAMES[i]).append('=')
                     .append(formCopies[i]).append('/').append(formCopyObjects[i]);
         }
+        for (int i = 0; i < FORMS; ++i) {
+            line.append(" copied_bytes_").append(FORM_NAMES[i]).append('=')
+                    .append(formCopyBytes[i]);
+        }
         return line.toString();
+    }
+
+    /**
+     * @return the estimated bytes of the content of a held set that
+     * {@link #addAllDiff} copies: the packed words of a set held in a bit
+     * set ({@link GenericBitSet#packedBytes()}), else an array of one
+     * compressed reference per object (a 16-byte header and four bytes an
+     * object).
+     */
+    static long copiedBytes(PointsToSet held) {
+        if (asDelegate(held).set instanceof AbstractHybridSet<CSObj> hybrid
+                && hybrid.set instanceof GenericBitSet<CSObj> bits) {
+            return bits.packedBytes();
+        }
+        return 16L + 4L * held.size();
     }
 
     private static int formIndex(PointsToSet held, PointsToSet pts) {

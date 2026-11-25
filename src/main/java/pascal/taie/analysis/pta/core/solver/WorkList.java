@@ -27,6 +27,7 @@ import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.analysis.pta.pts.HeapOwnerCensus;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.util.collection.SparseBitSet;
@@ -689,6 +690,24 @@ final class WorkList {
             }
         }
         return new long[]{packedPending, setObjects, referencedPending};
+    }
+
+    /**
+     * Counts every pending delta, as a set or as packed words, in the
+     * census; reads the ring only.
+     */
+    void addPendingTo(HeapOwnerCensus census) {
+        int mask = ringPointers.length - 1;
+        for (int i = 0; i < size; ++i) {
+            Object pending = ringDeltas[(headSeq + i) & mask];
+            if (pending instanceof long[] packed) {
+                census.addPending(packed);
+            } else if (pending instanceof PointsToSet set) {
+                census.addPending(set);
+            } else if (pending instanceof SparseBitSet.PackedSnapshot snapshot) {
+                census.addPending(snapshot);
+            }
+        }
     }
 
     /**

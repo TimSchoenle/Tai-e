@@ -53,6 +53,12 @@
     # objects (measurement only; walks every pointer), and keep the solver's
     # measurement counters during the solve (also with the system property
     # taie.pta.counters; they change no result and no order but cost time)
+    census-interval: 0 # take the census (with the heap owner census and,
+    # when kept, the counters) also during the solve, every this many seconds
+    # after the last one (checked every 8192 work list entries, between two
+    # polls), 0 means off; a census is also taken whenever the file named by
+    # the system property taie.pta.census.trigger exists (looked for at most
+    # once a second, deleted when found). Read-only: same results and order
     dump: false # whether dump points-to results (with contexts)
     dump-ci: false # whether dump points-to results (without contexts)
     dump-yaml: false # whether dump points-to results in yaml format

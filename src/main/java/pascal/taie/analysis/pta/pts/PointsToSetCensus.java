@@ -107,6 +107,62 @@ public final class PointsToSetCensus {
      */
     private static final int SMALL_CAPACITY = new HybridHashSet<>().getThreshold();
 
+    /**
+     * A bit set that is not sparse: its indexer wrapper (24) and the bit
+     * set object (24), without the word array.
+     */
+    private static final int DENSE_OBJECTS = 24 + 24;
+
+    /**
+     * The objects of a points-to set before its elements: the wrapper and
+     * the hybrid set.
+     */
+    static final int SET_OBJECTS = WRAPPER + HYBRID;
+
+    /**
+     * @return the estimated bytes of the small form of a set of {@code n}
+     * objects (none for zero or one object, which the hybrid set holds
+     * itself).
+     */
+    static long smallBytes(int n) {
+        return n > 1 ? SMALL_OBJECTS + align(ARRAY_HEADER + REF * (long) SMALL_CAPACITY) : 0;
+    }
+
+    /**
+     * @return the estimated bytes of the word storage alone of one bit set
+     * whose shape (see {@link SparseBitSet#addShape}) is {@code shape}:
+     * the level3 blocks of an unpacked sparse set, the packed words of a
+     * packed one, or the word array of a bit set that is not sparse.
+     */
+    static long blockBytes(long[] shape, boolean sparse, boolean packed) {
+        if (!sparse) {
+            return align(ARRAY_HEADER + 8L * shape[SparseBitSet.SHAPE_WORDS]);
+        }
+        if (packed) {
+            return align(ARRAY_HEADER + 8L * shape[SparseBitSet.SHAPE_PACKED_WORDS]);
+        }
+        return shape[SparseBitSet.SHAPE_BLOCKS] * align(ARRAY_HEADER + 8L * WORDS_PER_BLOCK);
+    }
+
+    /**
+     * @return the estimated bytes of one bit set with its indexer wrapper
+     * whose shape is {@code shape}: {@link #blockBytes} plus the objects,
+     * and for an unpacked sparse set its level1 table and level2 areas.
+     */
+    static long bitSetBytes(long[] shape, boolean sparse, boolean packed) {
+        long blocks = blockBytes(shape, sparse, packed);
+        if (!sparse) {
+            return DENSE_OBJECTS + blocks;
+        }
+        if (packed) {
+            return SPARSE_OBJECTS + PACKED_FIELDS + blocks;
+        }
+        return SPARSE_OBJECTS + blocks
+                + align(ARRAY_HEADER + REF * shape[SparseBitSet.SHAPE_TABLE])
+                + shape[SparseBitSet.SHAPE_AREAS]
+                * align(ARRAY_HEADER + REF * (long) BLOCKS_PER_AREA);
+    }
+
     private final Population all = new Population();
 
     private final Population distinct = new Population();

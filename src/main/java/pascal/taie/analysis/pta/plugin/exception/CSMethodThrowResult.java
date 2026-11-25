@@ -24,6 +24,7 @@ package pascal.taie.analysis.pta.plugin.exception;
 
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.analysis.pta.pts.HeapOwnerCensus;
 import pascal.taie.ir.proginfo.ExceptionEntry;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.util.collection.Maps;
@@ -72,6 +73,16 @@ public class CSMethodThrowResult {
             ExceptionEntry[] entries = byIndex[index];
             return entries != null && stmts.get(index) == stmt ? entries : null;
         }
+    }
+
+    /**
+     * Counts the exception sets of this result (the explicit ones by
+     * statement, call sites included, and the uncaught ones) in the census;
+     * reads them only.
+     */
+    public void addTo(HeapOwnerCensus census) {
+        explicitExceptions.values().forEach(census::addThrowSet);
+        census.addThrowSet(uncaughtExceptions);
     }
 
     CSMethodThrowResult(Supplier<SetEx<CSObj>> setFactory, Catchers catchers) {

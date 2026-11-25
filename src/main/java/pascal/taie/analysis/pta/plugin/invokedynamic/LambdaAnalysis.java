@@ -23,6 +23,8 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.cs.context.Context;
@@ -36,6 +38,7 @@ import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.core.solver.DefaultSolver;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
@@ -213,6 +216,24 @@ public class LambdaAnalysis implements Plugin {
     @Nullable
     private GroupingVerifier verifier;
 
+    private static final Logger logger = LoggerFactory.getLogger(LambdaAnalysis.class);
+
+    /**
+     * The measurement counters, or null unless the pointer analysis keeps
+     * counters ({@link DefaultSolver#countersEnabled}); logged once, at the
+     * first of {@link #onRelease} and {@link #onFinish}.
+     */
+    @Nullable
+    private LambdaCounters counters;
+
+    /**
+     * @return whether {@code obj} is a lambda functional object that this
+     * analysis creates at a lambda meta factory call.
+     */
+    public static boolean isLambdaObj(Obj obj) {
+        return obj instanceof MockObj mock && mock.getDescriptor() == LAMBDA_DESC;
+    }
+
     @Override
     public void setSolver(Solver solver) {
         this.solver = solver;
@@ -229,6 +250,8 @@ public class LambdaAnalysis implements Plugin {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
         }
+        counters = DefaultSolver.countersEnabled(solver.getOptions())
+                ? new LambdaCounters() : null;
     }
 
     /**
@@ -310,6 +333,9 @@ public class LambdaAnalysis implements Plugin {
             // of pointer analysis) lambda objects and actual invocation sites.
             // TODO: use more information to filter out mismatches?
             return;
+        }
+        if (counters != null) {
+            counters.startEvent();
         }
         LambdaSource source = lambdaSource(recv, indy);
         CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
@@ -486,6 +512,9 @@ public class LambdaAnalysis implements Plugin {
             calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
             // pass receiver object to 'this' variable of callee
             solver.addVarPointsTo(calleeCtx, callee.getIR().getThis(), recvObj);
+            if (counters != null) {
+                counters.thisUpdate(calleeCtx, callee);
+            }
         } else { // otherwise, callee is static method
             callee = targetRef.resolveNullable();
             if (callee == null) {
@@ -502,6 +531,9 @@ public class LambdaAnalysis implements Plugin {
         }
         LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite,
                 csManager.getCSMethod(calleeCtx, callee), source);
+        if (counters != null) {
+            counters.edgeBuilt();
+        }
         solver.addCallEdge(callEdge);
     }
 
@@ -556,30 +588,41 @@ public class LambdaAnalysis implements Plugin {
         private final ReceiverTargets.@Nullable SlotList hits;
 
         /**
-         * Whether the dispatches count in {@link #enterCalls} (not in the
-         * verify mode).
+         * Whether the dispatches count in {@link #enterCalls} and in the
+         * {@link LambdaCounters} (not in the verify mode).
          */
         private final boolean counted;
+
+        /**
+         * The caller of the grouping for the {@link LambdaCounters}, one of
+         * their {@code PATH_} constants.
+         */
+        private final int path;
 
         private final Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
 
         private int slot;
 
         private CalleeGrouper(CSCallSite csCallSite, MethodRef targetRef,
-                              ReceiverTargets.@Nullable SlotList hits, boolean counted) {
+                              ReceiverTargets.@Nullable SlotList hits, boolean counted,
+                              int path) {
             this.csCallSite = csCallSite;
             this.targetRef = targetRef;
             this.hits = hits;
             this.counted = counted;
+            this.path = path;
         }
 
         @Override
         @Nullable
         public JMethod enter(Type type) {
+            JMethod callee = hierarchy.dispatch(type, targetRef);
             if (counted) {
                 ++enterCalls;
+                if (counters != null) {
+                    counters.enter(path, callee != null);
+                }
             }
-            JMethod callee = hierarchy.dispatch(type, targetRef);
             if (hits != null) {
                 if (callee != null) {
                     hits.addLast(slot);
@@ -603,7 +646,9 @@ public class LambdaAnalysis implements Plugin {
      * context-sensitive callee for {@code targetRef} at {@code csCallSite}
      * ({@link CalleeGrouper}). For a target the variable already has, only
      * the target's known slots are dispatched; otherwise every type is, and
-     * the slots of the types that dispatch it become its known slots.
+     * the slots of the types that dispatch it become its known slots. The
+     * dispatches count in the {@link LambdaCounters} under
+     * {@link LambdaCounters#PATH_CALL}.
      */
     private Map<CSMethod, PointsToSet> groupKnownByCallee(
             CSCallSite csCallSite, MethodRef targetRef,
@@ -613,10 +658,12 @@ public class LambdaAnalysis implements Plugin {
         CalleeGrouper grouper;
         if (target == null) {
             target = targets.add(targetRef);
-            grouper = new CalleeGrouper(csCallSite, targetRef, target.known(), true);
+            grouper = new CalleeGrouper(csCallSite, targetRef, target.known(), true,
+                    LambdaCounters.PATH_CALL);
             recvByType.forEachGroup(grouper);
         } else {
-            grouper = new CalleeGrouper(csCallSite, targetRef, null, true);
+            grouper = new CalleeGrouper(csCallSite, targetRef, null, true,
+                    LambdaCounters.PATH_CALL);
             ReceiverTargets.SlotList known = target.known();
             recvByType.forEachGroup(known.slots(), known.count(), grouper);
         }
@@ -632,13 +679,14 @@ public class LambdaAnalysis implements Plugin {
      * points-to set of {@link #event}) grouped by their context-sensitive
      * callee for {@code target} at {@code csCallSite}
      * ({@link CalleeGrouper}), dispatching only the target's delta slots
-     * ({@link #matchTargets}).
+     * ({@link #matchTargets}). {@code path} names the caller for the
+     * {@link LambdaCounters}.
      */
     private Map<CSMethod, PointsToSet> groupDeltaByCallee(
             CSCallSite csCallSite, ReceiverTargets.Target target,
-            ReceiverGroups<Type, CSObj> ptsByType) {
+            ReceiverGroups<Type, CSObj> ptsByType, int path) {
         enterFullScan += ptsByType.keyCount();
-        CalleeGrouper grouper = new CalleeGrouper(csCallSite, target.ref(), null, true);
+        CalleeGrouper grouper = new CalleeGrouper(csCallSite, target.ref(), null, true, path);
         ptsByType.forEachGroup(target.deltaSlots(), target.deltaCount(event), grouper);
         if (verifier != null) {
             verifier.checkInversion(csCallSite, target.ref(), ptsByType,
@@ -723,8 +771,14 @@ public class LambdaAnalysis implements Plugin {
             // pass receiver objects to 'this' variable of callee
             solver.addVarPointsTo(csCallee.getContext(),
                     callee.getIR().getThis(), receivers);
+            if (counters != null) {
+                counters.thisUpdate(csCallee.getContext(), callee);
+            }
             if (fitsParameterCount(callee, info.getArgsToStatic(),
                     info.getArgsToInstance())) {
+                if (counters != null) {
+                    counters.edgeBuilt();
+                }
                 solver.addCallEdge(new LambdaCallEdge(
                         csCallSite, csCallee, info.getLambdaSource()));
             }
@@ -750,6 +804,7 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onRelease() {
         checkFinish();
+        logCounters();
         lambdaObjs.clear();
         invoInfos.clear();
         recvByType.clear();
@@ -761,8 +816,24 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onFinish() {
         checkFinish();
+        logCounters();
         recvByType.clear();
         targetsByVar.clear();
+    }
+
+    /**
+     * Logs the counters once, at the first of {@link #onRelease} and
+     * {@link #onFinish}, while {@link #invoInfos} still holds the receiver
+     * variables.
+     */
+    private void logCounters() {
+        LambdaCounters c = counters;
+        if (c != null) {
+            List<Integer> infoCounts = new ArrayList<>();
+            invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
+            logger.info("Lambda counters: {}", c.line(infoCounts));
+            counters = null;
+        }
     }
 
     /**
@@ -891,7 +962,8 @@ public class LambdaAnalysis implements Plugin {
         private void checkInversion(
                 CSCallSite csCallSite, MethodRef targetRef, ReceiverGroups<Type, CSObj> groups,
                 Map<CSMethod, PointsToSet> receiversByCallee) {
-            CalleeGrouper everyType = new CalleeGrouper(csCallSite, targetRef, null, false);
+            CalleeGrouper everyType = new CalleeGrouper(csCallSite, targetRef, null, false,
+                    LambdaCounters.PATH_CALL);
             groups.forEachGroup(everyType);
             if (!orderOf(everyType.receiversByCallee).equals(orderOf(receiversByCallee))) {
                 throw new AnalysisException("[spd] lambda verify: grouping of " + targetRef
@@ -956,6 +1028,9 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (edge instanceof LambdaCallEdge lambdaCallEdge) {
+            if (counters != null) {
+                counters.edgeNew();
+            }
             CSCallSite csCallSite = lambdaCallEdge.getCallSite();
             CSMethod csCallee = lambdaCallEdge.getCallee();
             Context calleeContext = csCallee.getContext();
@@ -1030,6 +1105,9 @@ public class LambdaAnalysis implements Plugin {
         if (infos.isEmpty()) {
             return;
         }
+        if (counters != null) {
+            counters.startEvent();
+        }
         // grouped once per new points-to set, shared by every lambda
         // invocation on this receiver variable, and appended to the
         // variable's cached grouping (present since its first invocation)
@@ -1048,7 +1126,8 @@ public class LambdaAnalysis implements Plugin {
             addSharedLambdaCallEdges(infos, pts, ptsByType, targets);
         } else {
             infos.forEach(info -> addLambdaCallEdges(info, pts, groupDeltaByCallee(
-                    info.getCSCallSite(), targetOf(targets, info), ptsByType)));
+                    info.getCSCallSite(), targetOf(targets, info), ptsByType,
+                    LambdaCounters.PATH_NEW_PTS)));
         }
         // the delta slots belong to one event at a time: a nested event
         // would have replaced them before the groupings above read them
@@ -1088,7 +1167,8 @@ public class LambdaAnalysis implements Plugin {
             Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
                     info.getTargetRef(),
                     targetRef -> groupDeltaByCallee(info.getCSCallSite(),
-                            targetOf(targets, info), ptsByType));
+                            targetOf(targets, info), ptsByType,
+                            LambdaCounters.PATH_SHARED));
             addLambdaCallEdges(info, pts, receiversByCallee);
         }
     }
