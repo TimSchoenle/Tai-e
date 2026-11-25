@@ -269,6 +269,18 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
         return result;
     }
 
+    /**
+     * @return a new set of this context holding the elements of this set
+     * that are also in {@code other}, the set that {@link #copy()} and then
+     * {@code retainAll(other)} on the copy make; requires
+     * {@link #isSparseWith isSparseWith(other)}. Neither set changes.
+     */
+    public GenericBitSet<E> intersection(GenericBitSet<?> other) {
+        GenericBitSet<E> result = newSet();
+        result.bitSet = ((SparseBitSet) bitSet).intersection((SparseBitSet) other.bitSet);
+        return result;
+    }
+
     @Override
     public SetEx<E> copy() {
         GenericBitSet<E> copy = newSet();

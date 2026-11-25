@@ -236,6 +236,59 @@ class SparseBitSetPackedTest {
         }
     }
 
+    /**
+     * {@link SparseBitSet#intersection} of packed and unpacked sets, in both
+     * orders: the same bits and state as a copy of the set and then
+     * {@link SparseBitSet#and} on the copy, also after one more change; the
+     * result is not packed and neither operand changes or is unpacked.
+     */
+    @Test
+    void intersectionMatchesCopyAndAnd() {
+        Random random = new Random(0x1a7dL);
+        for (int sequence = 0; sequence < SEQUENCES; sequence++) {
+            int range = RANGES[sequence % RANGES.length];
+            long seed = random.nextLong();
+            long otherSeed = random.nextLong();
+            SparseBitSet model = randomSet(new Random(seed), range);
+            SparseBitSet otherModel = randomSet(new Random(otherSeed), range);
+            // at times the set is a subset of the other set: every one of
+            // its blocks is shared
+            boolean subset = random.nextInt(4) == 0;
+            if (subset) {
+                otherModel.or(model);
+            }
+            String at = "sequence " + sequence;
+            for (int form = 0; form < 4; ++form) {
+                SparseBitSet set = randomSet(new Random(seed), range);
+                SparseBitSet other = randomSet(new Random(otherSeed), range);
+                if (subset) {
+                    other.or(set);
+                }
+                if ((form & 1) != 0) {
+                    set.pack();
+                }
+                if ((form & 2) != 0) {
+                    other.pack();
+                }
+                String atForm = at + " form " + form;
+                SparseBitSet expected = (SparseBitSet) model.copy();
+                expected.and(otherModel);
+                SparseBitSet got = set.intersection(other);
+                assertFalse(got.isPacked(), atForm);
+                assertEquals(bits(expected), bits(got), atForm);
+                assertSameState(expected, got, atForm);
+                assertEquals(bits(model), bits(set), atForm + ": the set changed");
+                assertEquals(bits(otherModel), bits(other), atForm + ": the other set changed");
+                assertEquals((form & 1) != 0, set.isPacked(), atForm);
+                assertEquals((form & 2) != 0, other.isPacked(), atForm);
+                int bit = random.nextInt(range);
+                assertEquals(expected.set(bit), got.set(bit), atForm);
+                assertSameState(expected, got, atForm);
+                assertEquals(bits(expected), bits(got), atForm);
+            }
+        }
+    }
+
     @Test
     void changesOfAPackedSetMatchTheModel() {
         Random random = new Random(0x51d2L);

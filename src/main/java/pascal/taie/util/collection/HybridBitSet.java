@@ -287,6 +287,29 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
+     * @return true if this set is large and held in a bit set that is
+     * {@link GenericBitSet#isSparseWith sparse with} {@code bits}, so that
+     * {@link #largeIntersection} applies.
+     */
+    public boolean canIntersectLarge(GenericBitSet<?> bits) {
+        return isLargeSet && set instanceof GenericBitSet<E> own && own.isSparseWith(bits);
+    }
+
+    /**
+     * @return a new set of the elements of this set that are also in
+     * {@code bits}, in the form that {@link #copy()} and then
+     * {@code retainAll(bits)} on the bit set of the copy give it; requires
+     * {@link #canIntersectLarge canIntersectLarge(bits)}. This set does not
+     * change.
+     */
+    public HybridBitSet<E> largeIntersection(GenericBitSet<?> bits) {
+        HybridBitSet<E> result = new HybridBitSet<>(indexer, isSparse);
+        result.set = ((GenericBitSet<E>) set).intersection(bits);
+        result.isLargeSet = isLargeSet;
+        return result;
+    }
+
+    /**
      * @return true if this set is in its large (bit set) form.
      */
     public boolean isLarge() {

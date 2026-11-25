@@ -23,6 +23,7 @@
 package pascal.taie.analysis.pta.pts;
 
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.util.collection.GenericBitSet;
 import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.SetEx;
 
@@ -135,6 +136,27 @@ public abstract class DelegatePointsToSet implements PointsToSet {
      */
     PointsToSet unionDiff(DelegatePointsToSet pts) {
         return newSet(hybrid().unionDiff(pts.hybrid()));
+    }
+
+    /**
+     * @return true if {@link #largeIntersection largeIntersection(bits)}
+     * applies to this set
+     * @see HybridBitSet#canIntersectLarge
+     */
+    public boolean canIntersectLarge(GenericBitSet<CSObj> bits) {
+        return set instanceof HybridBitSet<CSObj> hybrid && hybrid.canIntersectLarge(bits);
+    }
+
+    /**
+     * @return a new set of the objects of this set that are also in
+     * {@code bits}, the set that {@link #copy()} and then keeping only
+     * those objects in the bit set of the copy make; requires
+     * {@link #canIntersectLarge canIntersectLarge(bits)}. This set does not
+     * change.
+     * @see HybridBitSet#largeIntersection
+     */
+    public PointsToSet largeIntersection(GenericBitSet<CSObj> bits) {
+        return newSet(hybrid().largeIntersection(bits));
     }
 
     private HybridBitSet<CSObj> hybrid() {
