@@ -67,7 +67,7 @@ public class ReflectionAnalysis extends CompositePlugin {
     @Override
     public void setSolver(Solver solver) {
         MetaObjHelper helper = new MetaObjHelper(solver);
-        TypeMatcher typeMatcher = new TypeMatcher(solver.getTypeSystem());
+        TypeMatcher typeMatcher = new TypeMatcher();
         String logPath = solver.getOptions().getString("reflection-log");
         logBasedModel = new LogBasedModel(solver, helper, logPath);
         Set<Invoke> invokesWithLog = logBasedModel.getInvokesWithLog();

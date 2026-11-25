@@ -22,228 +22,124 @@
 
 package pascal.taie.analysis.pta.plugin.reflection;
 
-import org.jspecify.annotations.Nullable;
-import pascal.taie.ir.exp.ArrayAccess;
+import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.CastExp;
 import pascal.taie.ir.exp.IntLiteral;
-import pascal.taie.ir.exp.LValue;
 import pascal.taie.ir.exp.NewArray;
 import pascal.taie.ir.exp.NullLiteral;
 import pascal.taie.ir.exp.RValue;
 import pascal.taie.ir.exp.Var;
-import pascal.taie.ir.stmt.Cast;
 import pascal.taie.ir.stmt.DefinitionStmt;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
-import pascal.taie.ir.stmt.StoreArray;
 import pascal.taie.language.classes.JMethod;
-import pascal.taie.language.type.ArrayType;
-import pascal.taie.language.type.NullType;
-import pascal.taie.language.type.PrimitiveType;
-import pascal.taie.language.type.Type;
-import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.Maps;
 
-import java.util.List;
 import java.util.Map;
 
 /**
- * Collects type information, i.e., (1) cast type on return value from
- * reflective calls, and (2) declared type of argument assigned to the
- * argument array (if available), and use them to match return type and
- * parameter types of the given reflective targets.
- * This class only supports to match type information for following reflection APIs:
+ * Rules out reflective targets by the number of arguments a reflective
+ * call passes, when an intra-procedural look at the call's argument array
+ * finds it. This class supports the following reflection APIs:
  * <ul>
  *     <li>Class.newInstance()</li>
  *     <li>Constructor.newInstance(Object[])</li>
  *     <li>Method.invoke(Object,Object[])</li>
  * </ul>
+ * The count is the only sound filter: {@code Method.invoke} and
+ * {@code Constructor.newInstance} refuse an argument array of another
+ * length before they call the target. A cast of the result runs only after
+ * the target has returned, and {@code invoke} converts every argument by its
+ * runtime object (unboxing, widening), so neither the cast type nor the
+ * declared type of a stored argument can rule out a target that runs. The
+ * upstream matcher used both and dropped such targets (px/s115-rmp).
  */
 class TypeMatcher {
 
-    private record TypeInfo(@Nullable Type returnType, @Nullable List<Type> argumentTypes) {
-    }
+    /** The count of an argument array the look cannot find. */
+    private static final int UNKNOWN = -1;
 
     private static final Map<String, Integer> argIndexes = Map.of(
             "invoke", 1, // Method.invoke(Object,Object[])
             "newInstance", 0 // Constructor.newInstance(Object[])
     );
 
-    private static final TypeInfo UNKNOWN = new TypeInfo(null, null);
+    private final Map<Invoke, Integer> argCounts = Maps.newMap();
 
-    private final TypeSystem typeSystem;
-
-    private final Map<Invoke, TypeInfo> typeInfos = Maps.newMap();
-
-    TypeMatcher(TypeSystem typeSystem) {
-        this.typeSystem = typeSystem;
-    }
-
+    /**
+     * @return whether {@code target} cannot be the target of reflective
+     * call {@code invoke}: the call passes a known number of arguments that
+     * differs from the target's parameter count.
+     */
     boolean isUnmatched(Invoke invoke, JMethod target) {
-        TypeInfo typeInfo = getTypeInfo(invoke);
-        if (typeInfo != UNKNOWN) {
-            // check return type
-            Type returnType = typeInfo.returnType();
-            if (returnType != null) {
-                if (target.isConstructor()) {
-                    Type objType = target.getDeclaringClass().getType();
-                    if (!typeSystem.isSubtype(returnType, objType)) {
-                        return true;
-                    }
-                } else {
-                    Type targetReturnType = target.getReturnType();
-                    if (isUnmatched(returnType, targetReturnType)) {
-                        return true;
-                    }
-                }
-            }
-            // check parameter types
-            List<Type> argumentTypes = typeInfo.argumentTypes();
-            if (argumentTypes != null) {
-                if (argumentTypes.size() != target.getParamCount()) {
-                    // argument number and parameter count do not match
-                    return true;
-                }
-                for (int i = 0; i < argumentTypes.size(); ++i) {
-                    // i-th argument and parameter do not match
-                    Type argType = argumentTypes.get(i);
-                    Type paramType = target.getParamType(i);
-                    if (isUnmatched(paramType, argType)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean isUnmatched(Type toType, Type fromType) {
-        if (toType.equals(fromType)) {
-            return false;
-        }
-        if (toType instanceof PrimitiveType type) {
-            return !typeSystem.getBoxedType(type).equals(fromType);
-        }
-        return !typeSystem.isSubtype(toType, fromType);
-    }
-
-    boolean hasTypeInfo(Invoke invoke) {
-        return getTypeInfo(invoke).argumentTypes() != null;
-    }
-
-    private TypeInfo getTypeInfo(Invoke invoke) {
-        return typeInfos.computeIfAbsent(invoke, TypeMatcher::computeTypeInfo);
+        int count = getArgCount(invoke);
+        return count != UNKNOWN && count != target.getParamCount();
     }
 
     /**
-     * Performs an intra-procedural analysis to compute available
-     * type information for reflective call {@code invoke}.
+     * @return whether the number of arguments {@code invoke} passes is known.
      */
-    private static TypeInfo computeTypeInfo(Invoke invoke) {
-        List<Stmt> stmts = invoke.getContainer().getIR().getStmts();
-        // search cast type on result of invoke
-        Var result = invoke.getResult();
-        Type returnType = null;
-        if (result != null) {
-            for (int i = invoke.getIndex() + 1; i < stmts.size(); ++i) {
-                Stmt stmt = stmts.get(i);
-                if (stmt.getUses().contains(result) && returnType != null) {
-                    // found multiple usages of the result, give up
-                    returnType = null;
-                    break;
-                }
-                if (stmt instanceof Cast cast &&
-                        cast.getRValue().getValue().equals(result)) {
-                    assert returnType == null;
-                    returnType = cast.getRValue().getCastType();
-                }
-            }
-        }
+    boolean hasTypeInfo(Invoke invoke) {
+        return getArgCount(invoke) != UNKNOWN;
+    }
+
+    private int getArgCount(Invoke invoke) {
+        return argCounts.computeIfAbsent(invoke, TypeMatcher::computeArgCount);
+    }
+
+    /**
+     * Computes the number of arguments of reflective call {@code invoke}:
+     * none for {@code Class.newInstance()} and for a {@code null} argument
+     * array; else the length of the array when the array variable has
+     * exactly one definition in the whole method, is neither a parameter nor
+     * {@code this}, and that definition is {@code new T[c]} with a constant
+     * {@code c} or a {@code null}. Every array the variable can hold then has
+     * that length, on every path and in every loop iteration. A
+     * {@code Catch} defines a variable without being a DefinitionStmt; the
+     * scan cannot miss one here, as a caught value is a Throwable and never
+     * an argument array.
+     */
+    private static int computeArgCount(Invoke invoke) {
         if (invoke.getInvokeExp().getArgCount() == 0) {
             // no argument, it means that invoke calls Class.newInstance()
-            return new TypeInfo(returnType, List.of());
+            return 0;
         }
-        // search definition of args
         int argIndex = argIndexes.get(invoke.getMethodRef().getName());
         Var args = invoke.getInvokeExp().getArg(argIndex);
-        Type[] argTypes = null;
-        if (args.isConst()) {
-            // if args is constant, it must be null, and for such case,
-            // no argument is given.
-            argTypes = new Type[0];
-        } else {
-            assert args.getType() instanceof ArrayType;
-            DefinitionStmt<?, ?> argDef = null;
-            for (int i = invoke.getIndex() - 1; i >= 0; --i) {
-                Stmt stmt = stmts.get(i);
-                if (stmt instanceof DefinitionStmt<?, ?> defStmt) {
-                    LValue lValue = defStmt.getLValue();
-                    if (args.equals(lValue)) { // found definition of args
-                        if (argDef == null) {
-                            argDef = defStmt;
-                            int length = getArrayLength(defStmt.getRValue());
-                            if (length != -1) { // found args = new Object[length];
-                                argTypes = new Type[length];
-                            } else { // args is defined by other ways, give up
-                                break;
-                            }
-                        } else { // found multiple definitions of args, give up
-                            argTypes = null;
-                            break;
-                        }
-                    }
+        if (args.isConst() && args.getConstValue() instanceof NullLiteral) {
+            // a null argument array: no argument is given
+            return 0;
+        }
+        IR ir = invoke.getContainer().getIR();
+        if (ir.isParam(args) || args.equals(ir.getThis())) {
+            // the value on entry reaches the call too
+            return UNKNOWN;
+        }
+        DefinitionStmt<?, ?> argDef = null;
+        for (Stmt stmt : ir.getStmts()) {
+            if (stmt instanceof DefinitionStmt<?, ?> defStmt
+                    && args.equals(defStmt.getLValue())) {
+                if (argDef != null) {
+                    // several definitions of args, give up
+                    return UNKNOWN;
                 }
-            }
-            if (argTypes != null) {
-                // creation of args is analyzable, collect argument types
-                for (int i = argDef.getIndex(); i < stmts.size(); ++i) {
-                    Stmt stmt = stmts.get(i);
-                    if (stmt instanceof StoreArray storeArray) {
-                        ArrayAccess arrayAccess = storeArray.getArrayAccess();
-                        if (arrayAccess.getBase().equals(args)) {
-                            // args[*] = ...;
-                            Var index = arrayAccess.getIndex();
-                            if (index.isConst()) { // index is constant
-                                int iIndex = ((IntLiteral) index.getConstValue()).getValue();
-                                if (argTypes[iIndex] == null) {
-                                    argTypes[iIndex] = storeArray.getRValue().getType();
-                                } else { // found multiple definitions
-                                    // on the same array index, give up
-                                    argTypes = null;
-                                    break;
-                                }
-                            } else { // index is not constant, give up
-                                argTypes = null;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (argTypes != null) {
-                    // fill NullType for non-assigned array indexes
-                    for (int i = 0; i < argTypes.length; ++i) {
-                        if (argTypes[i] == null) {
-                            argTypes[i] = NullType.NULL;
-                        }
-                    }
-                }
+                argDef = defStmt;
             }
         }
-        List<Type> argumentTypes = (argTypes != null) ? List.of(argTypes) : null;
-        return (returnType == null && argumentTypes == null)
-                ? UNKNOWN : new TypeInfo(returnType, argumentTypes);
+        return argDef == null ? UNKNOWN : getArrayLength(argDef.getRValue());
     }
 
     /**
      * Given a {@link RValue}, computes the length of the array it corresponds to.
-     * @return the array length, or -1 if {@code rValue} does not correspond to
-     * an analyzable array.
+     * @return the array length, or {@link #UNKNOWN} if {@code rValue} does not
+     * correspond to an analyzable array.
      */
     private static int getArrayLength(RValue rValue) {
         if (rValue instanceof NewArray newArray) {
             Var length = newArray.getLength();
             if (length.isConst()
-                    && length.getConstValue() instanceof IntLiteral intLiteral) {
+                    && length.getConstValue() instanceof IntLiteral intLiteral
+                    && intLiteral.getValue() >= 0) {
                 // args = new Object[const];
                 return intLiteral.getValue();
             }
@@ -252,10 +148,12 @@ class TypeMatcher {
             // args = null;
             return 0;
         }
-        if (rValue instanceof CastExp castExp && castExp.getValue().isConst()) {
+        if (rValue instanceof CastExp castExp
+                && castExp.getValue().isConst()
+                && castExp.getValue().getConstValue() instanceof NullLiteral) {
             // args = (Object[]) null;
             return 0;
         }
-        return -1;
+        return UNKNOWN;
     }
 }
