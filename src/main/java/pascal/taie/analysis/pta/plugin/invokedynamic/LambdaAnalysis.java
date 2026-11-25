@@ -507,14 +507,10 @@ public class LambdaAnalysis implements Plugin {
 
     /**
      * @return the objects of {@code objs} grouped by their type, in
-     * first-seen order.
+     * first-seen order, packed ({@link ReceiverGroups#group}).
      */
     private static ReceiverGroups<Type, CSObj> groupByType(PointsToSet objs) {
-        ReceiverGroups<Type, CSObj> byType = new ReceiverGroups<>();
-        for (CSObj obj : objs) {
-            byType.add(obj.getObject().getType(), obj);
-        }
-        return byType;
+        return ReceiverGroups.group(objs, obj -> obj.getObject().getType());
     }
 
     /**

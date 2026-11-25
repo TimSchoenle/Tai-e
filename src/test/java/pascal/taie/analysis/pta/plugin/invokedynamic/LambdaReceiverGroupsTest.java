@@ -26,13 +26,18 @@ import org.junit.jupiter.api.Test;
 import pascal.taie.util.collection.Maps;
 
 import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The receiver grouping keeps first-seen order of keys and of objects per
@@ -47,6 +52,21 @@ class LambdaReceiverGroupsTest {
             g.add((String) keyThenValues[i], keyThenValues[i + 1]);
         }
         return g;
+    }
+
+    /**
+     * @return the same grouping as {@link #groups}, made by
+     * {@link ReceiverGroups#group}, packed or open as it chooses. The
+     * objects must be distinct.
+     */
+    private static ReceiverGroups<String, Object> packed(Object... keyThenValues) {
+        List<Object> objs = new ArrayList<>();
+        Map<Object, String> keyOf = Maps.newMap();
+        for (int i = 0; i < keyThenValues.length; i += 2) {
+            objs.add(keyThenValues[i + 1]);
+            keyOf.put(keyThenValues[i + 1], (String) keyThenValues[i]);
+        }
+        return ReceiverGroups.group(objs, keyOf::get);
     }
 
     /**
@@ -204,8 +224,14 @@ class LambdaReceiverGroupsTest {
             pool.add("n" + i);
         }
         Random random = new Random(115);
-        ReceiverGroups<String, Object> cached = new ReceiverGroups<>();
+        // starts packed, as a receiver variable's grouping does
+        ReceiverGroups<String, Object> cached = packed(
+                pool.get(0), -1, pool.get(1), -2, pool.get(0), -3);
         Map<String, List<Object>> model = Maps.newLinkedHashMap();
+        model.put(pool.get(0), new ArrayList<>(List.of(-1, -3)));
+        model.put(pool.get(1), new ArrayList<>(List.of(-2)));
+        List<ReceiverGroups<String, Object>> appended = new ArrayList<>();
+        List<Map<String, List<Object>>> appendedModels = new ArrayList<>();
         int next = 0;
         for (int step = 0; step < 400; ++step) {
             if (random.nextBoolean()) {
@@ -214,24 +240,38 @@ class LambdaReceiverGroupsTest {
                 model.computeIfAbsent(key, k -> new ArrayList<>()).add(next);
                 ++next;
             } else {
-                ReceiverGroups<String, Object> more = new ReceiverGroups<>();
+                List<Object> keyThenValues = new ArrayList<>();
                 Map<String, List<Object>> moreModel = Maps.newLinkedHashMap();
                 for (int n = random.nextInt(12); n > 0; --n) {
                     String key = pool.get(random.nextInt(pool.size()));
-                    more.add(key, next);
+                    keyThenValues.add(key);
+                    keyThenValues.add(next);
                     moreModel.computeIfAbsent(key, k -> new ArrayList<>()).add(next);
                     ++next;
                 }
+                // half of the appended groupings packed, as the analysis makes them
+                ReceiverGroups<String, Object> more = random.nextBoolean()
+                        ? packed(keyThenValues.toArray())
+                        : groups(keyThenValues.toArray());
                 cached.appendAll(more);
                 moreModel.forEach((key, objs) ->
                         model.computeIfAbsent(key, k -> new ArrayList<>()).addAll(objs));
+                appended.add(more);
+                appendedModels.add(moreModel);
             }
             // lists of entries, so the order of keys counts too
             assertEquals(new ArrayList<>(model.entrySet()),
                     new ArrayList<>(contents(cached).entrySet()));
         }
+        // nothing of an appended grouping is shared: later changes of the
+        // cached grouping left every one of them unchanged
+        for (int i = 0; i < appended.size(); ++i) {
+            assertEquals(new ArrayList<>(appendedModels.get(i).entrySet()),
+                    new ArrayList<>(contents(appended.get(i)).entrySet()));
+        }
         assertEquals(model.size(), cached.keyCount());
-        assertEquals(next, cached.objectCount());
+        // the objects added plus the three the grouping started with
+        assertEquals(next + 3, cached.objectCount());
         model.forEach((key, objs) -> assertEquals(
                 objs.size() == 1 ? objs.get(0) : null, cached.singleObject(key)));
     }
@@ -252,5 +292,137 @@ class LambdaReceiverGroupsTest {
             }
         });
         assertEquals(List.of("A1", "C4"), seen);
+    }
+
+    /**
+     * A packed grouping has the keys, objects and order of the grouping made
+     * by adding the same objects, holds each group exactly sized, and opens
+     * on the first change with every group unchanged.
+     */
+    @Test
+    void packedGroupingMatchesAddedGroupingAndOpensOnChange() {
+        Object[] keyThenValues = {"B", 1, "A", 2, "B", 3, "C", 4, "B", 5, "C", 7, "D", 8, "D", 9};
+        ReceiverGroups<String, Object> g = packed(keyThenValues);
+        // one array of 8 objects (48 bytes) beats lists of 3, 2 and 2 (80)
+        assertTrue(g.isPacked());
+        assertEquals(new ArrayList<>(contents(groups(keyThenValues)).entrySet()),
+                new ArrayList<>(contents(g).entrySet()));
+        assertEquals(4, g.keyCount());
+        assertEquals(8, g.objectCount());
+        assertEquals(0, g.slotOf("B"));
+        assertEquals("C", g.keyAt(2));
+        assertEquals(3, g.listCapacity("B"));
+        assertEquals(-1, g.listCapacity("A"));
+        assertSame(2, g.singleObject("A"));
+        assertNull(g.singleObject("B"));
+        g.add("A", 6);
+        assertFalse(g.isPacked());
+        assertEquals(3, g.listCapacity("B"));
+        assertEquals(2, g.listCapacity("A"));
+        assertEquals(2, g.listCapacity("C"));
+        assertEquals(List.of(1, 3, 5), contents(g).get("B"));
+        assertEquals(List.of(2, 6), contents(g).get("A"));
+        assertEquals(List.of(4, 7), contents(g).get("C"));
+        assertEquals(List.of("B", "A", "C", "D"), new ArrayList<>(contents(g).keySet()));
+    }
+
+    /**
+     * Mostly single-object keys stay open, the repeated key in an exactly
+     * sized list: one 24-byte list is smaller than a 32-byte array of all
+     * four objects.
+     */
+    @Test
+    void fewRepeatsGroupIntoListsWhenSmaller() {
+        Object[] keyThenValues = {"B", 1, "A", 2, "C", 3, "B", 4};
+        ReceiverGroups<String, Object> g = packed(keyThenValues);
+        assertFalse(g.isPacked());
+        assertEquals(new ArrayList<>(contents(groups(keyThenValues)).entrySet()),
+                new ArrayList<>(contents(g).entrySet()));
+        assertEquals(2, g.listCapacity("B"));
+        assertSame(3, g.singleObject("C"));
+    }
+
+    @Test
+    void packedGroupingWithManyKeysIsIndexed() {
+        List<Object> keyThenValues = new ArrayList<>();
+        int keyCount = 4 * ReceiverGroups.INDEX_THRESHOLD;
+        for (int i = 0; i < 2 * keyCount; ++i) {
+            keyThenValues.add("k" + (i % keyCount));
+            keyThenValues.add(i);
+        }
+        ReceiverGroups<String, Object> g = packed(keyThenValues.toArray());
+        assertTrue(g.isIndexed());
+        assertEquals(keyCount, g.keyCount());
+        assertEquals(List.of(3, 3 + keyCount), contents(g).get("k3"));
+        assertEquals(keyCount - 1, g.slotOf("k" + (keyCount - 1)));
+    }
+
+    @Test
+    void groupingOfSingleObjectKeysIsOpen() {
+        ReceiverGroups<String, Object> g = packed("B", 1, "A", 2, "C", 3);
+        assertFalse(g.isPacked());
+        assertEquals(List.of("B", "A", "C"), new ArrayList<>(contents(g).keySet()));
+        assertSame(2, g.singleObject("A"));
+        assertEquals(-1, g.listCapacity("A"));
+        g.add("A", 4);
+        assertEquals(List.of(2, 4), contents(g).get("A"));
+    }
+
+    @Test
+    void emptyPackedGroupingHasNoKeys() {
+        ReceiverGroups<String, Object> g = packed();
+        assertEquals(0, g.keyCount());
+        assertEquals(0, g.objectCount());
+        ReceiverGroups<String, Object> cached = groups("A", 1);
+        cached.appendAll(g);
+        assertEquals(1, cached.objectCount());
+    }
+
+    /**
+     * The packed grouping iterates the objects twice; objects that change
+     * between the two iterations are refused, not grouped wrongly.
+     */
+    @Test
+    void packedGroupingRefusesObjectsThatChangeBetweenIterations() {
+        Map<Integer, String> keyOf = Map.of(1, "A", 2, "B", 3, "A", 4, "B");
+        // lists: an unknown key, too few objects, too many objects of a key
+        assertThrows(ConcurrentModificationException.class,
+                () -> ReceiverGroups.group(changing(List.of(1, 3), List.of(1, 2)), keyOf::get));
+        assertThrows(ConcurrentModificationException.class,
+                () -> ReceiverGroups.group(changing(List.of(1, 3, 2), List.of(1, 2)), keyOf::get));
+        assertThrows(ConcurrentModificationException.class,
+                () -> ReceiverGroups.group(changing(List.of(1, 3), List.of(1, 3, 1)), keyOf::get));
+        // packed: too few objects, too many objects of a key
+        assertThrows(ConcurrentModificationException.class,
+                () -> ReceiverGroups.group(changing(List.of(1, 3, 2, 4), List.of(1, 3, 2)),
+                        keyOf::get));
+        assertThrows(ConcurrentModificationException.class,
+                () -> ReceiverGroups.group(changing(List.of(1, 3, 2, 4), List.of(1, 3, 2, 4, 2)),
+                        keyOf::get));
+        // without a repeated key, one iteration only
+        assertEquals(List.of(1, 2), contents(ReceiverGroups.<String, Object>group(
+                changing(List.of(1, 2), List.of()), keyOf::get)).values().stream()
+                .flatMap(List::stream).toList());
+    }
+
+    /**
+     * @return an iterable yielding {@code first}, then {@code later} on every
+     * further iteration.
+     */
+    private static Iterable<Integer> changing(List<Integer> first, List<Integer> later) {
+        int[] iterations = {0};
+        return () -> {
+            Iterator<Integer> it = (iterations[0] == 0 ? first : later).iterator();
+            ++iterations[0];
+            return it;
+        };
+    }
+
+    @Test
+    void arrayObjectsAreRefused() {
+        ReceiverGroups<String, Object> g = new ReceiverGroups<>();
+        assertThrows(IllegalArgumentException.class, () -> g.add("A", new Object[0]));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReceiverGroups.group(List.of((Object) new Object[0]), obj -> "A"));
     }
 }
