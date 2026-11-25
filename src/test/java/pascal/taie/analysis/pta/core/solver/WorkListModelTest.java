@@ -484,16 +484,70 @@ class WorkListModelTest {
     }
 
     /**
+     * Cold windows with fan-outs: deltas that fan-out targets share, and
+     * merged deltas packed again after each fan-out, keep the poll order,
+     * the contents and the iteration order of every polled delta.
+     */
+    @Test
+    void randomFanOutsWithColdPackingMatchTheCopyingWorkList() {
+        for (int window : new int[]{1, 3}) {
+            assertTrue(assertFanOutsMatch(factory, true, window) > 100, "window " + window);
+            assertTrue(assertFanOutsMatch(factory, false, window) > 100, "window " + window);
+        }
+    }
+
+    /**
+     * Cold deltas are packed only between fan-outs: inside an open fan-out
+     * the work list refuses, after its end it packs.
+     */
+    @Test
+    void coldDeltasAreNotPackedDuringAFanOut() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, true, 1);
+        workList.addEntry(a, small);
+        workList.addEntry(a, large);
+        workList.addFanOutEntry(b, large);
+        workList.addFanOutEntry(c, large);
+        assertThrows(IllegalStateException.class, workList::packColdDeltas);
+        workList.addEntry(b, small);
+        workList.endFanOut();
+        workList.packColdDeltas();
+        assertEquals(1, workList.coldPacks(), "a's merge left the window by b's merge");
+        for (Pointer expected : List.of(a, b, c)) {
+            assertSame(expected, workList.pollPointer());
+            assertEquals(order(large), order(workList.takePolledDelta()));
+        }
+        assertEquals(1, workList.coldUnpacks());
+        assertTrue(workList.isEmpty());
+    }
+
+    private static void assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge) {
+        assertFanOutsMatch(factory, packLarge, 0);
+    }
+
+    /**
      * Random fan-outs of a few sets to random pointers, with plain entries
      * among them (as a transfer that adds work does), polls between the
-     * fan-outs and the callers' sets changed after each fan-out.
+     * fan-outs and the callers' sets changed after each fan-out; with a
+     * cold window, cold deltas are packed after some fan-outs.
+     *
+     * @return the cold packs of all seeds
      */
-    private static void assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge) {
+    private static long assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge,
+            int coldWindow) {
         long shared = 0;
         long copies = 0;
+        long coldPacks = 0;
+        long coldUnpacks = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
-            WorkList workList = new WorkList(factory, packLarge);
+            WorkList workList = new WorkList(factory, packLarge, coldWindow);
             CopyingWorkList model = new CopyingWorkList();
             int range = Math.min(pointers.size(), 4 + random.nextInt(40));
             int steps = 20 + random.nextInt(120);
@@ -519,6 +573,10 @@ class WorkListModelTest {
                         }
                     }
                     workList.endFanOut();
+                    if (coldWindow > 0 && random.nextBoolean()) {
+                        // the solver's safe point: no fan-out open, no delta read
+                        workList.packColdDeltas();
+                    }
                     for (PointsToSet source : sources) {
                         if (random.nextBoolean()) {
                             source.addObject(objects.get(random.nextInt(objects.size())));
@@ -538,14 +596,20 @@ class WorkListModelTest {
             assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
             assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
             assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
-            if (!packLarge) {
+            if (!packLarge && coldWindow == 0) {
                 assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
             }
             shared += workList.sharedEntries();
             copies += workList.sharedCopies();
+            coldPacks += workList.coldPacks();
+            coldUnpacks += workList.coldUnpacks();
         }
         assertTrue(shared > 1000, "shared entries: " + shared);
         assertTrue(copies > 100, "shared copies: " + copies);
+        if (coldWindow > 0) {
+            assertTrue(coldUnpacks > 100, "cold unpacks: " + coldUnpacks);
+        }
+        return coldPacks;
     }
 
     @Test
@@ -614,15 +678,135 @@ class WorkListModelTest {
      */
     private static int assertSequencesMatch(
             PointsToSetFactory factory, boolean packLarge, int pointerRange) {
+        return assertSequencesMatch(factory, packLarge, pointerRange, 0);
+    }
+
+    /**
+     * Cold windows: merged deltas packed again between polls keep the poll
+     * order, the contents, the iteration order and the form of every
+     * polled delta.
+     */
+    @Test
+    void randomSequencesWithColdPackingMatchTheCopyingWorkList() {
+        for (int window : new int[]{1, 2, 5}) {
+            assertSequencesMatch(factory, true, 12, window);
+            assertSequencesMatch(factory, false, 12, window);
+        }
+        assertSequencesMatch(factory, true, pointers.size(), 3);
+        assertSequencesMatch(farFactory, true, 12, 1);
+    }
+
+    /**
+     * A merged delta that leaves the cold window without a later merge is
+     * held as packed words until the next merge restores it; one merged
+     * again keeps its set; a polled pointer's entry is dropped.
+     */
+    @Test
+    void coldWindowPacksMergedDeltasThatWaitWithoutAMerge() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, true, 1);
+        workList.addEntry(a, small);
+        workList.addEntry(b, small);
+        workList.addEntry(c, large);
+        workList.addEntry(a, large);
+        workList.addEntry(b, large);
+        workList.addEntry(a, small);
+        // window 1: b's merge left the window by a's later merge; a is the newest
+        workList.packColdDeltas();
+        assertEquals(1, workList.coldPacks());
+        assertEquals(0, workList.coldUnpacks());
+        long[] words = factory.toPackedLarge(large);
+        assertNotNull(words);
+        assertEquals(words.length * Long.BYTES, workList.coldPackedBytes());
+        workList.packColdDeltas();
+        assertEquals(1, workList.coldPacks(), "a drained window packs nothing more");
+        // b's next merge restores its words and counts the restore
+        workList.addEntry(b, small);
+        assertEquals(1, workList.coldUnpacks());
+        assertSame(a, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        // b's merge is live, a was polled: b's delta is packed again, a's entry is dropped
+        workList.packColdDeltas();
+        assertEquals(1, workList.coldPacks(), "the newest merge stays in the window");
+        workList.addEntry(c, small);
+        workList.packColdDeltas();
+        assertEquals(2, workList.coldPacks());
+        assertSame(b, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        assertEquals(2, workList.coldUnpacks());
+        assertSame(c, workList.pollPointer());
+        assertEquals(order(large), order(workList.takePolledDelta()));
+        assertTrue(workList.isEmpty());
+        assertTrue(workList.countersLine().endsWith(" cold_packs=2 cold_packed_bytes="
+                + 2 * words.length * Long.BYTES + " cold_unpacks=2"), workList.countersLine());
+        assertFalse(new WorkList(factory, true).countersLine().contains("cold"));
+    }
+
+    /**
+     * The cold window hands over a pointer once its newest entry leaves the
+     * window, never for an older entry of a pointer written again, never
+     * after {@link ColdSetQueue#forget}, and only in a drain.
+     */
+    @Test
+    void coldSetQueueHandsOverPointersWhoseNewestEntryLeft() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        Pointer d = pointers.get(3);
+        ColdSetQueue queue = new ColdSetQueue(2);
+        List<Pointer> handed = new ArrayList<>();
+        queue.touch(a);
+        queue.touch(b);
+        queue.touch(a);
+        queue.touch(c);
+        queue.touch(d);
+        assertEquals(5, queue.size(), "entries leave only in a drain");
+        queue.forget(d);
+        queue.drain(handed::add);
+        // a's first entry is stale, b left live, a's second entry left live; c and d stay
+        assertEquals(List.of(b, a), handed);
+        assertEquals(2, queue.size());
+        queue.touch(b);
+        queue.drain(handed::add);
+        assertEquals(List.of(b, a, c), handed, "d was forgotten");
+        queue.drain(handed::add);
+        assertEquals(List.of(b, a, c), handed);
+        // the ring grows past its initial capacity and keeps the order
+        assertTrue(pointers.size() > 20, "too few pointers: " + pointers.size());
+        ColdSetQueue grown = new ColdSetQueue(1);
+        List<Pointer> order = new ArrayList<>();
+        for (int i = 0; i < 20; ++i) {
+            grown.touch(pointers.get(i));
+        }
+        grown.drain(order::add);
+        assertEquals(pointers.subList(0, 19), order);
+        assertEquals(1, grown.size());
+        assertThrows(IllegalArgumentException.class, () -> new ColdSetQueue(0));
+    }
+
+    private static int assertSequencesMatch(PointsToSetFactory factory,
+            boolean packLarge, int pointerRange, int coldWindow) {
         int maxPeak = 0;
         long byReference = 0;
         long copied = 0;
+        long coldPacks = 0;
+        long coldUnpacks = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
-            WorkList workList = new WorkList(factory, packLarge);
+            WorkList workList = new WorkList(factory, packLarge, coldWindow);
             CopyingWorkList model = new CopyingWorkList();
             int steps = 50 + random.nextInt(400);
             for (int step = 0; step < steps; ++step) {
+                if (random.nextInt(4) == 0) {
+                    // the solver's safe point: no fan-out open, no delta read
+                    workList.packColdDeltas();
+                }
                 if (random.nextInt(10) < 7) {
                     Pointer pointer = pointers.get(
                             random.nextInt(Math.min(pointers.size(), pointerRange)));
@@ -645,12 +829,22 @@ class WorkListModelTest {
             assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
             assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
             assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
-            if (!packLarge) {
+            if (!packLarge && coldWindow == 0) {
                 assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
+            }
+            if (coldWindow == 0) {
+                assertEquals(0, workList.coldPacks(), "seed " + seed);
             }
             maxPeak = Math.max(maxPeak, workList.pendingPeak());
             byReference += workList.packedByReference();
             copied += workList.packs() - workList.packedByReference();
+            coldPacks += workList.coldPacks();
+            coldUnpacks += workList.coldUnpacks();
+        }
+        if (coldWindow > 0) {
+            // merged deltas packed again, and some of them restored by a merge or poll
+            assertTrue(coldPacks > 100, "cold packs: " + coldPacks);
+            assertTrue(coldUnpacks > 100, "cold unpacks: " + coldUnpacks);
         }
         if (packLarge) {
             // both kinds of packs: packed sets taken by reference, others copied

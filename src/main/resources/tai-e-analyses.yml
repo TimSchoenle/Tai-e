@@ -47,6 +47,10 @@
     pack-pending-deltas: true # whether a pending work list delta that is a
     # large set on arrival is held as packed words (same results either way;
     # the "Work list:" log line counts packs and unpacks)
+    pack-cold-sets: 0 # the size of the windows over the pending deltas merged
+    # last and, with share-points-to-sets, the sets held by one pointer
+    # changed last; a large one that leaves its window without a later change
+    # is packed between two polls (same results; 0 packs none)
     census: false # whether log, at the finish before any release, the SCC
     # census of the pointer flow graph's unfiltered edges and the block
     # census of the points-to sets and the census of the context-sensitive

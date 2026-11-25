@@ -130,8 +130,30 @@ public final class PointsToSetInterner {
      */
     private long adoptions;
 
+    /**
+     * Sets packed by {@link #packSoleHeld}, and changes in place of a sole
+     * held set that was stored packed (each restores its blocks).
+     */
+    private long solePacks;
+
+    private long packedSoleWrites;
+
+    /**
+     * Whether {@link #packedSoleWrites} is counted.
+     */
+    private final boolean countPackedSoleWrites;
+
     public PointsToSetInterner(PointsToSetFactory factory) {
-        this(factory, INITIAL_CAPACITY);
+        this(factory, false);
+    }
+
+    /**
+     * @param countPackedSoleWrites whether {@link #packedSoleWrites()} is
+     *                              counted (one more check per change in
+     *                              place)
+     */
+    public PointsToSetInterner(PointsToSetFactory factory, boolean countPackedSoleWrites) {
+        this(factory, INITIAL_CAPACITY, countPackedSoleWrites);
     }
 
     /**
@@ -139,6 +161,12 @@ public final class PointsToSetInterner {
      *                 least 2
      */
     PointsToSetInterner(PointsToSetFactory factory, int capacity) {
+        this(factory, capacity, false);
+    }
+
+    private PointsToSetInterner(PointsToSetFactory factory, int capacity,
+                                boolean countPackedSoleWrites) {
+        this.countPackedSoleWrites = countPackedSoleWrites;
         if (capacity < 2 || Integer.bitCount(capacity) != 1) {
             throw new IllegalArgumentException(
                     "capacity must be a power of two of at least 2: " + capacity);
@@ -277,6 +305,9 @@ public final class PointsToSetInterner {
      */
     private PointsToSet addAllDiffInPlace(
             Pointer pointer, DelegatePointsToSet sole, PointsToSet pts) {
+        if (countPackedSoleWrites && sole.isPacked()) {
+            ++packedSoleWrites;
+        }
         remove(sole);
         sole.holders = -1;
         PointsToSet diff = sole.addAllDiff(pts);
@@ -344,6 +375,56 @@ public final class PointsToSetInterner {
         if (++shared.holders >= 2) {
             shared.pack();
         }
+    }
+
+    /**
+     * @return true if {@code pointer} holds a large shared set that no other
+     * pointer holds and that is not stored packed.
+     */
+    public boolean holdsUnpackedSole(Pointer pointer) {
+        return pointer.getPointsToSet() instanceof DelegatePointsToSet held
+                && held.holders == 1 && held.isLarge() && !held.isPacked();
+    }
+
+    /**
+     * Stores the set of {@code pointer} packed (see
+     * {@link DelegatePointsToSet#pack()}) if {@link #holdsUnpackedSole}: the
+     * form a set held by two or more pointers has, which every operation of
+     * this class accepts for a set held by one; a change in place restores
+     * its blocks. The contents, the iteration order and the place of the set
+     * in the table stay the same. The caller holds no iterator over the
+     * set, nor its unpacked blocks.
+     *
+     * @return true if the set was packed
+     */
+    public boolean packSoleHeld(Pointer pointer) {
+        if (!holdsUnpackedSole(pointer)) {
+            return false;
+        }
+        DelegatePointsToSet held = (DelegatePointsToSet) pointer.getPointsToSet();
+        held.pack();
+        if (!held.isPacked()) {
+            return false;
+        }
+        ++solePacks;
+        return true;
+    }
+
+    /**
+     * @return the sets packed by {@link #packSoleHeld} so far
+     */
+    public long solePacks() {
+        return solePacks;
+    }
+
+    /**
+     * @return the changes in place of a set held by one pointer that was
+     * stored packed (by {@link #packSoleHeld}, or while two pointers held
+     * it), each of which restored its blocks; 0 unless counted (see
+     * {@link #PointsToSetInterner(PointsToSetFactory, boolean)})
+     */
+    public long packedSoleWrites() {
+        return packedSoleWrites;
     }
 
     /**
