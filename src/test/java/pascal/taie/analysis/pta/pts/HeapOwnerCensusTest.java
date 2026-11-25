@@ -75,6 +75,33 @@ class HeapOwnerCensusTest {
     }
 
     @Test
+    void areasAreChargedAtTheirOwnLength() {
+        SparseBitSet one = new SparseBitSet();
+        one.set(1);
+        long[] shape = new long[SparseBitSet.SHAPE_LENGTH];
+        one.addShape(shape);
+        assertEquals(1, shape[SparseBitSet.SHAPE_AREAS]);
+        assertEquals(1, shape[SparseBitSet.SHAPE_AREA_SLOTS]);
+        assertEquals(1, shape[SparseBitSet.SHAPE_ONE_SLOT_AREAS]);
+        long[] noArea = shape.clone();
+        noArea[SparseBitSet.SHAPE_AREAS] = 0;
+        noArea[SparseBitSet.SHAPE_AREA_SLOTS] = 0;
+        noArea[SparseBitSet.SHAPE_ONE_SLOT_AREAS] = 0;
+        long base = PointsToSetCensus.bitSetBytes(noArea, true, false);
+        // 16 B header plus one 4 B slot, aligned to 8
+        assertEquals(base + 24, PointsToSetCensus.bitSetBytes(shape, true, false));
+        long[] full = noArea.clone();
+        full[SparseBitSet.SHAPE_AREAS] = 1;
+        full[SparseBitSet.SHAPE_AREA_SLOTS] = SparseBitSet.BLOCKS_PER_AREA;
+        assertEquals(base + 16 + 4L * SparseBitSet.BLOCKS_PER_AREA,
+                PointsToSetCensus.bitSetBytes(full, true, false));
+        long[] two = new long[SparseBitSet.SHAPE_LENGTH];
+        threeWordsInTwoBlocks().addShape(two);
+        assertEquals(0, two[SparseBitSet.SHAPE_ONE_SLOT_AREAS]);
+        assertEquals(true, two[SparseBitSet.SHAPE_AREA_SLOTS] < SparseBitSet.BLOCKS_PER_AREA);
+    }
+
+    @Test
     void packedPendingDeltaCountsItsHeadersWordsAndObjectsOnce() {
         long[] packed = threeWordsInTwoBlocks().toPacked();
         HeapOwnerCensus census = new HeapOwnerCensus();

@@ -37,7 +37,9 @@ public class PointsToSetCensusTest {
         // block 128 (area 1): word 1024 (bit 65536)
         int[] sorted = {0, 1, 63, 64, 511, 512, 5000, 65536};
         PointsToSetCensus.Population.Shape shape = p.record(sorted, sorted.length);
-        assertEquals(new PointsToSetCensus.Population.Shape(4, 6, 2, 2), shape);
+        // area 0 ends at block 9: 16 slots, 16 + 4 * 16 = 80 bytes;
+        // area 1 ends at its block 0: 1 slot, 16 + 4 aligned to 24 bytes
+        assertEquals(new PointsToSetCensus.Population.Shape(4, 6, 2, 2, 80 + 24), shape);
         SparseBitSet bits = new SparseBitSet();
         for (int i : sorted) {
             bits.set(i);
@@ -59,7 +61,7 @@ public class PointsToSetCensusTest {
     @Test
     void emptySetIsCardinalityZeroWithoutBlocks() {
         PointsToSetCensus.Population p = new PointsToSetCensus.Population();
-        assertEquals(new PointsToSetCensus.Population.Shape(0, 0, 0, 0),
+        assertEquals(new PointsToSetCensus.Population.Shape(0, 0, 0, 0, 0),
                 p.record(new int[0], 0));
         assertEquals(1, p.cardinality()[0]);
         assertEquals(1, p.blocksPerSet()[0]);

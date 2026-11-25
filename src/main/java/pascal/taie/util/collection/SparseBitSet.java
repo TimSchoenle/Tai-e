@@ -29,6 +29,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serial;
 import java.io.Serializable;
+import java.util.Arrays;
 import java.util.function.IntConsumer;
 import java.util.function.IntPredicate;
 
@@ -71,9 +72,10 @@ public class SparseBitSet extends AbstractBitSet
     private static final int LEVEL3 = 3;
 
     /**
-     * LEVEL2 is the number of bits of the level2 address: an area holds
-     * 2^LEVEL2 blocks. LEVEL2 + LEVEL3 fixes the span of one area (1024 words)
-     * and with it the size of the level1 table.
+     * LEVEL2 is the number of bits of the level2 address: an area spans
+     * 2^LEVEL2 blocks, and its array holds those up to its highest present
+     * block (see {@link #areaLength(int)}). LEVEL2 + LEVEL3 fixes the span of
+     * one area (1024 words) and with it the size of the level1 table.
      */
     private static final int LEVEL2 = 7;
 
@@ -88,7 +90,8 @@ public class SparseBitSet extends AbstractBitSet
     private static final int MAX_LENGTH1 = 1 << LEVEL1;
 
     /**
-     * LENGTH2 is the number of entries in the any level2 area.
+     * LENGTH2 is the number of blocks a level2 area spans, the greatest
+     * length of its array.
      */
     private static final int LENGTH2 = 1 << LEVEL2;
 
@@ -103,7 +106,8 @@ public class SparseBitSet extends AbstractBitSet
     public static final int WORDS_PER_BLOCK = LENGTH3;
 
     /**
-     * Blocks per level2 area, for sizing estimates outside this class.
+     * Blocks a level2 area spans, for sizing estimates outside this class
+     * (the array of an area is {@link #areaLength(int)} long).
      */
     public static final int BLOCKS_PER_AREA = LENGTH2;
 
@@ -264,12 +268,8 @@ public class SparseBitSet extends AbstractBitSet
         }
         unpack();
         final int w = wordIndex(bitIndex);
-        long[][] a2;
-        if ((a2 = table[level1Index(w)]) == null) {
-            return false;
-        }
         long[] a3;
-        if ((a3 = a2[level2Index(w)]) == null) {
+        if ((a3 = getBlock(table, level1Index(w), level2Index(w))) == null) {
             return false;
         }
         int w3 = level3Index(w);
@@ -295,11 +295,9 @@ public class SparseBitSet extends AbstractBitSet
         if (packed != null) {
             return bitIndex < bitsLength && (packedWord(w) & (1L << bitIndex)) != 0;
         }
-        long[][] a2;
         long[] a3;
         return bitIndex < bitsLength
-                && (a2 = table[level1Index(w)]) != null
-                && (a3 = a2[level2Index(w)]) != null
+                && (a3 = getBlock(table, level1Index(w), level2Index(w))) != null
                 && ((a3[level3Index(w)] & (1L << bitIndex)) != 0);
     }
 
@@ -347,6 +345,7 @@ public class SparseBitSet extends AbstractBitSet
         // first check whether bitIndex itself (or the bits next to bitIndex
         // in the same word) has been set
         if (w1 < tableLength && ((a2 = table[w1]) == null
+                || w2 >= a2.length
                 || (a3 = a2[w2]) == null
                 || ((word = a3[w3] & (~0L << fromIndex)) == 0L))) {
             // bitIndex is not set, start a search since bitIndex + 1
@@ -357,7 +356,7 @@ public class SparseBitSet extends AbstractBitSet
             outer:
             for (; w1 != tableLength; ++w1) {
                 if ((a2 = table[w1]) != null) {
-                    for (; w2 != LENGTH2; ++w2) {
+                    for (final int areaLength = a2.length; w2 < areaLength; ++w2) {
                         if ((a3 = a2[w2]) != null) {
                             for (; w3 != LENGTH3; ++w3) {
                                 if ((word = a3[w3]) != 0) {
@@ -402,6 +401,7 @@ public class SparseBitSet extends AbstractBitSet
         // first check whether bitIndex itself (or the bits next to bitIndex
         // in the same word) is clear (not set).
         if (w1 < tableLength && (a2 = table[w1]) != null
+                && w2 < a2.length
                 && (a3 = a2[w2]) != null
                 && ((nword = ~a3[w3] & (~0L << fromIndex))) == 0L) {
             // bitIndex is clear (not set), start a search since bitIndex + 1
@@ -416,7 +416,8 @@ public class SparseBitSet extends AbstractBitSet
                     break;
                 }
                 for (; w2 != LENGTH2; ++w2) {
-                    if ((a3 = a2[w2]) == null) {
+                    // a block past the end of the area is absent
+                    if (w2 >= a2.length || (a3 = a2[w2]) == null) {
                         break outer;
                     }
                     for (; w3 != LENGTH3; ++w3) {
@@ -468,7 +469,7 @@ public class SparseBitSet extends AbstractBitSet
         for (; w1 >= 0; --w1) {
             if ((a2 = table[w1]) != null) {
                 for (; w2 >= 0; --w2) {
-                    if ((a3 = a2[w2]) != null) {
+                    if (w2 < a2.length && (a3 = a2[w2]) != null) {
                         for (; w3 >= 0; --w3) {
                             if ((word = a3[w3]) != 0) {
                                 for (int offset = w4; offset >= 0; --offset) {
@@ -522,7 +523,7 @@ public class SparseBitSet extends AbstractBitSet
                 return bitIndex(w1, w2, w3) + w4;
             }
             for (; w2 >= 0; --w2) {
-                if ((a3 = a2[w2]) == null) {
+                if (w2 >= a2.length || (a3 = a2[w2]) == null) {
                     return bitIndex(w1, w2, w3) + w4;
                 }
                 for (; w3 >= 0; --w3) {
@@ -684,9 +685,9 @@ public class SparseBitSet extends AbstractBitSet
                 if (thisArea != null) {
                     // both areas are present
                     boolean isZeroArea = true;
-                    for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                    for (int w2 = 0; w2 < thisArea.length; ++w2) {
                         long[] thisBlock = thisArea[w2];
-                        long[] otherBlock = otherArea[w2];
+                        long[] otherBlock = w2 < otherArea.length ? otherArea[w2] : null;
                         if (otherBlock != null) {
                             if (thisBlock != null) {
                                 // both blocks are present
@@ -862,7 +863,7 @@ public class SparseBitSet extends AbstractBitSet
             if (area == null) {
                 continue;
             }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < area.length; ++w2) {
                 long[] block = area[w2];
                 if (block != null) {
                     count += updateMemoAndCountBlock(block, 0, PACKED_MASK, w1, w2, k, p, test);
@@ -963,7 +964,7 @@ public class SparseBitSet extends AbstractBitSet
             if (area == null || otherArea == null) {
                 continue;
             }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0, blocks = Math.min(area.length, otherArea.length); w2 < blocks; ++w2) {
                 long[] block = area[w2];
                 long[] otherBlock = otherArea[w2];
                 if (block == null || otherBlock == null) {
@@ -1046,26 +1047,26 @@ public class SparseBitSet extends AbstractBitSet
             }
             long[][] selfArea = w1 < table.length ? table[w1] : null;
             long[][] diffArea = null;
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < sourceArea.length; ++w2) {
                 long[] sourceBlock = sourceArea[w2];
                 if (sourceBlock == null) {
                     continue;
                 }
-                long[] selfBlock = selfArea != null ? selfArea[w2] : null;
+                long[] selfBlock = selfArea != null && w2 < selfArea.length ? selfArea[w2] : null;
                 if (selfBlock == null) {
                     if (!isNonZeroBlock(sourceBlock)) {
                         continue;
                     }
-                    if (selfArea == null) {
-                        selfArea = getOrCreateArea(w1);
+                    if (selfArea == null || w2 >= selfArea.length) {
+                        selfArea = getOrCreateArea(w1, w2);
                     }
                     selfBlock = sourceBlock.clone();
                     selfArea[w2] = selfBlock;
                     recordNewBlock(w1, w2, selfBlock);
                     changed = true;
                     if (diff != null) {
-                        if (diffArea == null) {
-                            diffArea = diff.getOrCreateArea(w1);
+                        if (diffArea == null || w2 >= diffArea.length) {
+                            diffArea = diff.getOrCreateArea(w1, w2);
                         }
                         diffArea[w2] = sourceBlock.clone();
                     }
@@ -1082,8 +1083,8 @@ public class SparseBitSet extends AbstractBitSet
                         changed = true;
                         if (diff != null) {
                             if (diffBlock == null) {
-                                if (diffArea == null) {
-                                    diffArea = diff.getOrCreateArea(w1);
+                                if (diffArea == null || w2 >= diffArea.length) {
+                                    diffArea = diff.getOrCreateArea(w1, w2);
                                 }
                                 diffBlock = diffArea[w2] = new long[LENGTH3];
                             }
@@ -1205,12 +1206,12 @@ public class SparseBitSet extends AbstractBitSet
                 continue;
             }
             long[][] selfArea = selfTable != null && w1 < selfTable.length ? selfTable[w1] : null;
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < sourceArea.length; ++w2) {
                 long[] sourceBlock = sourceArea[w2];
                 if (sourceBlock == null) {
                     continue;
                 }
-                long[] selfBlock = selfArea != null ? selfArea[w2] : null;
+                long[] selfBlock = selfArea != null && w2 < selfArea.length ? selfArea[w2] : null;
                 if (selfPacked) {
                     selfHeader = packedSeek(selfHeader, (w1 << LEVEL2) + w2);
                 }
@@ -1290,9 +1291,8 @@ public class SparseBitSet extends AbstractBitSet
     public SparseBitSet minus(SparseBitSet other) {
         long[] words = packed;
         SparseBitSet result = new SparseBitSet(new State());
-        // grown as getOrCreateArea grows it, so the result has the table of
-        // a set built bit by bit
-        long[][][] resultTable = result.table;
+        // its table and areas are created and grown by getOrCreateArea, so
+        // the result has the table and area lengths of a set built bit by bit
         boolean otherPacked = other.packed != null;
         // the header of other at or after the block of the walk, if packed
         int otherHeader = 0;
@@ -1316,16 +1316,9 @@ public class SparseBitSet extends AbstractBitSet
                             ? other.packedWordAt(otherHeader, index) : other.wordAt(index));
                     if (word != 0) {
                         if (resultBlock == null) {
-                            int w1 = blockIndex >> LEVEL2;
-                            if (w1 >= resultTable.length) {
-                                result.resize(bitIndex(w1, 0, 0));
-                                resultTable = result.table;
-                            }
-                            long[][] resultArea = resultTable[w1];
-                            if (resultArea == null) {
-                                resultArea = resultTable[w1] = new long[LENGTH2][];
-                            }
-                            resultBlock = resultArea[blockIndex & MASK2] = new long[LENGTH3];
+                            int w2 = blockIndex & MASK2;
+                            resultBlock = result.getOrCreateArea(blockIndex >> LEVEL2, w2)[w2]
+                                    = new long[LENGTH3];
                         }
                         resultBlock[w3] = word;
                     }
@@ -1339,7 +1332,7 @@ public class SparseBitSet extends AbstractBitSet
                     continue;
                 }
                 long[][] resultArea = null;
-                for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                for (int w2 = 0; w2 < area.length; ++w2) {
                     long[] block = area[w2];
                     if (block == null) {
                         continue;
@@ -1356,12 +1349,9 @@ public class SparseBitSet extends AbstractBitSet
                                 : block[w3];
                         if (word != 0) {
                             if (resultBlock == null) {
-                                if (resultArea == null) {
-                                    if (w1 >= resultTable.length) {
-                                        result.resize(bitIndex(w1, 0, 0));
-                                        resultTable = result.table;
-                                    }
-                                    resultArea = resultTable[w1] = new long[LENGTH2][];
+                                if (resultArea == null || w2 >= resultArea.length) {
+                                    // created, or replaced by a longer copy
+                                    resultArea = result.getOrCreateArea(w1, w2);
                                 }
                                 resultBlock = resultArea[w2] = new long[LENGTH3];
                             }
@@ -1417,7 +1407,9 @@ public class SparseBitSet extends AbstractBitSet
                 if (area == null || otherArea == null) {
                     continue;
                 }
-                for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                // a block past the end of either area is absent
+                int blocks = Math.min(area.length, otherArea.length);
+                for (int w2 = 0; w2 < blocks; ++w2) {
                     long[] block = area[w2];
                     long[] otherBlock = otherArea[w2];
                     if (block == null || otherBlock == null) {
@@ -1585,7 +1577,7 @@ public class SparseBitSet extends AbstractBitSet
             if (area == null) {
                 continue;
             }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < area.length; ++w2) {
                 long[] block = area[w2];
                 if (block == null) {
                     continue;
@@ -1695,7 +1687,7 @@ public class SparseBitSet extends AbstractBitSet
             if (area == null) {
                 continue;
             }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < area.length; ++w2) {
                 long[] block = area[w2];
                 if (block == null) {
                     continue;
@@ -1821,12 +1813,26 @@ public class SparseBitSet extends AbstractBitSet
     /**
      * Length of the array of {@link #addShape(long[])}.
      */
-    public static final int SHAPE_LENGTH = 6;
+    public static final int SHAPE_LENGTH = 8;
 
     /**
      * Index into the array of {@link #addShape(long[])}: the set bits.
      */
     public static final int SHAPE_BITS = 5;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the block slots of
+     * the level2 areas of an unpacked set, the sum of their lengths (an
+     * area is as long as {@link #areaLength(int)} of its highest block).
+     */
+    public static final int SHAPE_AREA_SLOTS = 6;
+
+    /**
+     * Index into the array of {@link #addShape(long[])}: the level2 areas
+     * of an unpacked set that are one slot long, the only odd length
+     * {@link #areaLength(int)} gives.
+     */
+    public static final int SHAPE_ONE_SLOT_AREAS = 7;
 
     /**
      * Adds the storage shape of this set, in the form it is stored in, to
@@ -1847,6 +1853,10 @@ public class SparseBitSet extends AbstractBitSet
         for (long[][] area : table) {
             if (area != null) {
                 ++shape[SHAPE_AREAS];
+                shape[SHAPE_AREA_SLOTS] += area.length;
+                if (area.length == 1) {
+                    ++shape[SHAPE_ONE_SLOT_AREAS];
+                }
                 for (long[] block : area) {
                     if (block != null) {
                         ++shape[SHAPE_BLOCKS];
@@ -2080,7 +2090,7 @@ public class SparseBitSet extends AbstractBitSet
             if (area == null) {
                 continue;
             }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+            for (int w2 = 0; w2 < area.length; ++w2) {
                 long[] block = area[w2];
                 if (block == null) {
                     continue;
@@ -2175,16 +2185,18 @@ public class SparseBitSet extends AbstractBitSet
      * @return the block if it is present in the table, or {@code null} if absent.
      */
     private static long @Nullable [] getBlock(long[][][] table, int w1, int w2) {
-        return w1 < table.length && table[w1] != null ? table[w1][w2] : null;
+        long[][] area;
+        return w1 < table.length && (area = table[w1]) != null && w2 < area.length
+                ? area[w2] : null;
     }
 
     /**
      * Retrieves the block of specified position in the table of this set.
      * If the block is absent (i.e., {@code null}), this method will create
-     * the block, and resize table and create new area, if necessary.
+     * the block, and resize table and create or grow the area, if necessary.
      */
     private long[] getOrCreateBlock(int w1, int w2) {
-        long[][] area = getOrCreateArea(w1);
+        long[][] area = getOrCreateArea(w1, w2);
         long[] block;
         if ((block = area[w2]) == null) {
             block = area[w2] = new long[LENGTH3];
@@ -2193,19 +2205,37 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
-     * Retrieves the area of specified position in the table of this set.
-     * If the area is absent (i.e., {@code null}), this method will create
-     * the area, and resize table, if necessary.
+     * Retrieves the area of specified position in the table of this set,
+     * long enough to hold the block {@code w2}. If the area is absent
+     * (i.e., {@code null}), this method will create it, and resize table, if
+     * necessary; if it is too short, it is replaced in the table by a longer
+     * copy (see {@link #areaLength(int)}), so a caller that holds the old
+     * area must use the returned one.
      */
-    private long[][] getOrCreateArea(int w1) {
+    private long[][] getOrCreateArea(int w1, int w2) {
         if (w1 >= table.length) {
             resize(bitIndex(w1, /* only the highest one bit matters */ 0, 0));
         }
         long[][] area;
         if ((area = table[w1]) == null) {
-            area = table[w1] = new long[LENGTH2][];
+            area = table[w1] = new long[areaLength(w2)][];
+        } else if (w2 >= area.length) {
+            area = table[w1] = Arrays.copyOf(area, areaLength(w2));
         }
         return area;
+    }
+
+    /**
+     * An area holds the blocks from 0 up to its highest present block, not
+     * all {@link #LENGTH2} of them: most areas of a large analysis use a
+     * fraction of their blocks, and an empty slot costs a reference. The
+     * length is the next power of two, so an area that fills in ascending
+     * order is copied a logarithmic number of times.
+     *
+     * @return the length of an area whose highest block is {@code w2}
+     */
+    public static int areaLength(int w2) {
+        return w2 == 0 ? 1 : Integer.highestOneBit(w2) << 1;
     }
 
     /**
@@ -2291,7 +2321,7 @@ public class SparseBitSet extends AbstractBitSet
             long[][] iteratedArea = iteratedTable[w1];
             if (iteratedArea != null) {
                 boolean isZeroArea = true;
-                for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                for (int w2 = 0; w2 < iteratedArea.length; ++w2) {
                     // search for non-null blocks in iteratedTable
                     long[] iteratedBlock = iteratedArea[w2];
                     if (iteratedBlock != null) {
@@ -2557,7 +2587,7 @@ public class SparseBitSet extends AbstractBitSet
         long word;
         for (int w1 = 0; w1 != aLength1; ++w1) {
             if ((a2 = a1[w1]) != null) {
-                for (int w2 = 0; w2 != LENGTH2; ++w2) {
+                for (int w2 = 0; w2 != a2.length; ++w2) {
                     if ((a3 = a2[w2]) != null) {
                         final int base = (w1 << SHIFT1) + (w2 << SHIFT2);
                         for (int w3 = 0; w3 != LENGTH3; ++w3) {
@@ -2589,8 +2619,6 @@ public class SparseBitSet extends AbstractBitSet
         /* Read in number of mappings. */
         final int count = s.readInt();
         /* Read the keys and values, them into the set array, areas, and blocks. */
-        long[][] a2;
-        long[] a3;
         for (int n = 0; n != count; ++n) {
             final int w = s.readInt();
             final int w3 = w & MASK3;
@@ -2598,13 +2626,7 @@ public class SparseBitSet extends AbstractBitSet
             final int w1 = w >> SHIFT1;
 
             final long word = s.readLong();
-            if ((a2 = table[w1]) == null) {
-                a2 = table[w1] = new long[LENGTH2][];
-            }
-            if ((a3 = a2[w2]) == null) {
-                a3 = a2[w2] = new long[LENGTH3];
-            }
-            a3[w3] = word;
+            getOrCreateBlock(w1, w2)[w3] = word;
         }
         /* Ensure all the pieces are set up for set scanning. */
         state = new State();
