@@ -233,13 +233,14 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         if (kind != plainKind || size == 0) {
             return false;
         }
+        // a plain edge is stored as its callee, without an edge source
         if (table == EMPTY) {
-            return matches(single, callee);
+            return matches(single, (EdgeSource) sources, callee, null);
         }
         if (isDense()) {
-            return containsDense(callee);
+            return containsDense(callee, null);
         }
-        return table[findSlot(table, callee)] != null;
+        return table[findSlot(table, tableSources(), callee, null)] != null;
     }
 
     @Override
