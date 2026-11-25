@@ -33,7 +33,9 @@ import pascal.taie.util.collection.SparseBitSet;
  * new set on a copy, or in place when no other pointer holds the set, and
  * replaces the held set by the shared set equal to the result. A large set
  * held by several pointers that takes a large set first looks for the
- * result in the table and takes it from there without a copy. Two sets are
+ * result in the table and takes it from there without a copy; so does the
+ * empty set that takes a large set, which returns the shared result as the
+ * difference. Two sets are
  * equal here when they have the same form
  * (empty, singleton, small or large) and the same elements in iteration
  * order, so sharing never changes the iteration order of a pointer's set.
@@ -83,6 +85,12 @@ public final class PointsToSetInterner {
 
     private long probeHits;
 
+    /**
+     * Changes of the empty set by a large set that took the shared set
+     * equal to it, without a copy.
+     */
+    private long adoptions;
+
     public PointsToSetInterner(PointsToSetFactory factory) {
         this(factory, INITIAL_CAPACITY);
     }
@@ -126,7 +134,9 @@ public final class PointsToSetInterner {
      * pointer's set and expect the old contents.
      *
      * @return the difference between {@code pts} and the set the pointer
-     * held before the call.
+     * held before the call; the caller only reads it and does not keep it
+     * past the next change of the pointer's set, as it may be the shared set
+     * the pointer now holds.
      */
     public PointsToSet addAllDiff(Pointer pointer, PointsToSet pts) {
         PointsToSet held = pointer.getPointsToSet();
@@ -141,6 +151,16 @@ public final class PointsToSetInterner {
         // the empty set, pinned at one, counts at least two once held
         if (held instanceof DelegatePointsToSet sole && sole.holders == 1) {
             return addAllDiffInPlace(pointer, sole, pts);
+        }
+        if (held == empty) {
+            DelegatePointsToSet adopted = findAdoptable(pts);
+            if (adopted != null) {
+                ++adoptions;
+                hold(adopted);
+                release(empty);
+                pointer.setPointsToSet(adopted);
+                return adopted;
+            }
         }
         if (held instanceof DelegatePointsToSet shared && shared.holders >= 2) {
             DelegatePointsToSet delta = asDelegate(pts);
@@ -162,6 +182,25 @@ public final class PointsToSetInterner {
         ++copies;
         pointer.setPointsToSet(replace(held, next));
         return diff;
+    }
+
+    /**
+     * The empty set that takes a large set {@code pts} becomes a set of the
+     * form and elements of {@code pts}, and the difference is such a set too
+     * (see {@link pascal.taie.util.collection.HybridBitSet#addAllDiff}): a
+     * shared set equal to {@code pts} serves as both, without the two copies.
+     * The returned difference is then shared, so never mutated.
+     *
+     * @return the shared set equal to the large set {@code pts}, or null if
+     * {@code pts} is not large or the table holds no such set
+     */
+    @Nullable
+    private DelegatePointsToSet findAdoptable(PointsToSet pts) {
+        DelegatePointsToSet delta = asDelegate(pts);
+        if (!delta.isLarge()) {
+            return null;
+        }
+        return table[probe(delta, delta.sequenceHash())];
     }
 
     private void countWrite(PointsToSet held) {
@@ -296,7 +335,7 @@ public final class PointsToSetInterner {
      */
     public Counters counters() {
         return new Counters(unsharedWrites, soleWrites, twoHolderWrites,
-                manyHolderWrites, copies, copyHits, probes, probeHits);
+                manyHolderWrites, copies, copyHits, probes, probeHits, adoptions);
     }
 
     /**
@@ -317,11 +356,14 @@ public final class PointsToSetInterner {
      *                         result before copying
      * @param probeHits        probes that found the result shared, and took
      *                         it without a copy
+     * @param adoptions        changes of the empty set by a large set that
+     *                         took the shared set equal to that set, and
+     *                         returned it as the difference, without a copy
      */
     public record Counters(long unsharedWrites, long soleWrites,
                            long twoHolderWrites, long manyHolderWrites,
                            long copies, long copyHits,
-                           long probes, long probeHits) {
+                           long probes, long probeHits, long adoptions) {
     }
 
     private static DelegatePointsToSet asDelegate(PointsToSet set) {

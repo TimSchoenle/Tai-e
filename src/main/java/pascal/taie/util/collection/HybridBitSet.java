@@ -168,11 +168,34 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
      * {@code null} when this set is small, dense or of another indexer
      */
     public long @Nullable [] toPackedLarge(Indexer<E> expectedIndexer) {
+        SparseBitSet sparse = largeSparseBits(expectedIndexer);
+        return sparse == null ? null : sparse.toPacked();
+    }
+
+    /**
+     * {@link #toPackedLarge} without a copy for a set that is packed
+     * already: a snapshot that shares its packed words.
+     *
+     * @return the snapshot of {@link SparseBitSet#packedSnapshot()}, or
+     * {@code null} when {@link #toPackedLarge} returns {@code null} or the
+     * sparse bit set of this set is not packed
+     */
+    public SparseBitSet.@Nullable PackedSnapshot packedLargeSnapshot(Indexer<E> expectedIndexer) {
+        SparseBitSet sparse = largeSparseBits(expectedIndexer);
+        return sparse == null ? null : sparse.packedSnapshot();
+    }
+
+    /**
+     * @return the sparse bit set of this set when it is a large sparse set
+     * of {@code expectedIndexer} (see {@link #toPackedLarge}), else
+     * {@code null}
+     */
+    private @Nullable SparseBitSet largeSparseBits(Indexer<E> expectedIndexer) {
         if (isLargeSet && isSparse && indexer == expectedIndexer
                 && set instanceof IndexerBitSet<E> bits
                 && bits.getContext() == expectedIndexer
                 && bits.bitSet instanceof SparseBitSet sparse) {
-            return sparse.toPacked();
+            return sparse;
         }
         return null;
     }
@@ -203,9 +226,24 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
      * large set flag included.
      */
     public static <E> HybridBitSet<E> ofPackedLarge(Indexer<E> indexer, long[] packed) {
+        return ofLargeSparse(indexer, SparseBitSet.ofPacked(packed));
+    }
+
+    /**
+     * Restores a large sparse set from the snapshot of
+     * {@link #packedLargeSnapshot}: the result equals what
+     * {@link #ofPackedLarge(Indexer, long[])} makes of the words of
+     * {@link #toPackedLarge} of the snapshotted set.
+     */
+    public static <E> HybridBitSet<E> ofPackedLarge(
+            Indexer<E> indexer, SparseBitSet.PackedSnapshot snapshot) {
+        return ofLargeSparse(indexer, SparseBitSet.ofSnapshot(snapshot));
+    }
+
+    private static <E> HybridBitSet<E> ofLargeSparse(Indexer<E> indexer, SparseBitSet sparse) {
         HybridBitSet<E> result = new HybridBitSet<>(indexer, true);
         IndexerBitSet<E> bits = new IndexerBitSet<>(indexer, true);
-        bits.bitSet = SparseBitSet.ofPacked(packed);
+        bits.bitSet = sparse;
         result.set = bits;
         result.isLargeSet = true;
         return result;

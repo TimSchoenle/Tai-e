@@ -29,9 +29,11 @@ import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.analysis.pta.pts.DelegatePointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.util.Indexer;
+import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.Sets;
 
@@ -45,6 +47,7 @@ import java.util.Random;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -186,9 +189,70 @@ class WorkListModelTest {
         assertEquals(3, workList.mergedEntries());
         assertEquals(1, workList.packs());
         assertEquals(1, workList.unpacks());
+        long[] words = factory.toPackedLarge(large);
+        assertNotNull(words);
         assertEquals("pending_pointers=0 pending_peak=3 new_entries=4"
-                + " merged_entries=3 packs=1 unpacks=1 shared_entries=0 shared_copies=0",
+                + " merged_entries=3 packs=1 unpacks=1 shared_entries=0 shared_copies=0"
+                + " packed_by_reference=0 packed_copy_bytes=" + words.length * Long.BYTES
+                + " packed_reference_bytes=0",
                 workList.countersLine());
+    }
+
+    /**
+     * A large set stored packed is taken by reference, not packed again;
+     * its words are never written: neither a merge into one holder, nor a
+     * change of the caller's set, nor a change of a polled delta alters the
+     * delta of another holder or a later restore of the same words.
+     */
+    @Test
+    void packedSetIsTakenByReferenceAndItsWordsAreNeverWritten() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet missing = factory.make();
+        missing.addObject(objects.get(1));
+        PointsToSet source = factory.make();
+        objects.forEach(source::addObject);
+        source.removeIf(o -> o == objects.get(1));
+        packStored(source);
+        List<CSObj> before = order(source);
+        List<CSObj> formBefore = formProbe(source);
+        long[] copiedWords = factory.toPackedLarge(source);
+        assertNotNull(copiedWords);
+        var snapshot = factory.packedLargeSnapshot(source);
+        assertNotNull(snapshot);
+        assertEquals(copiedWords.length, snapshot.length());
+        WorkList workList = new WorkList(factory, true);
+        workList.addEntry(a, source);
+        workList.addFanOutEntry(b, source);
+        workList.addFanOutEntry(c, source);
+        workList.endFanOut();
+        // c shares the snapshot b stored in the same fan-out
+        assertEquals(2, workList.packs());
+        assertEquals(2, workList.packedByReference());
+        assertEquals(1, workList.sharedEntries());
+        assertEquals(0, workList.packedCopyBytes());
+        assertEquals(2L * copiedWords.length * Long.BYTES, workList.packedReferenceBytes());
+        // a merge restores the delta of one holder and changes the restored set
+        workList.addEntry(a, missing);
+        assertEquals(1, workList.unpacks());
+        // the caller's set restores its blocks to change
+        source.removeIf(o -> o == objects.get(2));
+        assertSame(a, workList.pollPointer());
+        PointsToSet polled = workList.takePolledDelta();
+        assertEquals(objects, order(polled));
+        polled.removeIf(o -> true);
+        assertSame(b, workList.pollPointer());
+        PointsToSet polledB = workList.takePolledDelta();
+        assertEquals(before, order(polledB));
+        assertEquals(formBefore, formProbe(polledB));
+        polledB.removeIf(o -> true);
+        assertSame(c, workList.pollPointer());
+        assertEquals(before, order(workList.takePolledDelta()));
+        assertEquals(3, workList.unpacks());
+        assertEquals(before, order(factory.ofPackedLarge(snapshot)));
+        assertEquals(before, order(factory.ofPackedLarge(copiedWords)));
+        assertFalse(order(source).contains(objects.get(2)));
     }
 
     /**
@@ -413,6 +477,8 @@ class WorkListModelTest {
     private static int assertSequencesMatch(
             PointsToSetFactory factory, boolean packLarge, int pointerRange) {
         int maxPeak = 0;
+        long byReference = 0;
+        long copied = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
             WorkList workList = new WorkList(factory, packLarge);
@@ -445,6 +511,13 @@ class WorkListModelTest {
                 assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
             }
             maxPeak = Math.max(maxPeak, workList.pendingPeak());
+            byReference += workList.packedByReference();
+            copied += workList.packs() - workList.packedByReference();
+        }
+        if (packLarge) {
+            // both kinds of packs: packed sets taken by reference, others copied
+            assertTrue(byReference > 100, "packs by reference: " + byReference);
+            assertTrue(copied > 100, "packs by copy: " + copied);
         }
         return maxPeak;
     }
@@ -515,7 +588,21 @@ class WorkListModelTest {
         } else {
             set.removeIf(o -> random.nextInt(10) < 3);
         }
+        if (random.nextInt(3) == 0) {
+            // stored packed, as a shared set is
+            packStored(set);
+        }
         return set;
+    }
+
+    /**
+     * Stores a large set in its packed form, as a points-to set interner
+     * does with a set it shares.
+     */
+    private static void packStored(PointsToSet set) {
+        HybridBitSet<?> hybrid = (HybridBitSet<?>) ((DelegatePointsToSet) set).set;
+        hybrid.packLarge();
+        assertTrue(hybrid.isPackedLarge());
     }
 
     /**
