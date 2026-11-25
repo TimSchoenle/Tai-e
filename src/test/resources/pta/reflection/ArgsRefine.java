@@ -11,11 +11,12 @@ public class ArgsRefine {
         Method print = bClass.getMethod("print", paramTypes);
         B b = new B();
         print.invoke(b, new Object[]{"hello", "hello"});
+        // the argument count is the only filter (px/s115)
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
-                "<B: void print(java.lang.Object,java.lang.Object)>");
+                "<B: void print(java.lang.Object,java.lang.Object)>", "<B: void print(java.lang.Object,B)>");
         print.invoke(b, "hello", "hello");
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
-                "<B: void print(java.lang.Object,java.lang.Object)>");
+                "<B: void print(java.lang.Object,java.lang.Object)>", "<B: void print(java.lang.Object,B)>");
         Method printNoArg = bClass.getMethod("print");
         print.invoke(b);
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",

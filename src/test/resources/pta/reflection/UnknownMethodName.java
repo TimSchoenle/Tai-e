@@ -24,15 +24,21 @@ public class UnknownMethodName {
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
                 "<E: void oneArg(D)>", "<E: void oneArg(java.lang.Object)>", "<E: D oneArgRet(D)>",
                 "<D: void oneArg(E)>",
-                "<java.lang.Object: boolean equals(java.lang.Object)>");
+                "<java.lang.Object: boolean equals(java.lang.Object)>",
+                // the argument count is the only filter (px/s115)
+                "<E: void oneArg(java.lang.String)>", "<java.lang.Object: void wait(long)>");
     }
 
     static void invokeOneArgRet(String name, Class<?>[] paramTypes) throws Exception {
         Method oneArg = eClass().getMethod(name, paramTypes);
         E e = new E();
         D d = (D) oneArg.invoke(e, e); // <E: D oneArgRet(D)>
+        // the cast runs after the target: it rules no target out (px/s115)
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
-                "<E: D oneArgRet(D)>");
+                "<E: void oneArg(D)>", "<E: void oneArg(java.lang.Object)>", "<E: D oneArgRet(D)>",
+                "<D: void oneArg(E)>",
+                "<java.lang.Object: boolean equals(java.lang.Object)>",
+                "<E: void oneArg(java.lang.String)>", "<java.lang.Object: void wait(long)>");
         PTAAssert.contains(d, e);
     }
 
