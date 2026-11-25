@@ -301,6 +301,24 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
     }
 
     /**
+     * {@inheritDoc}
+     * The bit set of {@code diff} is reused when {@code c} and {@code diff}
+     * are bit sets of the context of this set whose bits the bit set of
+     * this set can write into it (see {@link IBitSet#orDiff(IBitSet, IBitSet)});
+     * a {@code diff} of another context is left unchanged.
+     */
+    @Override
+    public SetEx<E> addAllDiff(Collection<? extends E> c, SetEx<E> diff) {
+        if (c instanceof GenericBitSet<?> s && diff instanceof GenericBitSet<E> d
+                && d != this && d != s && getContext().equals(d.getContext())) {
+            checkContext(s);
+            d.bitSet = bitSet.orDiff(s.bitSet, d.bitSet);
+            return d;
+        }
+        return addAllDiff(c);
+    }
+
+    /**
      * Brings a memo of a predicate up to date for the elements of this set,
      * and counts the elements of this set that the memo accepts: each
      * element of this set that is not in {@code known} is tested once, in

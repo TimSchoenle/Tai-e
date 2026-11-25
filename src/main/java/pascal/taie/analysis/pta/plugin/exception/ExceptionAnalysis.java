@@ -85,6 +85,13 @@ public class ExceptionAnalysis implements Plugin {
     private Supplier<SetEx<CSObj>> setFactory;
 
     /**
+     * Receives the exceptions new to a statement or call site, so that a
+     * propagation allocates no set for them: they are read only until the
+     * propagation that computed them ends (by {@link #handleNew}).
+     */
+    private SetEx<CSObj> newExceptions;
+
+    /**
      * Whether only application methods are analyzed (option only-app).
      */
     private boolean onlyApp;
@@ -288,6 +295,7 @@ public class ExceptionAnalysis implements Plugin {
         // follows the number of exception objects, not the global indexes
         this.exceptionIndexer = new ExceptionObjIndexer();
         this.setFactory = () -> new IndexerBitSet<>(exceptionIndexer, isSparse);
+        this.newExceptions = setFactory.get();
         this.onlyApp = solver.getOptions().getBoolean("only-app");
         this.progress = solver.getProgressCounters();
         this.emptyDiffs = 0;
@@ -539,7 +547,8 @@ public class ExceptionAnalysis implements Plugin {
         }
         CSMethodThrowResult result = throwResultOf(csMethod);
         ++mapProbes;
-        handleNew(csMethod, result, stmt, result.propagate(stmt, exceptions));
+        handleNew(csMethod, result, stmt,
+                result.propagate(stmt, exceptions, newExceptions));
     }
 
     /**
@@ -556,7 +565,7 @@ public class ExceptionAnalysis implements Plugin {
         }
         CSMethodThrowResult result = throwResultOf(csMethod);
         return handleNew(csMethod, result, callSite.getCallSite(),
-                result.propagate(callSite, exceptions));
+                result.propagate(callSite, exceptions, newExceptions));
     }
 
     /**
@@ -736,5 +745,6 @@ public class ExceptionAnalysis implements Plugin {
         var2Throws = null;
         catchers = null;
         workList = null;
+        newExceptions = null;
     }
 }

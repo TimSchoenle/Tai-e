@@ -95,10 +95,14 @@ public class CSMethodThrowResult {
      * this result's method, may throw; the set lives on the call site, so
      * that a later visit reads it without a map probe.
      *
-     * @return the exceptions that are new to the call site; a shared
-     * empty set when none is new
+     * @param scratch a set of this result's factory that may be
+     *                overwritten; no set of a throw result
+     * @return the exceptions that are new to the call site: a shared
+     * empty set when none is new, else possibly {@code scratch}, so the
+     * caller must not keep it past the next use of {@code scratch}
      */
-    Set<CSObj> propagate(CSCallSite callSite, Set<CSObj> exceptions) {
+    Set<CSObj> propagate(CSCallSite callSite, Set<CSObj> exceptions,
+                         SetEx<CSObj> scratch) {
         SetEx<CSObj> thrown = callSite.getThrownExceptions();
         if (thrown == null) {
             thrown = setFactory.get();
@@ -107,16 +111,18 @@ public class CSMethodThrowResult {
         } else if (thrown.containsAll(exceptions)) {
             return Set.of();
         }
-        return thrown.addAllDiff(exceptions);
+        return thrown.addAllDiff(exceptions, scratch);
     }
 
     /**
      * Adds the exceptions to those that {@code stmt} may throw.
      *
-     * @return the exceptions that are new to {@code stmt}; a shared empty
-     * set when none is new
+     * @param scratch as for {@link #propagate(CSCallSite, Set, SetEx)}
+     * @return the exceptions that are new to {@code stmt}: a shared empty
+     * set when none is new, else possibly {@code scratch}, so the caller
+     * must not keep it past the next use of {@code scratch}
      */
-    Set<CSObj> propagate(Stmt stmt, Set<CSObj> exceptions) {
+    Set<CSObj> propagate(Stmt stmt, Set<CSObj> exceptions, SetEx<CSObj> scratch) {
         SetEx<CSObj> thrown = explicitExceptions.get(stmt);
         if (thrown == null) {
             thrown = setFactory.get();
@@ -124,12 +130,12 @@ public class CSMethodThrowResult {
         } else if (thrown.containsAll(exceptions)) {
             return Set.of();
         }
-        return thrown.addAllDiff(exceptions);
+        return thrown.addAllDiff(exceptions, scratch);
     }
 
     /**
      * @return whether {@code callSite} already may throw all
-     * {@code exceptions} (its set from {@link #propagate(CSCallSite, Set)});
+     * {@code exceptions} (its set from {@link #propagate(CSCallSite, Set, SetEx)});
      * changes no element (a sparse set may drop all-zero blocks), so
      * threads may call it while nothing adds to that set.
      */

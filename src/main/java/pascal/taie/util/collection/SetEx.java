@@ -44,6 +44,21 @@ public interface SetEx<E> extends Set<E>, Copyable<SetEx<E>> {
     SetEx<E> addAllDiff(Collection<? extends E> c);
 
     /**
+     * Same as {@link #addAllDiff(Collection)}, but may reuse {@code diff}
+     * for the result instead of allocating a new set. Either way
+     * {@code diff} must no longer be used except through the returned set.
+     *
+     * @param c    the elements to add
+     * @param diff a set that may be cleared and overwritten; neither this
+     *             set nor {@code c}
+     * @return a set of elements that are contained in {@code c} but
+     * not in this set before the call: {@code diff} or a new set.
+     */
+    default SetEx<E> addAllDiff(Collection<? extends E> c, SetEx<E> diff) {
+        return addAllDiff(c);
+    }
+
+    /**
      * @return {@code true} if this set has at least one element
      * contained in the given set.
      */
