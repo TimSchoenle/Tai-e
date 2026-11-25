@@ -920,6 +920,97 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
+     * With a sparse pass set this works on words: per word of this set,
+     * only the bits set in the mask are tested, and the accepted bits are
+     * counted with {@link Long#bitCount}.
+     */
+    @Override
+    public int updateMemoAndCount(long[] untested, IBitSet pass, IntPredicate test) {
+        if (!(pass instanceof SparseBitSet p)) {
+            return super.updateMemoAndCount(untested, pass, test);
+        }
+        checkPassSet(pass);
+        p.unpack();
+        int count = 0;
+        long[] words = packed;
+        if (words != null) {
+            // a packed set (a shared one) is read in place; its headers are
+            // in ascending block order, the order of the blocks below
+            int blocks = packedBlocks;
+            for (int h = 0; h < blocks; ++h) {
+                long header = words[h];
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                count += updateUntestedAndCountBlock(words, blocks + packedRank(header),
+                        packedMask(header), blockIndex >> LEVEL2, blockIndex & MASK2,
+                        untested, p, test);
+            }
+            return count;
+        }
+        long[][][] selfTable = table;
+        for (int w1 = 0; w1 < selfTable.length; ++w1) {
+            long[][] area = selfTable[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block != null) {
+                    count += updateUntestedAndCountBlock(block, 0, PACKED_MASK, w1, w2,
+                            untested, p, test);
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * {@link #updateMemoAndCount(long[], IBitSet, IntPredicate)} for the
+     * block {@code (w1, w2)} of a set: its words are {@code words[at..]},
+     * one per set bit of {@code mask}, in ascending word order (a block
+     * with blocks: {@code at} 0 and every bit of the mask set).
+     *
+     * @return the number of bits of the block that are in {@code p}
+     */
+    private static int updateUntestedAndCountBlock(long[] words, int at, int mask, int w1, int w2,
+                                                   long[] untested, SparseBitSet p,
+                                                   IntPredicate test) {
+        long[] passBlock = getBlock(p.table, w1, w2);
+        int firstWord = wordIndex(w1, w2, 0);
+        int count = 0;
+        int next = at;
+        for (int w3 = 0; w3 < LENGTH3; ++w3) {
+            if ((mask & (1 << w3)) == 0) {
+                continue;
+            }
+            long word = words[next++];
+            if (word == 0) {
+                continue;
+            }
+            int wordIndex = firstWord + w3;
+            long unknown = wordIndex < untested.length ? word & untested[wordIndex] : 0;
+            if (unknown != 0) {
+                // tested before they are cleared: a throwing test
+                // leaves the bits of this word untested
+                long accepted = testBits(unknown, bitIndex(w1, w2, w3), test);
+                untested[wordIndex] &= ~unknown;
+                if (accepted != 0) {
+                    if (passBlock == null) {
+                        passBlock = p.getOrCreateBlock(w1, w2);
+                    }
+                    passBlock[w3] |= accepted;
+                    p.invalidateState();
+                }
+            }
+            if (passBlock != null) {
+                count += Long.bitCount(word & passBlock[w3]);
+            }
+        }
+        return count;
+    }
+
+    /**
      * @return the bits of {@code word} whose indexes (from {@code base})
      * the predicate accepts, testing them in ascending order.
      */

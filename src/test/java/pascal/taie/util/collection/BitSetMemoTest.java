@@ -25,6 +25,7 @@ package pascal.taie.util.collection;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Random;
@@ -158,6 +159,64 @@ class BitSetMemoTest {
             assertEquals(inModel, toModel(known));
             assertFalse(pass.get(failing));
         }
+    }
+
+    /**
+     * {@link IBitSet#updateMemoAndCount(long[], IBitSet,
+     * java.util.function.IntPredicate)}
+     * against a {@link BitSet} model: only the input bits in the mask are
+     * tested, in ascending order, and cleared in it; mask words beyond the
+     * array (cut at a random word) count as tested.
+     */
+    @Test
+    void untestedMaskAgreesWithModel() {
+        List<List<Supplier<IBitSet>>> kinds = List.of(
+                List.of(SparseBitSet::new, SparseBitSet::new),
+                List.of(SparseBitSet::new, RegularBitSet::new),
+                List.of(RegularBitSet::new, SparseBitSet::new));
+        Random random = new Random(4);
+        for (int trial = 0; trial < TRIALS; ++trial) {
+            List<Supplier<IBitSet>> kind = kinds.get(trial % kinds.size());
+            int[] range = RANGES[random.nextInt(RANGES.length)];
+            BitSet inModel = randomBits(random, range);
+            BitSet untestedModel = randomBits(random, range);
+            long[] words = untestedModel.toLongArray();
+            long[] untested = Arrays.copyOf(words, random.nextInt(words.length + 1));
+            untestedModel = BitSet.valueOf(untested);
+            BitSet passModel = randomBits(random, range);
+            BitSet accept = randomBits(random, range);
+            IBitSet in = of(kind.get(0), inModel);
+            IBitSet pass = of(kind.get(1), passModel);
+            assertEquals(passModel.cardinality(), pass.cardinality(), "pass size before, trial " + trial);
+
+            List<Integer> tested = new ArrayList<>();
+            int count = in.updateMemoAndCount(untested, pass, i -> {
+                tested.add(i);
+                return accept.get(i);
+            });
+
+            BitSet wantTested = (BitSet) inModel.clone();
+            wantTested.and(untestedModel);
+            List<Integer> wantOrder = new ArrayList<>();
+            wantTested.stream().forEach(wantOrder::add);
+            for (int i : wantOrder) {
+                untestedModel.clear(i);
+                if (accept.get(i)) {
+                    passModel.set(i);
+                }
+            }
+            BitSet passing = (BitSet) inModel.clone();
+            passing.and(passModel);
+            assertEquals(wantOrder, tested, "tested bits, trial " + trial);
+            assertEquals(passing.cardinality(), count, "count, trial " + trial);
+            assertEquals(untestedModel, BitSet.valueOf(untested), "untested, trial " + trial);
+            assertEquals(passModel, toModel(pass), "pass, trial " + trial);
+            assertEquals(passModel.cardinality(), pass.cardinality(), "pass size, trial " + trial);
+            assertEquals(inModel, toModel(in), "input unchanged, trial " + trial);
+        }
+        IBitSet same = new SparseBitSet();
+        assertThrows(IllegalArgumentException.class,
+                () -> same.updateMemoAndCount(new long[1], same, i -> true));
     }
 
     @Test

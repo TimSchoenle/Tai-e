@@ -287,6 +287,29 @@ public interface IBitSet extends Copyable<IBitSet>, Serializable {
     int updateMemoAndCount(IBitSet known, IBitSet pass, IntPredicate test);
 
     /**
+     * Like {@link #updateMemoAndCount(IBitSet, IBitSet, IntPredicate)}, with
+     * the untested bits given as a mask instead of the tested ones as a set:
+     * bit {@code i} is untested if it is set in word {@code i / 64} of
+     * {@code untested}; the caller guarantees that every other bit of this
+     * set was tested already (and is in {@code pass} if it was accepted).
+     * Each bit of this set that is untested is tested once, in ascending
+     * order, cleared in {@code untested} after its test returned, and set
+     * in {@code pass} if the predicate accepts it. This set is not changed.
+     * If the predicate throws, that bit and every later bit stay untested
+     * (an implementation may also leave a few earlier bits untested).
+     *
+     * @param untested the untested bits, a word per 64 bits from bit 0;
+     *                 bits beyond its words are tested already
+     * @param pass     the tested bits that were accepted
+     * @param test     the predicate; it must not change this set or
+     *                 {@code pass}
+     * @return the number of bits of this set that are in {@code pass}
+     * after the update
+     * @throws IllegalArgumentException if {@code pass} is this set
+     */
+    int updateMemoAndCount(long[] untested, IBitSet pass, IntPredicate test);
+
+    /**
      * Performs the action on every bit that is set in both this set and
      * the given set, in ascending order. Neither set is changed.
      *

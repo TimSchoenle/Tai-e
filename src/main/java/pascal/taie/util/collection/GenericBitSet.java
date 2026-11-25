@@ -313,6 +313,54 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
     }
 
     /**
+     * Like {@link #updateMemoAndCountByIndex(GenericBitSet, GenericBitSet,
+     * IntPredicate)}, with the untested element indexes given as a word
+     * mask; see {@link IBitSet#updateMemoAndCount(long[], IBitSet,
+     * IntPredicate)}.
+     *
+     * @param untested the untested element indexes, a word per 64 indexes
+     *                 from index 0; the other elements of this set must be
+     *                 tested already
+     * @param pass     the tested elements that were accepted
+     * @param test     the predicate on element indexes; it must not change
+     *                 this set or {@code pass}
+     * @return the number of elements of this set that are in {@code pass}
+     * after the update
+     */
+    public int updateMemoAndCountByIndex(long[] untested, GenericBitSet<E> pass,
+                                         IntPredicate test) {
+        checkContext(pass);
+        return bitSet.updateMemoAndCount(untested, pass.bitSet, test);
+    }
+
+    /**
+     * Adds the element of an index without looking the element up.
+     *
+     * @param index the index of the element (see {@link #getIndex}); it
+     *              must be the index of an existing element
+     * @return {@code true} if this set did not contain the element
+     */
+    public boolean addIndex(int index) {
+        return bitSet.set(index);
+    }
+
+    /**
+     * @param index an element index (see {@link #getIndex})
+     * @return {@code true} if this set contains the element of the index
+     */
+    public boolean containsIndex(int index) {
+        return bitSet.get(index);
+    }
+
+    /**
+     * @return the highest element index in this set plus one, or 0 if this
+     * set is empty.
+     */
+    public int indexLength() {
+        return bitSet.length();
+    }
+
+    /**
      * Performs the action on every element that is in both this set and
      * the given set, in the iteration order of this set. Neither set is
      * changed.

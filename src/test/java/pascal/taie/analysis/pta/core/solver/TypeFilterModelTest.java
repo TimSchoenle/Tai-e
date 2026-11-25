@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import pascal.taie.Main;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.DelegatePointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSet;
@@ -132,6 +133,66 @@ class TypeFilterModelTest {
             probeTypeIdsBeyondFirstWord(types, objects, true);
             probeTypeIdsBeyondFirstWord(types, objects, false);
             probeNoObjectLookupForKnownTypes(types, objects);
+            probeMemoBitsPerObject(types, objects);
+            // last: it adds an object to the solver
+            probeLateObjectBelowCheckedIndexes(types, objects);
+        }
+
+        /**
+         * Filters all objects in one bit set with java.lang.Object, which
+         * every object passes: the memo holds one bit per passing object,
+         * and none per checked object.
+         */
+        private void probeMemoBitsPerObject(TypeSystem types, List<CSObj> objects) {
+            PointsToSet all = solver.makePointsToSet();
+            objects.forEach(all::addObject);
+            TypeFilter.clearMemos();
+            new TypeFilter(types.getClassType("java.lang.Object"), solver).apply(null, all);
+            long bits = TypeFilter.memoBits();
+            if (bits != objects.size()) {
+                FAILURES.add("memo bits after filtering " + objects.size()
+                        + " passing objects: " + bits);
+            }
+            TypeFilter.clearMemos();
+        }
+
+        /**
+         * Creates an object after two guards' memos went over all objects:
+         * as a throwable it takes a free index of the range reserved for
+         * throwables, below the indexes of the other objects. A bit set
+         * holding it and all other objects is filtered right, both by the
+         * guard that it passes and by the guard that it fails.
+         */
+        private void probeLateObjectBelowCheckedIndexes(TypeSystem types, List<CSObj> objects) {
+            Type throwable = types.getClassType("java.lang.Throwable");
+            Type failing = types.getClassType("A");
+            if (throwable == null || failing == null) {
+                FAILURES.add("no class type java.lang.Throwable or A");
+                return;
+            }
+            int maxIndex = objects.stream().mapToInt(CSObj::getIndex).max().orElseThrow();
+            PointsToSet all = solver.makePointsToSet();
+            objects.forEach(all::addObject);
+            TypeFilter.clearMemos();
+            new TypeFilter(throwable, solver).apply(null, all);
+            new TypeFilter(failing, solver).apply(null, all);
+            Obj mock = solver.getHeapModel().getMockObj(
+                    () -> "TypeFilterModelTest", "late throwable", throwable);
+            CSObj late = solver.getCSManager().getCSObj(
+                    solver.getContextSelector().getEmptyContext(), mock);
+            if (late.getIndex() >= maxIndex || objects.contains(late)) {
+                FAILURES.add("the late object " + late + " has index " + late.getIndex()
+                        + ", not below the highest index " + maxIndex);
+            }
+            PointsToSet withLate = all.copy();
+            withLate.addObject(late);
+            if (!new TypeFilter(throwable, solver).apply(null, withLate).contains(late)) {
+                FAILURES.add("the late throwable failed java.lang.Throwable");
+            }
+            if (new TypeFilter(failing, solver).apply(null, withLate).contains(late)) {
+                FAILURES.add("the late throwable passed A");
+            }
+            TypeFilter.clearMemos();
         }
 
         /**
@@ -256,8 +317,12 @@ class TypeFilterModelTest {
 
                 @Override
                 public CSObj getObject(int index) {
-                    lookups[0]++;
-                    return real.getObject(index);
+                    // a free index (no object to read) is not counted
+                    CSObj o = real.getObject(index);
+                    if (o != null) {
+                        lookups[0]++;
+                    }
+                    return o;
                 }
             };
             PointsToSetFactory factory = new PointsToSetFactory(counting);

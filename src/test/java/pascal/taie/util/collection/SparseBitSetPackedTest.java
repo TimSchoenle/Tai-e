@@ -236,6 +236,50 @@ class SparseBitSetPackedTest {
         }
     }
 
+    /**
+     * The untested-mask read of a type filter,
+     * {@link SparseBitSet#updateMemoAndCount(long[], IBitSet, java.util.function.IntPredicate)},
+     * on a packed set: the same tests in the same order, the same mask, pass
+     * set and count as the model, and the packed set stays packed.
+     */
+    @Test
+    void untestedMaskReadOfAPackedSetMatchesTheModelAndKeepsItPacked() {
+        Random random = new Random(0x7e2fL);
+        for (int sequence = 0; sequence < SEQUENCES; sequence++) {
+            int range = RANGES[sequence % RANGES.length];
+            long seed = random.nextLong();
+            SparseBitSet model = randomSet(new Random(seed), range);
+            SparseBitSet packed = randomSet(new Random(seed), range);
+            model.hashCode();
+            packed.pack();
+            String at = "sequence " + sequence;
+
+            // a mask shorter than the range leaves the high words tested
+            long[] modelUntested = new long[random.nextInt(range / Long.SIZE + 2)];
+            for (int w = 0; w < modelUntested.length; w++) {
+                modelUntested[w] = random.nextLong();
+            }
+            long[] untested = modelUntested.clone();
+            long passSeed = random.nextLong();
+            SparseBitSet modelPass = randomSet(new Random(passSeed), range);
+            SparseBitSet pass = randomSet(new Random(passSeed), range);
+            int salt = random.nextInt();
+            List<Integer> modelTests = new ArrayList<>();
+            List<Integer> tests = new ArrayList<>();
+            int modelCount = model.updateMemoAndCount(modelUntested, modelPass,
+                    i -> modelTests.add(i) && Integer.bitCount(i ^ salt) % 3 != 0);
+            int count = packed.updateMemoAndCount(untested, pass,
+                    i -> tests.add(i) && Integer.bitCount(i ^ salt) % 3 != 0);
+            assertEquals(modelCount, count, at);
+            assertEquals(modelTests, tests, at);
+            assertArrayEquals(modelUntested, untested, at);
+            assertEquals(bits(modelPass), bits(pass), at);
+            assertSameState(modelPass, pass, at);
+            assertTrue(packed.isPacked(), at + ": updateMemoAndCount restored the blocks");
+            assertEquals(bits(model), bits(packed), at);
+        }
+    }
+
     @Test
     void changesOfAPackedSetMatchTheModel() {
         Random random = new Random(0x51d2L);
