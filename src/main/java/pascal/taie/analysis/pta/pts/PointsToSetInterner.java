@@ -32,11 +32,11 @@ import pascal.taie.util.collection.SparseBitSet;
  * A pointer holds a shared set; a change of its points-to set builds the
  * new set on a copy, or in place when no other pointer holds the set, and
  * replaces the held set by the shared set equal to the result. A large set
- * held by several pointers that takes a large set first looks for the
- * result in the table and takes it from there without a copy; so does the
- * empty set that takes a large set, which returns the shared result as the
- * difference. Two sets are
- * equal here when they have the same form
+ * held by several pointers that takes a large, small or singleton set first
+ * looks for the result in the table and takes it from there without a copy;
+ * so does the empty set that takes a large set, which returns the shared
+ * result as the difference. Two sets are equal here when they have the same
+ * form
  * (empty, singleton, small or large) and the same elements in iteration
  * order, so sharing never changes the iteration order of a pointer's set.
  * <p>
@@ -84,6 +84,14 @@ public final class PointsToSetInterner {
     private long probes;
 
     private long probeHits;
+
+    /**
+     * The same as {@link #probes} and {@link #probeHits} for a large set
+     * held by two or more pointers, changed by a singleton or small set.
+     */
+    private long smallProbes;
+
+    private long smallProbeHits;
 
     /**
      * Changes of the empty set by a large set that took the shared set
@@ -165,10 +173,19 @@ public final class PointsToSetInterner {
         if (held instanceof DelegatePointsToSet shared && shared.holders >= 2) {
             DelegatePointsToSet delta = asDelegate(pts);
             if (shared.canSummarizeUnion(delta)) {
-                ++probes;
+                boolean small = !delta.isLarge();
+                if (small) {
+                    ++smallProbes;
+                } else {
+                    ++probes;
+                }
                 DelegatePointsToSet found = findUnion(shared, delta);
                 if (found != null) {
-                    ++probeHits;
+                    if (small) {
+                        ++smallProbeHits;
+                    } else {
+                        ++probeHits;
+                    }
                     PointsToSet diff = shared.unionDiff(delta);
                     hold(found);
                     release(shared);
@@ -235,8 +252,9 @@ public final class PointsToSetInterner {
     /**
      * Probes the table for the set that {@code held.addAllDiff(pts)} would
      * make of a copy of {@code held}, without building it: its hash comes
-     * from the state of {@code held} and one pass over the words of
-     * {@code pts}; requires {@code held.canSummarizeUnion(pts)}.
+     * from the state of {@code held} and one pass over the words of a large
+     * {@code pts}, or over the elements of a small one; requires
+     * {@code held.canSummarizeUnion(pts)}.
      *
      * @return the shared set equal to that set, or null if the table holds
      * none
@@ -335,7 +353,8 @@ public final class PointsToSetInterner {
      */
     public Counters counters() {
         return new Counters(unsharedWrites, soleWrites, twoHolderWrites,
-                manyHolderWrites, copies, copyHits, probes, probeHits, adoptions);
+                manyHolderWrites, copies, copyHits, probes, probeHits, adoptions,
+                smallProbes, smallProbeHits);
     }
 
     /**
@@ -359,11 +378,17 @@ public final class PointsToSetInterner {
      * @param adoptions        changes of the empty set by a large set that
      *                         took the shared set equal to that set, and
      *                         returned it as the difference, without a copy
+     * @param smallProbes      changes of a large set held by two or more,
+     *                         by a singleton or small set, that probed the
+     *                         table for the result before copying
+     * @param smallProbeHits   small probes that found the result shared,
+     *                         and took it without a copy
      */
     public record Counters(long unsharedWrites, long soleWrites,
                            long twoHolderWrites, long manyHolderWrites,
                            long copies, long copyHits,
-                           long probes, long probeHits, long adoptions) {
+                           long probes, long probeHits, long adoptions,
+                           long smallProbes, long smallProbeHits) {
     }
 
     private static DelegatePointsToSet asDelegate(PointsToSet set) {

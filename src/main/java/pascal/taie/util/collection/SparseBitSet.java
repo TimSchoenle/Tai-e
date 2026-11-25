@@ -1220,6 +1220,45 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * Reads what {@link #set(int) set} of each of {@code bitIndexes} would
+     * make of this set without changing it: one pass over the given bits,
+     * starting from the state of this set. An index may repeat or name a bit
+     * this set holds already.
+     *
+     * @return the {@link #hashCode()} of the result in the low 32 bits and
+     * its {@link #cardinality()} in the high 32 bits, as {@link #orSummary}
+     * @throws IndexOutOfBoundsException if an index is negative or
+     *                                   {@link Integer#MAX_VALUE}, which
+     *                                   {@link #set(int)} refuses too
+     */
+    public long setSummary(int[] bitIndexes) {
+        updateState();
+        long rawHash = state.rawHash;
+        int cardinality = state.cardinality;
+        for (int i = 0; i < bitIndexes.length; ++i) {
+            int bitIndex = bitIndexes[i];
+            if ((bitIndex + 1) < 1) {
+                throw new IndexOutOfBoundsException("bitIndex=" + bitIndex);
+            }
+            int index = wordIndex(bitIndex);
+            long selfWord = wordAt(index);
+            // the word as the bits before this one in the same word left it
+            for (int j = 0; j < i; ++j) {
+                if (wordIndex(bitIndexes[j]) == index) {
+                    selfWord |= 1L << bitIndexes[j];
+                }
+            }
+            long newWord = selfWord | (1L << bitIndex);
+            if (newWord != selfWord) {
+                long weight = index + 1;
+                rawHash ^= (selfWord * weight) ^ (newWord * weight);
+                ++cardinality;
+            }
+        }
+        return ((long) cardinality << Integer.SIZE) | (State.fold(rawHash) & 0xFFFFFFFFL);
+    }
+
+    /**
      * @return the hash code of the union in a result of {@link #orSummary}.
      */
     public static int unionHash(long summary) {

@@ -259,6 +259,32 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
     }
 
     /**
+     * @return true if this set keeps its bits in a {@link SparseBitSet}, so
+     * that {@link #addSummary} applies.
+     */
+    public boolean isSparse() {
+        return bitSet instanceof SparseBitSet;
+    }
+
+    /**
+     * Reads what adding each of {@code elements} in turn would make of this
+     * set without changing it; requires {@link #isSparse()}.
+     *
+     * @return the {@link #hashCode()} of the result in the low 32 bits and
+     * its size in the high 32 bits, as {@link #unionSummary}
+     */
+    public long addSummary(Collection<? extends E> elements) {
+        int[] indexes = new int[elements.size()];
+        int i = 0;
+        for (E e : elements) {
+            indexes[i++] = getIndex(e);
+        }
+        long bits = ((SparseBitSet) bitSet).setSummary(indexes);
+        int hash = hash(getContext(), SparseBitSet.unionHash(bits));
+        return (bits & 0xFFFFFFFF00000000L) | (hash & 0xFFFFFFFFL);
+    }
+
+    /**
      * @return a new set of this context holding the elements that
      * {@code addAll(other)} would add to this set; requires
      * {@link #isSparseWith isSparseWith(other)}. Neither set changes.

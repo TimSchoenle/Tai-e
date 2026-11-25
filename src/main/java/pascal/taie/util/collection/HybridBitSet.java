@@ -269,31 +269,42 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
-     * @return true if this set and {@code c} are both in the large form, of
-     * the same indexer, with their bits in sparse bit sets of the same
-     * context: the case in which {@link #unionSummary}, {@link #isUnionOf}
-     * and {@link #unionDiff} read {@link #addAllDiff addAllDiff(c)} without
-     * changing this set.
+     * @return true if this set is in the large form with its bits in a
+     * sparse bit set, and {@code c} is a set of the same indexer that is
+     * either in the large form with its bits in a sparse bit set of the same
+     * context, or a singleton or small set: the case in which
+     * {@link #unionSummary}, {@link #isUnionOf} and {@link #unionDiff} read
+     * {@link #addAllDiff addAllDiff(c)} without changing this set.
      */
     public boolean canSummarizeUnion(HybridBitSet<?> c) {
-        return form() == FORM_LARGE && c.form() == FORM_LARGE && indexer == c.indexer
-                && set instanceof GenericBitSet<E> bits
-                && c.set instanceof GenericBitSet<?> other
-                && bits.isSparseWith(other);
+        if (form() != FORM_LARGE || indexer != c.indexer
+                || !(set instanceof GenericBitSet<E> bits)) {
+            return false;
+        }
+        int cForm = c.form();
+        if (cForm == FORM_LARGE) {
+            return c.set instanceof GenericBitSet<?> other && bits.isSparseWith(other);
+        }
+        // addAllDiff takes the branch of a small c by its large set flag
+        return !c.isLargeSet && cForm != FORM_EMPTY && bits.isSparse();
     }
 
     /**
      * Reads the set that {@link #addAllDiff addAllDiff(c)} would make of
-     * this set, without changing it; requires
-     * {@link #canSummarizeUnion canSummarizeUnion(c)}.
+     * this set, without changing it: from the state of this set and one
+     * pass over the words of a large {@code c}, or over the elements of a
+     * small one; requires {@link #canSummarizeUnion canSummarizeUnion(c)}.
      *
      * @return the {@link #sequenceHash()} of that set and its size, in the
      * format of {@link SparseBitSet#orSummary}
      */
     public long unionSummary(HybridBitSet<?> c) {
-        long bits = ((GenericBitSet<E>) set).unionSummary((GenericBitSet<?>) c.set);
-        int hash = largeSequenceHash(SparseBitSet.unionHash(bits));
-        return (bits & 0xFFFFFFFF00000000L) | (hash & 0xFFFFFFFFL);
+        GenericBitSet<E> bits = (GenericBitSet<E>) set;
+        long summary = c.isLargeSet
+                ? bits.unionSummary((GenericBitSet<?>) c.set)
+                : bits.addSummary((HybridBitSet<? extends E>) c);
+        int hash = largeSequenceHash(SparseBitSet.unionHash(summary));
+        return (summary & 0xFFFFFFFF00000000L) | (hash & 0xFFFFFFFFL);
     }
 
     /**
@@ -309,7 +320,7 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
                 && bits.isSparseWith((GenericBitSet<?>) a.set)
                 && bits.size() == SparseBitSet.unionCardinality(summary)
                 && bits.containsAll(a.set)
-                && bits.containsAll(b.set);
+                && (b.isLargeSet ? bits.containsAll(b.set) : bits.containsAll(b));
     }
 
     /**
@@ -319,8 +330,18 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
      */
     public HybridBitSet<E> unionDiff(HybridBitSet<? extends E> c) {
         HybridBitSet<E> diff = new HybridBitSet<>(indexer, isSparse);
-        diff.set = ((GenericBitSet<E>) set).addedBy((GenericBitSet<?>) c.set);
-        diff.isLargeSet = true;
+        if (c.isLargeSet) {
+            diff.set = ((GenericBitSet<E>) set).addedBy((GenericBitSet<?>) c.set);
+            diff.isLargeSet = true;
+        } else {
+            // addAllDiff adds each element of a small c that this large set
+            // lacks to the difference, in the iteration order of c
+            for (E e : c) {
+                if (!set.contains(e)) {
+                    diff.add(e);
+                }
+            }
+        }
         return diff;
     }
 
