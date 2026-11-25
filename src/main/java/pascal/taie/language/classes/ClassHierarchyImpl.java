@@ -100,6 +100,24 @@ public class ClassHierarchyImpl implements ClassHierarchy {
     private final TwoKeyMap<JClass, Subsignature, Object> dispatchTable = Maps.newTwoKeyMap();
 
     /**
+     * Final answers of {@link #dispatch(JClass, MethodRef)} per receiver class and method reference: the
+     * dispatched {@link JMethod}, or {@link #DISPATCH_MISS} for a null answer (a failed subclass check or a
+     * lookup that found no method). An answer depends only on the receiver class, the reference's declaring
+     * class (the subclass check) and its subsignature ({@link #dispatchTable}), all part of the key.
+     * {@link #addClass} and the class loader setters clear it, as a new class or loader can change the answer of
+     * a subclass check. Not serialized (a pure cache keyed by content-hashed references); null until the first
+     * dispatch after construction or deserialization.
+     */
+    private transient @Nullable Map<JClass, Map<MethodRef, Object>> dispatchAnswers;
+
+    /**
+     * The receiver class of an array type in {@link #dispatch(Type, MethodRef)}: the bootstrap loader's
+     * {@code java.lang.Object}, kept once that loader found it. Null until then and after
+     * {@link #setBootstrapClassLoader}.
+     */
+    private transient @Nullable JClass arrayReceiverClass;
+
+    /**
      * Cache results of {@link #getAllSubclassesOf(JClass)}.
      */
     private final Map<JClass, Set<JClass>> allSubclasses = Maps.newConcurrentMap();
@@ -123,6 +141,7 @@ public class ClassHierarchyImpl implements ClassHierarchy {
     public void setDefaultClassLoader(JClassLoader loader) {
         this.defaultLoader = loader;
         loaders.put("default", loader);
+        dispatchAnswers = null;
     }
 
     @Override
@@ -134,6 +153,8 @@ public class ClassHierarchyImpl implements ClassHierarchy {
     public void setBootstrapClassLoader(JClassLoader loader) {
         this.bootstrapLoader = loader;
         loaders.put("bootstrap", loader);
+        arrayReceiverClass = null;
+        dispatchAnswers = null;
     }
 
     @Override
@@ -179,6 +200,7 @@ public class ClassHierarchyImpl implements ClassHierarchy {
         // TODO - make this elegant
         allSubclasses.clear();
         subtypeIndex = null;
+        dispatchAnswers = null;
     }
 
     @Override
@@ -338,7 +360,7 @@ public class ClassHierarchyImpl implements ClassHierarchy {
         if (receiverType instanceof ClassType) {
             cls = ((ClassType) receiverType).getJClass();
         } else if (receiverType instanceof ArrayType) {
-            cls = getJREClass(ClassNames.OBJECT);
+            cls = arrayReceiverClass();
         } else {
             logger.warn("{} cannot be dispatched", receiverType);
             return null;
@@ -346,8 +368,40 @@ public class ClassHierarchyImpl implements ClassHierarchy {
         return dispatch(cls, methodRef);
     }
 
+    private @Nullable JClass arrayReceiverClass() {
+        JClass object = arrayReceiverClass;
+        if (object == null) {
+            object = getJREClass(ClassNames.OBJECT);
+            arrayReceiverClass = object;
+        }
+        return object;
+    }
+
     @Override
     public @Nullable JMethod dispatch(JClass receiverClass, MethodRef methodRef) {
+        Map<JClass, Map<MethodRef, Object>> all = dispatchAnswers;
+        Map<MethodRef, Object> answers = all == null ? null : all.get(receiverClass);
+        Object answer = answers == null ? null : answers.get(methodRef);
+        if (answer != null) {
+            return answer == DISPATCH_MISS ? null : (JMethod) answer;
+        }
+        JMethod target = dispatchUncached(receiverClass, methodRef);
+        // read the field again: a lazily loading class loader may have added a class during the lookup, before
+        // the subclass check read the hierarchy, so the answer is current and goes into a fresh map
+        all = dispatchAnswers;
+        if (all == null) {
+            all = Maps.newMap();
+            dispatchAnswers = all;
+        }
+        all.computeIfAbsent(receiverClass, c -> Maps.newHybridMap())
+                .put(methodRef, target != null ? target : DISPATCH_MISS);
+        return target;
+    }
+
+    /**
+     * The answer of {@link #dispatch(JClass, MethodRef)} without {@link #dispatchAnswers}.
+     */
+    private @Nullable JMethod dispatchUncached(JClass receiverClass, MethodRef methodRef) {
         // check the subclass relation between the receiver class and
         // the class of method reference to avoid the unexpected method found
         if (!isSubclass(methodRef.getDeclaringClass(), receiverClass)) {
