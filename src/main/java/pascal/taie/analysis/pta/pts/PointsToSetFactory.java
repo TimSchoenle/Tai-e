@@ -68,6 +68,32 @@ public class PointsToSetFactory {
         return new HybridBitPointsToSet(HybridBitSet.ofPackedLarge(objIndexer, packed));
     }
 
+    /**
+     * {@link #toPackedLarge} without a copy for a set stored packed (a set
+     * shared through a {@link PointsToSetInterner} is): a snapshot that
+     * shares its packed words.
+     *
+     * @return the snapshot, or {@code null} when {@link #toPackedLarge}
+     * returns {@code null} or the set is not stored packed
+     */
+    public SparseBitSet.@Nullable PackedSnapshot packedLargeSnapshot(PointsToSet pts) {
+        if (pts instanceof HybridBitPointsToSet hybrid
+                && hybrid.set instanceof HybridBitSet<CSObj> set) {
+            return set.packedLargeSnapshot(objIndexer);
+        }
+        return null;
+    }
+
+    /**
+     * Restores the points-to set of a snapshot of
+     * {@link #packedLargeSnapshot}: the result equals what
+     * {@link #ofPackedLarge(long[])} makes of the words of
+     * {@link #toPackedLarge} of the snapshotted set.
+     */
+    public PointsToSet ofPackedLarge(SparseBitSet.PackedSnapshot snapshot) {
+        return new HybridBitPointsToSet(HybridBitSet.ofPackedLarge(objIndexer, snapshot));
+    }
+
     public PointsToSet make() {
         return factory.get();
     }

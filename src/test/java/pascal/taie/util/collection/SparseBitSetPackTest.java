@@ -27,7 +27,11 @@ import org.junit.jupiter.api.Test;
 import java.util.Random;
 import java.util.TreeSet;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -59,6 +63,46 @@ class SparseBitSetPackTest {
             SparseBitSet restored = SparseBitSet.ofPacked(set.toPacked());
             assertSameBits(expected, restored, "round " + round);
             assertEquals(set, restored, "round " + round);
+        }
+    }
+
+    /**
+     * A snapshot of a packed set restores the set its copied packed words
+     * restore, and keeps doing so after the set changes.
+     */
+    @Test
+    void snapshotsRestoreWhatThePackedWordsRestore() {
+        Random random = new Random(11);
+        for (int round = 0; round < 2000; ++round) {
+            int range = 1 << (1 + random.nextInt(24));
+            int base = random.nextInt(8) == 0 ? Integer.MAX_VALUE - range : 0;
+            int bits = random.nextInt(200);
+            TreeSet<Integer> expected = new TreeSet<>();
+            SparseBitSet set = new SparseBitSet();
+            for (int i = 0; i < bits; ++i) {
+                int index = base + random.nextInt(range);
+                expected.add(index);
+                set.set(index);
+            }
+            String at = "round " + round;
+            assertNull(set.packedSnapshot(), at);
+            set.pack();
+            SparseBitSet.PackedSnapshot snapshot = set.packedSnapshot();
+            assertNotNull(snapshot, at);
+            long[] copied = set.toPacked();
+            assertEquals(copied.length, snapshot.length(), at);
+            SparseBitSet restored = SparseBitSet.ofSnapshot(snapshot);
+            assertFalse(restored.isPacked(), at);
+            assertSameBits(expected, restored, at);
+            assertArrayEquals(copied, restored.toPacked(), at);
+            assertEquals(SparseBitSet.ofPacked(copied), restored, at);
+            // changes of the set and of a restored set leave the snapshot as it was
+            set.set(base + random.nextInt(range));
+            if (bits > 0) {
+                set.clear(expected.first());
+                restored.clear(expected.last());
+            }
+            assertSameBits(expected, SparseBitSet.ofSnapshot(snapshot), at);
         }
     }
 

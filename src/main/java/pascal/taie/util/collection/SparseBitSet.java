@@ -1562,6 +1562,57 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * The packed words of a packed set (see {@link #pack()}), held by
+     * reference. Packed words are never written once a set is packed (a
+     * change restores the blocks and drops the words), so a snapshot keeps
+     * the contents of the set at the time it was taken, whatever happens to
+     * the set later.
+     */
+    public static final class PackedSnapshot {
+
+        private final long[] words;
+
+        private final int blocks;
+
+        private PackedSnapshot(long[] words, int blocks) {
+            this.words = words;
+            this.blocks = blocks;
+        }
+
+        /**
+         * @return the number of words held, headers included.
+         */
+        public int length() {
+            return words.length;
+        }
+    }
+
+    /**
+     * @return a snapshot of the packed words of this set, which shares them
+     * instead of copying them, or {@code null} if this set is not packed.
+     */
+    public @Nullable PackedSnapshot packedSnapshot() {
+        long[] words = packed;
+        return words == null ? null : new PackedSnapshot(words, packedBlocks);
+    }
+
+    /**
+     * Restores a set from a snapshot of the packed words of a set: the
+     * result equals what {@link #ofPacked(long[]) ofPacked(s.toPacked())}
+     * makes of that set {@code s}, blocks and state included. The shared
+     * words are only read.
+     *
+     * @param snapshot the snapshot of {@link #packedSnapshot()}
+     * @return a new set equal to the snapshotted one
+     */
+    public static SparseBitSet ofSnapshot(PackedSnapshot snapshot) {
+        SparseBitSet set = new SparseBitSet();
+        set.fillFromPacked(snapshot.words, snapshot.blocks);
+        set.invalidateState();
+        return set;
+    }
+
+    /**
      * Restores the blocks of a packed set; the state stays as it is, as the
      * contents do not change.
      */

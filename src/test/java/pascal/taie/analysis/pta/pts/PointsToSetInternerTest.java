@@ -429,8 +429,51 @@ class PointsToSetInternerTest {
         interner.addAllDiff(p5, small(7));
         interner.unshare(p5);
         interner.addAllDiff(p5, small(8));
-        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3, 0, 0),
+        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3, 0, 0, 0),
                 interner.counters());
+    }
+
+    /**
+     * The empty set of a pointer that takes a large set equal to a shared
+     * set takes that shared set, and returns it as the difference: the same
+     * elements, order and form as the copy would give, without a copy.
+     */
+    @Test
+    void emptySetAdoptsAnEqualSharedLargeSet() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        interner.addAllDiff(p1, large(1, 2, 3, 40));
+        PointsToSet shared = p1.getPointsToSet();
+        PointsToSet reference = factory.make();
+        PointsToSet referenceDiff = reference.addAllDiff(large(1, 2, 3, 40));
+        int sharedSets = interner.size();
+        long copies = interner.counters().copies();
+
+        PointsToSet diff = interner.addAllDiff(p2, large(1, 2, 3, 40));
+        assertSame(shared, p2.getPointsToSet());
+        assertSame(shared, diff);
+        assertEquals(sequence(referenceDiff), sequence(diff));
+        assertEquals(isLarge(referenceDiff), isLarge(diff));
+        assertEquals(sequence(reference), sequence(p2.getPointsToSet()));
+        assertEquals(copies, interner.counters().copies(), "the empty set was copied");
+        assertEquals(1, interner.counters().adoptions());
+        assertEquals(sharedSets, interner.size());
+        // held by p1 and p2, so stored packed
+        assertEquals(2, ((DelegatePointsToSet) shared).holders);
+        assertTrue(((DelegatePointsToSet) shared).isPacked());
+        // a shared set refuses a change, so a caller cannot alter the difference
+        assertThrows(IllegalStateException.class, () -> diff.addObject(objs[5]));
+
+        // a large set that no pointer holds, and a small one, are copied as before
+        PointsToSet missDiff = interner.addAllDiff(p3, large(1, 2, 3, 41));
+        assertFalse(missDiff.isShared());
+        assertEquals(List.of(1, 2, 3, 41), sequence(missDiff));
+        Pointer p4 = TestElements.pointer(4);
+        interner.addAllDiff(p4, small(7));
+        assertEquals(copies + 2, interner.counters().copies());
+        assertEquals(1, interner.counters().adoptions());
+        assertEquals(List.of(1, 2, 3, 40), sequence(p1.getPointsToSet()));
     }
 
     @Test
@@ -467,7 +510,8 @@ class PointsToSetInternerTest {
         assertEquals(List.of(1, 2, 3, 40, 60), sequence(p2.getPointsToSet()));
         assertSame(before, p4.getPointsToSet());
         assertEquals(List.of(1, 2, 3, 40), sequence(before));
-        assertEquals(new PointsToSetInterner.Counters(0, 0, 5, 1, 5, 2, 2, 1),
+        // p2 and p4 took p1's set from the empty set without a copy
+        assertEquals(new PointsToSetInterner.Counters(0, 0, 5, 1, 3, 0, 2, 1, 2),
                 interner.counters());
     }
 
@@ -483,6 +527,7 @@ class PointsToSetInternerTest {
     void inPlaceChangeMatchesTheCopyingInterner() {
         long probes = 0;
         long probeHits = 0;
+        long adoptions = 0;
         for (long seed = 1; seed <= 40; ++seed) {
             Random random = new Random(seed);
             PointsToSetInterner sharing = new PointsToSetInterner(factory, 2);
@@ -540,10 +585,12 @@ class PointsToSetInternerTest {
             }
             probes += sharing.counters().probes();
             probeHits += sharing.counters().probeHits();
+            adoptions += sharing.counters().adoptions();
         }
         // the sequences take both outcomes of a probe before a copy
         assertTrue(probeHits > 0, "no probe found its result");
         assertTrue(probes > probeHits, "every probe found its result");
+        assertTrue(adoptions > 0, "no empty set adopted a shared set");
     }
 
     /**

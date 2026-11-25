@@ -29,9 +29,11 @@ import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.core.cs.element.TestElements;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.analysis.pta.pts.DelegatePointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.util.Indexer;
+import pascal.taie.util.collection.HybridBitSet;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -107,6 +109,30 @@ public class SolverCountersTest {
         workList.takePolledDelta();
         assertEquals(0, workList.pendingFootprint()[0]);
         assertEquals(packed, workList.packedBytes());
+    }
+
+    /**
+     * A delta of a set stored packed is a snapshot of its words by
+     * reference: it is no packed copy, and the pending walk reports its
+     * words apart from the copies.
+     */
+    @Test
+    void workListCountsReferencedPendingBytesApartFromCopies() {
+        WorkList workList = new WorkList(factory, true, true);
+        PointsToSet source = set(0, OBJECTS);
+        HybridBitSet<?> hybrid = (HybridBitSet<?>) ((DelegatePointsToSet) source).set;
+        hybrid.packLarge();
+        assertTrue(hybrid.isPackedLarge());
+        workList.addEntry(TestElements.pointer(0), source);
+        assertEquals(1, workList.packedByReference());
+        assertEquals(0, workList.packedBytes());
+        long[] pending = workList.pendingFootprint();
+        assertEquals(0, pending[0]);
+        assertEquals(16L + workList.packedReferenceBytes(), pending[2]);
+        assertTrue(workList.countersLine().contains("pending_reference_bytes=" + pending[2]));
+        workList.pollPointer();
+        workList.takePolledDelta();
+        assertEquals(0, workList.pendingFootprint()[2]);
     }
 
     @Test

@@ -29,6 +29,7 @@ import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
+import pascal.taie.util.collection.SparseBitSet;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -53,7 +54,11 @@ import java.util.Queue;
  * {@link PointsToSetFactory#toPackedLarge}: a large delta usually holds few
  * bits per bit set block, and many deltas can wait at the same time. A
  * packed delta that receives more objects is restored to a set, so merging
- * works on sets as before.
+ * works on sets as before. A large set that is stored packed already (as a
+ * set shared through a points-to set interner is) is not packed again: the
+ * delta holds a {@link SparseBitSet.PackedSnapshot} of its packed words by
+ * reference, which a merge or poll restores to the same set the copied words
+ * would give.
  * <p>
  * The entries of one propagation's fan-out ({@link #addFanOutEntry}, up
  * to {@link #endFanOut()}) share the stored delta of a set they receive by
@@ -94,7 +99,8 @@ final class WorkList {
     private @Nullable Pointer[] ringPointers = new Pointer[INITIAL_CAPACITY];
 
     /**
-     * Pending deltas by ring slot: a {@link PointsToSet} or packed words.
+     * Pending deltas by ring slot: a {@link PointsToSet}, packed words or a
+     * {@link SparseBitSet.PackedSnapshot}.
      */
     private @Nullable Object[] ringDeltas = new Object[INITIAL_CAPACITY];
 
@@ -159,6 +165,19 @@ final class WorkList {
     private long packs;
 
     private long unpacks;
+
+    /**
+     * The packs that took a snapshot of a set's packed words by reference.
+     */
+    private long packedByReference;
+
+    /**
+     * Words of the packs that copied a set's words, and of those that took
+     * them by reference.
+     */
+    private long packedCopyWords;
+
+    private long packedReferenceWords;
 
     private long sharedEntries;
 
@@ -341,8 +360,7 @@ final class WorkList {
                 set = held;
             }
         } else {
-            set = ptsFactory.ofPackedLarge((long[]) pending);
-            ++unpacks;
+            set = restore(pending);
             ringDeltas[slot] = set;
         }
         boolean changed = set.addAll(pointsToSet);
@@ -367,9 +385,17 @@ final class WorkList {
 
     private Object newDelta(PointsToSet pointsToSet) {
         if (packLarge) {
+            SparseBitSet.PackedSnapshot snapshot = ptsFactory.packedLargeSnapshot(pointsToSet);
+            if (snapshot != null) {
+                ++packs;
+                ++packedByReference;
+                packedReferenceWords += snapshot.length();
+                return snapshot;
+            }
             long[] packed = ptsFactory.toPackedLarge(pointsToSet);
             if (packed != null) {
                 ++packs;
+                packedCopyWords += packed.length;
                 if (counting) {
                     packedBytes += longArrayBytes(packed);
                 }
@@ -377,6 +403,17 @@ final class WorkList {
             }
         }
         return pointsToSet.copy();
+    }
+
+    /**
+     * @return a new set restored from a packed pending delta: packed words
+     * or a snapshot of them.
+     */
+    private PointsToSet restore(Object packed) {
+        ++unpacks;
+        return packed instanceof SparseBitSet.PackedSnapshot snapshot
+                ? ptsFactory.ofPackedLarge(snapshot)
+                : ptsFactory.ofPackedLarge((long[]) packed);
     }
 
     /**
@@ -458,8 +495,7 @@ final class WorkList {
         if (pending instanceof PointsToSet set) {
             polledDelta = set;
         } else {
-            polledDelta = ptsFactory.ofPackedLarge((long[]) pending);
-            ++unpacks;
+            polledDelta = restore(pending);
         }
         return pointer;
     }
@@ -521,6 +557,27 @@ final class WorkList {
     }
 
     /**
+     * @return the packs that took a set's packed words by reference
+     */
+    long packedByReference() {
+        return packedByReference;
+    }
+
+    /**
+     * @return the bytes of the words that packs copied
+     */
+    long packedCopyBytes() {
+        return packedCopyWords * Long.BYTES;
+    }
+
+    /**
+     * @return the bytes of the words that packs took by reference
+     */
+    long packedReferenceBytes() {
+        return packedReferenceWords * Long.BYTES;
+    }
+
+    /**
      * @return the new entries that reused a stored delta of their fan-out
      */
     long sharedEntries() {
@@ -545,7 +602,10 @@ final class WorkList {
                 + " packs=" + packs
                 + " unpacks=" + unpacks
                 + " shared_entries=" + sharedEntries
-                + " shared_copies=" + sharedCopies;
+                + " shared_copies=" + sharedCopies
+                + " packed_by_reference=" + packedByReference
+                + " packed_copy_bytes=" + packedCopyBytes()
+                + " packed_reference_bytes=" + packedReferenceBytes();
         if (!counting) {
             return line;
         }
@@ -557,7 +617,8 @@ final class WorkList {
                 + " packed_bytes=" + packedBytes
                 + " merges_unchanged=" + mergesUnchanged
                 + " pending_packed_bytes=" + pending[0]
-                + " pending_set_objects=" + pending[1];
+                + " pending_set_objects=" + pending[1]
+                + " pending_reference_bytes=" + pending[2];
     }
 
     /**
@@ -607,12 +668,15 @@ final class WorkList {
      * Walks the pending entries; an entry that shares its delta counts it
      * again.
      *
-     * @return the estimated bytes of the pending packed deltas, and the
-     * objects in the pending deltas held as sets.
+     * @return the estimated bytes of the pending packed deltas, the
+     * objects in the pending deltas held as sets, and the estimated bytes
+     * of the packed words that pending snapshots reference (shared with the
+     * set they were taken from while that set is unchanged).
      */
     long[] pendingFootprint() {
         long packedPending = 0;
         long setObjects = 0;
+        long referencedPending = 0;
         int mask = ringPointers.length - 1;
         for (int i = 0; i < size; ++i) {
             Object pending = ringDeltas[(headSeq + i) & mask];
@@ -620,9 +684,11 @@ final class WorkList {
                 packedPending += longArrayBytes(packed);
             } else if (pending instanceof PointsToSet set) {
                 setObjects += set.size();
+            } else if (pending instanceof SparseBitSet.PackedSnapshot snapshot) {
+                referencedPending += 16L + 8L * snapshot.length();
             }
         }
-        return new long[]{packedPending, setObjects};
+        return new long[]{packedPending, setObjects, referencedPending};
     }
 
     /**

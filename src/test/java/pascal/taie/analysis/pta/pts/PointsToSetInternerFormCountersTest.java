@@ -69,11 +69,14 @@ class PointsToSetInternerFormCountersTest {
         interner.enableFormCounters();
         copyShared(interner, 0, set(0, 1), set(1, 2));
         copyShared(interner, 2, set(0, OBJECTS - 1), set(OBJECTS - 1, OBJECTS));
-        // the first change of each pointer copies the shared empty set
-        assertEquals("copies_small_small=3/1 copies_small_large=2/0"
+        // the first change of each pointer copies the shared empty set,
+        // except the second taking the large set: it adopts the shared
+        // set equal to it, which is no copy
+        assertEquals("copies_small_small=3/1 copies_small_large=1/0"
                         + " copies_large_small=1/" + (OBJECTS - 1) + " copies_large_large=0/0",
                 interner.formCopiesLine());
-        assertEquals(6, interner.counters().copies());
+        assertEquals(5, interner.counters().copies());
+        assertEquals(1, interner.counters().adoptions());
     }
 
     @Test
