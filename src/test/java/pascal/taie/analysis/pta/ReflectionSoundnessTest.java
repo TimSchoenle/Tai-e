@@ -40,8 +40,13 @@ public class ReflectionSoundnessTest {
     private static final String MEMBERS = "reflection-members:true";
 
     @Test
-    void onlyTheArgumentCountRulesOutATarget() {
+    void neitherTheResultCastNorTheStaticArgumentTypeRulesOutATarget() {
         Tests.testPTA(false, DIR, "TypeMatch");
+    }
+
+    @Test
+    void argumentTypesRuleOutOnlyTargetsTheJvmRefuses() {
+        Tests.testPTA(false, DIR, "ArgTypes");
     }
 
     @Test

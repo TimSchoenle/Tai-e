@@ -24,9 +24,8 @@ public class UnknownMethodName {
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
                 "<E: void oneArg(D)>", "<E: void oneArg(java.lang.Object)>", "<E: D oneArgRet(D)>",
                 "<D: void oneArg(E)>",
-                "<java.lang.Object: boolean equals(java.lang.Object)>",
-                // the argument count is the only filter (px/s115)
-                "<E: void oneArg(java.lang.String)>", "<java.lang.Object: void wait(long)>");
+                // not oneArg(String) nor wait(long): the JVM refuses an E for them (px/s115)
+                "<java.lang.Object: boolean equals(java.lang.Object)>");
     }
 
     static void invokeOneArgRet(String name, Class<?>[] paramTypes) throws Exception {
@@ -37,8 +36,7 @@ public class UnknownMethodName {
         PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
                 "<E: void oneArg(D)>", "<E: void oneArg(java.lang.Object)>", "<E: D oneArgRet(D)>",
                 "<D: void oneArg(E)>",
-                "<java.lang.Object: boolean equals(java.lang.Object)>",
-                "<E: void oneArg(java.lang.String)>", "<java.lang.Object: void wait(long)>");
+                "<java.lang.Object: boolean equals(java.lang.Object)>");
         PTAAssert.contains(d, e);
     }
 

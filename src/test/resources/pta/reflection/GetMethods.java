@@ -16,9 +16,8 @@ public class GetMethods {
                 PTAAssert.callsExact("<java.lang.reflect.Method: java.lang.Object invoke(java.lang.Object,java.lang.Object[])>",
                         "<I: void bar(I)>",
                         "<J: void foo(J)>",
-                        "<java.lang.Object: boolean equals(java.lang.Object)>",
-                        // the argument count is the only filter (px/s115)
-                        "<java.lang.Object: void wait(long)>");
+                        // wait(long) is not one: the JVM refuses a J for long (px/s115)
+                        "<java.lang.Object: boolean equals(java.lang.Object)>");
             }
         }
     }

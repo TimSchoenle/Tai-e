@@ -2,8 +2,8 @@ import java.lang.reflect.Method;
 
 /**
  * Reflective targets that run must stay targets: neither a cast of the
- * result nor the static type of an argument rules one out, only a known
- * argument count does.
+ * result nor the static type of an argument rules one out; a known
+ * argument count does (argument types the JVM refuses: ArgTypes).
  */
 public class TypeMatch {
 
