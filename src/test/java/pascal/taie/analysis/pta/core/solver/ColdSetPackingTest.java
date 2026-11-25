@@ -29,6 +29,7 @@ import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetCensus;
+import pascal.taie.analysis.pta.pts.PointsToSetInterner;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -42,9 +43,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Option {@code pack-cold-sets}: a whole analysis (application and
- * library) with the cold windows gives the pointers in the same creation
- * order, each with the same objects in the same iteration order, and the
- * same call graph as without them, while it packs sets.
+ * library) with the cold windows gives every pointer the same objects and
+ * the same call graph as without them, while it packs pending deltas and
+ * sole-held sets. Pointers and objects are compared by name, free of
+ * order: two analyses in one JVM differ in creation indexes, hash
+ * iteration orders and the iteration count even with the option off. The
+ * model tests check poll order and iteration order.
  */
 class ColdSetPackingTest {
 
@@ -57,12 +61,14 @@ class ColdSetPackingTest {
             assertEquals(off.callEdges, on.callEdges, "window " + window);
             assertTrue(on.workList.coldPacks() > 0, "window " + window);
             assertTrue(on.workList.coldUnpacks() > 0, "window " + window);
+            assertTrue(on.solePacks > 0, "window " + window);
             assertTrue(on.census.largeStoredPacked() > off.census.largeStoredPacked(),
                     "window " + window + ": " + on.census + " vs " + off.census);
             System.out.println("pack-cold-sets:" + window + " " + on.workList.countersLine()
                     + "\n off: " + off.census + "\n on: " + on.census);
         }
         assertEquals(0, off.workList.coldPacks());
+        assertEquals(0, off.solePacks);
     }
 
     @Test
@@ -80,7 +86,7 @@ class ColdSetPackingTest {
     }
 
     private record Run(List<String> pointers, List<String> callEdges, long iterations,
-                       WorkList workList, PointsToSetCensus census) {
+                       WorkList workList, PointsToSetCensus census, long solePacks) {
     }
 
     private static Run run(String options) {
@@ -93,8 +99,8 @@ class ColdSetPackingTest {
     }
 
     /**
-     * Fingerprints every pointer, in creation order, by its objects in
-     * iteration order, and the call graph by its edges in order.
+     * Fingerprints every pointer by its objects and the call graph by its
+     * edges, both sorted by name.
      */
     public static class Probe implements Plugin {
 
@@ -121,7 +127,9 @@ class ColdSetPackingTest {
             Collections.sort(callEdges);
             run = new Run(pointers, callEdges, (long) read(solver, "iterations"),
                     (WorkList) read(solver, "workList"),
-                    ((SolverCensus) read(solver, "census")).pts());
+                    ((SolverCensus) read(solver, "census")).pts(),
+                    read(solver, "interner") instanceof PointsToSetInterner interner
+                            ? interner.solePacks() : 0);
         }
 
         /**

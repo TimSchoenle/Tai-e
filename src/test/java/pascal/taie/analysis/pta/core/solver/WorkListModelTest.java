@@ -346,16 +346,70 @@ class WorkListModelTest {
     }
 
     /**
+     * Cold windows with fan-outs: deltas that fan-out targets share, and
+     * merged deltas packed again after each fan-out, keep the poll order,
+     * the contents and the iteration order of every polled delta.
+     */
+    @Test
+    void randomFanOutsWithColdPackingMatchTheCopyingWorkList() {
+        for (int window : new int[]{1, 3}) {
+            assertTrue(assertFanOutsMatch(factory, true, window) > 100, "window " + window);
+            assertTrue(assertFanOutsMatch(factory, false, window) > 100, "window " + window);
+        }
+    }
+
+    /**
+     * Cold deltas are packed only between fan-outs: inside an open fan-out
+     * the work list refuses, after its end it packs.
+     */
+    @Test
+    void coldDeltasAreNotPackedDuringAFanOut() {
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        PointsToSet small = factory.make();
+        small.addObject(objects.get(0));
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        WorkList workList = new WorkList(factory, true, 1);
+        workList.addEntry(a, small);
+        workList.addEntry(a, large);
+        workList.addFanOutEntry(b, large);
+        workList.addFanOutEntry(c, large);
+        assertThrows(IllegalStateException.class, workList::packColdDeltas);
+        workList.addEntry(b, small);
+        workList.endFanOut();
+        workList.packColdDeltas();
+        assertEquals(1, workList.coldPacks(), "a's merge left the window by b's merge");
+        for (Pointer expected : List.of(a, b, c)) {
+            assertSame(expected, workList.pollPointer());
+            assertEquals(order(large), order(workList.takePolledDelta()));
+        }
+        assertEquals(1, workList.coldUnpacks());
+        assertTrue(workList.isEmpty());
+    }
+
+    private static void assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge) {
+        assertFanOutsMatch(factory, packLarge, 0);
+    }
+
+    /**
      * Random fan-outs of a few sets to random pointers, with plain entries
      * among them (as a transfer that adds work does), polls between the
-     * fan-outs and the callers' sets changed after each fan-out.
+     * fan-outs and the callers' sets changed after each fan-out; with a
+     * cold window, cold deltas are packed after some fan-outs.
+     *
+     * @return the cold packs of all seeds
      */
-    private static void assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge) {
+    private static long assertFanOutsMatch(PointsToSetFactory factory, boolean packLarge,
+            int coldWindow) {
         long shared = 0;
         long copies = 0;
+        long coldPacks = 0;
+        long coldUnpacks = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
-            WorkList workList = new WorkList(factory, packLarge);
+            WorkList workList = new WorkList(factory, packLarge, coldWindow);
             CopyingWorkList model = new CopyingWorkList();
             int range = Math.min(pointers.size(), 4 + random.nextInt(40));
             int steps = 20 + random.nextInt(120);
@@ -381,6 +435,10 @@ class WorkListModelTest {
                         }
                     }
                     workList.endFanOut();
+                    if (coldWindow > 0 && random.nextBoolean()) {
+                        // the solver's safe point: no fan-out open, no delta read
+                        workList.packColdDeltas();
+                    }
                     for (PointsToSet source : sources) {
                         if (random.nextBoolean()) {
                             source.addObject(objects.get(random.nextInt(objects.size())));
@@ -400,14 +458,20 @@ class WorkListModelTest {
             assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
             assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
             assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
-            if (!packLarge) {
+            if (!packLarge && coldWindow == 0) {
                 assertEquals(0, workList.packs() + workList.unpacks(), "seed " + seed);
             }
             shared += workList.sharedEntries();
             copies += workList.sharedCopies();
+            coldPacks += workList.coldPacks();
+            coldUnpacks += workList.coldUnpacks();
         }
         assertTrue(shared > 1000, "shared entries: " + shared);
         assertTrue(copies > 100, "shared copies: " + copies);
+        if (coldWindow > 0) {
+            assertTrue(coldUnpacks > 100, "cold unpacks: " + coldUnpacks);
+        }
+        return coldPacks;
     }
 
     @Test
