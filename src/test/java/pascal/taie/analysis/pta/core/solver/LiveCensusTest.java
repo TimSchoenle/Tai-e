@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import pascal.taie.Main;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.analysis.pta.core.cs.element.CSVar;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.HeapOwnerCensus;
@@ -60,6 +61,11 @@ public class LiveCensusTest {
 
     private static final String OPTIONS =
             "implicit-entries:false;cs:1-obj;share-points-to-sets:true;";
+
+    /**
+     * Longer than the census interval of one second.
+     */
+    private static final long WAIT_MILLIS = 1100;
 
     @Test
     void intervalCountsFromTheEndOfTheLastCensus() {
@@ -161,6 +167,39 @@ public class LiveCensusTest {
                 owners.toString());
     }
 
+    /**
+     * The option census-interval takes a census during a solve that lasts
+     * longer than the interval, tells the plugins, reports its time, and
+     * changes neither the call graph nor any points-to set or the order of
+     * the pointers and objects.
+     */
+    @Test
+    void censusIntervalTakesCensusesDuringTheSolveAndChangesNoResult() {
+        Probe.firstWaitMillis = WAIT_MILLIS;
+        try {
+            run("census:true;" + OPTIONS);
+            assertEquals(0, Probe.liveCensuses);
+            assertEquals(0, Probe.onCensusCalls);
+            assertEquals(0, Probe.liveCensusNanos);
+            List<Long> pointers = Probe.pointers;
+            List<Long> edges = Probe.edges;
+            String finish = Probe.census.pts().toString();
+            long iterations = Probe.iterations;
+
+            run("census:true;census-interval:1;" + OPTIONS);
+            assertTrue(Probe.liveCensuses >= 1, "no census during the solve");
+            assertEquals(Probe.liveCensuses, Probe.onCensusCalls);
+            assertTrue(Probe.liveCensusNanos > 0);
+            assertNotNull(Probe.lastLiveCensus);
+            assertEquals(finish, Probe.census.pts().toString());
+            assertEquals(edges, Probe.edges);
+            assertEquals(pointers, Probe.pointers);
+            assertEquals(iterations, Probe.iterations);
+        } finally {
+            Probe.firstWaitMillis = 0;
+        }
+    }
+
     private static void run(String options) {
         Probe.census = null;
         Probe.owners = null;
@@ -193,12 +232,43 @@ public class LiveCensusTest {
 
         static List<Long> edges = List.of();
 
+        /**
+         * How long the first new points-to set of a solve waits, so that a
+         * census interval passes during the solve; 0 = no wait.
+         */
+        static long firstWaitMillis;
+
+        static long onCensusCalls;
+
+        static long liveCensusNanos;
+
         private Solver solver;
+
+        private boolean waited;
 
         @Override
         public void setSolver(Solver solver) {
             this.solver = solver;
             ((DefaultSolver) solver).setProgressCheckForTesting(CHECK_MASK, 0);
+            onCensusCalls = 0;
+        }
+
+        @Override
+        public void onNewPointsToSet(CSVar csVar, PointsToSet pts) {
+            if (!waited && firstWaitMillis > 0) {
+                waited = true;
+                try {
+                    Thread.sleep(firstWaitMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+            }
+        }
+
+        @Override
+        public void onCensus() {
+            ++onCensusCalls;
         }
 
         @Override
@@ -207,6 +277,7 @@ public class LiveCensusTest {
             census = (SolverCensus) field(s, "census");
             owners = (HeapOwnerCensus) field(s, "owners");
             liveCensuses = (Long) field(s, "liveCensuses");
+            liveCensusNanos = (Long) field(s, "liveCensusNanos");
             iterations = (Long) field(s, "iterations");
             lastLiveCensus = (SolverCensus) field(s, "lastLiveCensus");
             lastLiveOwners = (HeapOwnerCensus) field(s, "lastLiveOwners");

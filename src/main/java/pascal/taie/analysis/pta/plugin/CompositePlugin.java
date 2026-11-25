@@ -113,6 +113,11 @@ public class CompositePlugin implements Plugin {
     }
 
     @Override
+    public void onCensus() {
+        allPlugins.forEach(Plugin::onCensus);
+    }
+
+    @Override
     public void onRelease() {
         allPlugins.forEach(Plugin::onRelease);
     }

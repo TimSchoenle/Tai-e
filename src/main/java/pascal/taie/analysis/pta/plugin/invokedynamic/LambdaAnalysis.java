@@ -575,13 +575,32 @@ public class LambdaAnalysis implements Plugin {
     private void logCounters() {
         LambdaCounters c = counters;
         if (c != null && !countersLogged) {
-            List<Integer> infoCounts = new ArrayList<>();
-            invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
-            logger.info("Lambda counters: {}", c.line(infoCounts));
+            logger.info("Lambda counters: {}", countersLine(c));
             // keep only the counts: drop the last event's callees
             c.startEvent();
             countersLogged = true;
         }
+    }
+
+    /**
+     * Logs the counters so far at a census during the solve; reads only.
+     */
+    @Override
+    public void onCensus() {
+        LambdaCounters c = counters;
+        if (c != null && !countersLogged) {
+            logger.info("Lambda counters at the census: {}", countersLine(c));
+        }
+    }
+
+    /**
+     * @return the line of {@code c} with the receiver variables that
+     * {@link #invoInfos} holds now.
+     */
+    private String countersLine(LambdaCounters c) {
+        List<Integer> infoCounts = new ArrayList<>();
+        invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
+        return c.line(infoCounts);
     }
 
     /**
