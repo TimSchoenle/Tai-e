@@ -63,6 +63,7 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -170,6 +171,38 @@ public class LambdaAnalysis implements Plugin {
      * whose invokedynamic captures variables ({@link #lambdaSource}).
      */
     private final Map<CSObj, LambdaSource> capturingSources = Maps.newMap();
+
+    /**
+     * The interned sources of the lambda call edges that a call site reaches
+     * through a method reference whose receiver is the lambda object
+     * ({@link #chainedSource}).
+     */
+    private final Map<ChainKey, LambdaSource> chainedSources = Maps.newMap();
+
+    /**
+     * The calls of the sources of {@link #chainedSources} that
+     * {@link #callLambda} made.
+     */
+    private final Set<ChainedCall> chainedCalls = new HashSet<>();
+
+    /**
+     * The calls of lambda objects that are receivers of a method reference
+     * whose target their type does not dispatch, queued by
+     * {@link #queueLambdaReceiverCalls}.
+     */
+    private final ArrayDeque<LambdaReceiverCall> lambdaReceiverCalls = new ArrayDeque<>();
+
+    /**
+     * Whether {@link #drainLambdaReceiverCalls} runs.
+     */
+    private boolean drainingLambdaReceiverCalls;
+
+    /**
+     * The state of {@link CalleeGrouper} for a type that does not dispatch
+     * the target but may be the type of a lambda object whose functional
+     * method the target is.
+     */
+    private static final Object LAMBDA_RECEIVER = new Object();
 
     /**
      * Map from each receiver variable of {@link #invoInfos} to the targets
@@ -350,20 +383,47 @@ public class LambdaAnalysis implements Plugin {
         if (!CSObjs.hasDescriptor(recv, LAMBDA_DESC)) {
             return;
         }
+        if (counters != null) {
+            counters.startEvent();
+        }
+        callLambda(recv, csManager.getCSCallSite(context, invoke),
+                invoke.getMethodRef().getName(), null);
+        drainLambdaReceiverCalls();
+    }
+
+    /**
+     * Adds the facts of a call at {@code csCallSite} of the method named
+     * {@code methodName} on the lambda object {@code recv}, whose type does
+     * not dispatch that method: the call runs the lambda's target method.
+     * The call is the call site's own ({@code samArgs} null) or, when
+     * {@code recv} is the receiver of a method reference whose target
+     * {@code recv}'s type does not dispatch, the call of that target by the
+     * method reference's lambda object ({@link #addLambdaCallEdges}) with
+     * the arguments {@code samArgs} ({@link #forwardedArgs}). Such a call is
+     * made once per call site and source ({@link #chainedCalls}).
+     */
+    private void callLambda(CSObj recv, CSCallSite csCallSite, String methodName,
+                            @Nullable List<CSVar> samArgs) {
         MockObj lambdaObj = (MockObj) recv.getObject();
         Invoke indyInvoke = (Invoke) lambdaObj.getAllocation();
         InvokeDynamic indy = (InvokeDynamic) indyInvoke.getInvokeExp();
-        if (!indy.getMethodName().equals(invoke.getMethodRef().getName())) {
+        if (!indy.getMethodName().equals(methodName)) {
             // Use method name to filter out mismatched (caused by imprecision
             // of pointer analysis) lambda objects and actual invocation sites.
             // TODO: use more information to filter out mismatches?
             return;
         }
-        if (counters != null) {
-            counters.startEvent();
+        LambdaSource source;
+        if (samArgs == null) {
+            source = lambdaSource(recv, indy);
+        } else {
+            source = chainedSource(recv, indy, samArgs);
+            if (!chainedCalls.add(new ChainedCall(csCallSite, source))) {
+                return;
+            }
         }
-        LambdaSource source = lambdaSource(recv, indy);
-        CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
+        Invoke invoke = csCallSite.getCallSite();
+        Context context = csCallSite.getContext();
         MethodHandle mh = getMethodHandle(indy);
         final MethodRef targetRef = mh.getMethodRef();
 
@@ -389,28 +449,33 @@ public class LambdaAnalysis implements Plugin {
             case REF_invokeInterface, REF_invokeVirtual, REF_invokeSpecial -> {
                 // targetRef is instance method
                 List<Var> capturedArgs = indy.getArgs();
-                List<Var> actualArgs = invoke.getInvokeExp().getArgs();
                 // Obtain receiver variable and context
-                Var recvVar;
-                Context recvCtx;
+                CSVar csRecvVar;
                 if (!capturedArgs.isEmpty()) {
                     // if captured arguments are not empty, then the first one
                     // must be the receiver object for targetRef
-                    recvVar = capturedArgs.get(0);
-                    recvCtx = source.getContext();
-                } else {
+                    csRecvVar = csManager.getCSVar(source.getContext(), capturedArgs.get(0));
+                } else if (samArgs == null) {
                     // otherwise, the first actual argument is the receiver
-                    recvVar = actualArgs.get(0);
-                    recvCtx = context;
+                    csRecvVar = csManager.getCSVar(context,
+                            invoke.getInvokeExp().getArgs().get(0));
+                } else {
+                    // or the first argument the method reference passes
+                    if (samArgs.isEmpty()) {
+                        return;
+                    }
+                    csRecvVar = samArgs.get(0);
                 }
-                CSVar csRecvVar = csManager.getCSVar(recvCtx, recvVar);
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
                 ReceiverGroups<Type, CSObj> recvObjsByType = recvByType.computeIfAbsent(
                         csRecvVar, v -> groupByType(recvObjs));
                 ReceiverTargets targets = targetsByVar.computeIfAbsent(
                         csRecvVar, v -> new ReceiverTargets());
                 if (verifier != null) {
-                    verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
+                    // a call through a method reference runs while the call
+                    // site's base variable or another one may be propagated
+                    verifier.setPartial(csRecvVar == baseVarOf(context, invoke)
+                            || samArgs != null);
                 }
                 addLambdaCallEdges(csCallSite, source, recvObjs, groupKnownByCallee(
                         csCallSite, targetRef, recvObjsByType, targets));
@@ -457,6 +522,137 @@ public class LambdaAnalysis implements Plugin {
     }
 
     /**
+     * @return the interned source of the lambda call edges on
+     * {@code lambdaObj}, created by {@code indy}, whose functional method a
+     * method reference calls with the arguments {@code samArgs}
+     * ({@link LambdaSource#getSamArgs}). The arguments of such calls are as
+     * many as the method reference's target has parameters, so a cycle of
+     * method references in the points-to sets yields finitely many sources.
+     */
+    private LambdaSource chainedSource(CSObj lambdaObj, InvokeDynamic indy,
+                                       List<CSVar> samArgs) {
+        LambdaSource base = lambdaSource(lambdaObj, indy);
+        return chainedSources.computeIfAbsent(new ChainKey(base, samArgs),
+                k -> new LambdaSource(indy, base.getContext(), samArgs));
+    }
+
+    /**
+     * Key of {@link #chainedSources}: a source of a direct call and the
+     * arguments a method reference calls its lambda objects with.
+     */
+    private record ChainKey(LambdaSource base, List<CSVar> samArgs) {
+    }
+
+    /**
+     * A call site and a source of {@link #chainedSources} whose call
+     * {@link #callLambda} made.
+     */
+    private record ChainedCall(CSCallSite csCallSite, LambdaSource source) {
+    }
+
+    /**
+     * @return the arguments besides the receiver that the method
+     * reference's lambda objects of {@code outer}, called at
+     * {@code csCallSite}, pass to their target method: their captured
+     * variables but the first (the receiver) followed by the arguments they
+     * receive ({@link #samArgs}), or without captures the arguments they
+     * receive but the first (the receiver).
+     */
+    private List<CSVar> forwardedArgs(CSCallSite csCallSite, LambdaSource outer) {
+        List<CSVar> received = samArgs(csCallSite, outer);
+        List<Var> captured = outer.getIndy().getArgs();
+        if (captured.isEmpty()) {
+            return received.isEmpty() ? received : received.subList(1, received.size());
+        }
+        List<CSVar> args = new ArrayList<>(captured.size() - 1 + received.size());
+        for (int i = 1; i < captured.size(); ++i) {
+            args.add(csManager.getCSVar(outer.getContext(), captured.get(i)));
+        }
+        args.addAll(received);
+        return args;
+    }
+
+    /**
+     * @return the arguments of the call of the functional method of the
+     * lambda objects of {@code source} at {@code csCallSite}: those of the
+     * call site, or for a call by a method reference the ones it passes
+     * ({@link LambdaSource#getSamArgs}).
+     */
+    private List<CSVar> samArgs(CSCallSite csCallSite, LambdaSource source) {
+        List<CSVar> samArgs = source.getSamArgs();
+        if (samArgs != null) {
+            return samArgs;
+        }
+        Context context = csCallSite.getContext();
+        List<Var> args = csCallSite.getCallSite().getInvokeExp().getArgs();
+        List<CSVar> csArgs = new ArrayList<>(args.size());
+        for (Var arg : args) {
+            csArgs.add(csManager.getCSVar(context, arg));
+        }
+        return csArgs;
+    }
+
+    /**
+     * @return the number of arguments the call of the lambda objects of
+     * {@code source} at {@code csCallSite} passes to their functional
+     * method ({@link #samArgs}).
+     */
+    private static int samArgCount(CSCallSite csCallSite, LambdaSource source) {
+        List<CSVar> samArgs = source.getSamArgs();
+        return samArgs == null
+                ? csCallSite.getCallSite().getInvokeExp().getArgCount()
+                : samArgs.size();
+    }
+
+    /**
+     * Queues the calls of {@code grouping}'s lambda receivers by the method
+     * reference's lambda objects of {@code source} at {@code csCallSite}
+     * ({@link #callLambda}); {@link #drainLambdaReceiverCalls} makes them
+     * once the plugin event that found them has added its own facts, so that
+     * they do not change the invocation sets that event iterates.
+     */
+    private void queueLambdaReceiverCalls(CSCallSite csCallSite, LambdaSource source,
+                                          CalleeGrouper grouping) {
+        for (CSObj recv : grouping.lambdaReceivers) {
+            lambdaReceiverCalls.addLast(new LambdaReceiverCall(recv, csCallSite, source));
+        }
+    }
+
+    /**
+     * Makes the queued calls of {@link #queueLambdaReceiverCalls}, and the
+     * calls they queue in turn.
+     */
+    private void drainLambdaReceiverCalls() {
+        if (drainingLambdaReceiverCalls) {
+            return;
+        }
+        drainingLambdaReceiverCalls = true;
+        try {
+            LambdaReceiverCall call;
+            while ((call = lambdaReceiverCalls.pollFirst()) != null) {
+                MethodRef targetRef = targetRefOf(call.outer());
+                List<CSVar> args = forwardedArgs(call.csCallSite(), call.outer());
+                // a call of the target passes as many arguments as it has
+                // parameters; others pair objects only the points-to sets do
+                if (args.size() == targetRef.getParameterTypes().size()) {
+                    callLambda(call.recv(), call.csCallSite(), targetRef.getName(), args);
+                }
+            }
+        } finally {
+            drainingLambdaReceiverCalls = false;
+        }
+    }
+
+    /**
+     * A queued call of the lambda object {@code recv}, the receiver of the
+     * method reference's lambda objects of source {@code outer} called at
+     * {@code csCallSite}.
+     */
+    private record LambdaReceiverCall(CSObj recv, CSCallSite csCallSite,
+                                      LambdaSource outer) {
+    }
+
+    /**
      * @return the MethodHandle to the target method from invokedynamic.
      */
     private static MethodHandle getMethodHandle(InvokeDynamic indy) {
@@ -479,16 +675,16 @@ public class LambdaAnalysis implements Plugin {
      * Whether the arguments transferred by this edge fit into {@code callee}'s
      * parameters, using the same shifts as {@link #onNewCallEdge}.
      */
-    private static boolean fitsParameterCount(
-            CSCallSite csCallSite, InvokeDynamic indy, JMethod callee) {
-        return fitsParameterCount(callee, argsToStatic(csCallSite, indy),
-                argsToInstance(csCallSite, indy));
+    private boolean fitsParameterCount(
+            CSCallSite csCallSite, LambdaSource source, JMethod callee) {
+        return fitsParameterCount(callee, argsToStatic(csCallSite, source),
+                argsToInstance(csCallSite, source));
     }
 
     /**
-     * {@link #fitsParameterCount(CSCallSite, InvokeDynamic, JMethod)} with
-     * the transferred argument counts of the edge's call site and
-     * invokedynamic computed in advance.
+     * {@link #fitsParameterCount(CSCallSite, LambdaSource, JMethod)} with
+     * the transferred argument counts of the edge's call site and source
+     * computed in advance.
      */
     private static boolean fitsParameterCount(
             JMethod callee, int argsToStatic, int argsToInstance) {
@@ -503,11 +699,11 @@ public class LambdaAnalysis implements Plugin {
     /**
      * @return the number of arguments an edge transfers into the parameters
      * of a static method or constructor: with no receiver, every captured
-     * variable and actual argument is a parameter.
+     * variable and actual argument is a parameter. The actual arguments are
+     * those of the functional method's call ({@link #samArgCount}).
      */
-    private static int argsToStatic(CSCallSite csCallSite, InvokeDynamic indy) {
-        return indy.getArgs().size()
-                + csCallSite.getCallSite().getInvokeExp().getArgCount();
+    private int argsToStatic(CSCallSite csCallSite, LambdaSource source) {
+        return source.getIndy().getArgs().size() + samArgCount(csCallSite, source);
     }
 
     /**
@@ -515,9 +711,9 @@ public class LambdaAnalysis implements Plugin {
      * of an instance method: all but the receiver, which is the first
      * captured variable or, without captures, the first actual argument.
      */
-    private static int argsToInstance(CSCallSite csCallSite, InvokeDynamic indy) {
-        int captured = indy.getArgs().size();
-        int actual = csCallSite.getCallSite().getInvokeExp().getArgCount();
+    private int argsToInstance(CSCallSite csCallSite, LambdaSource source) {
+        int captured = source.getIndy().getArgs().size();
+        int actual = samArgCount(csCallSite, source);
         return captured == 0 ? Math.max(0, actual - 1) : (captured - 1) + actual;
     }
 
@@ -547,7 +743,7 @@ public class LambdaAnalysis implements Plugin {
             }
             calleeCtx = selector.selectContext(csCallSite, callee);
         }
-        if (!fitsParameterCount(csCallSite, source.getIndy(), callee)) {
+        if (!fitsParameterCount(csCallSite, source, callee)) {
             // A lambda object can reach a call site that only shares its method
             // name; such a pairing cannot be called, so drop the edge.
             return;
@@ -592,9 +788,17 @@ public class LambdaAnalysis implements Plugin {
      * types sees the same receivers in the same order as one over every
      * type, as long as the slots left out are of types that do not dispatch
      * the target.
+     * <p>
+     * A lambda object whose type does not dispatch the target (its
+     * functional method, abstract in its type) is a receiver of a method
+     * reference to that method, such as {@code r1::run} on the lambda object
+     * {@code r1}: the grouping lists it in {@link #lambdaReceivers}, and
+     * {@link #addLambdaCallEdges} calls it as a call of its functional
+     * method would ({@link #callLambda}). Its type is one that may dispatch
+     * the target, so slots are kept for it as for a dispatching type.
      */
     private final class CalleeGrouper
-            implements ReceiverGroups.Visitor<Type, CSObj, JMethod> {
+            implements ReceiverGroups.Visitor<Type, CSObj, Object> {
 
         private final CSCallSite csCallSite;
 
@@ -620,6 +824,12 @@ public class LambdaAnalysis implements Plugin {
 
         private final Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
 
+        /**
+         * The lambda objects whose type does not dispatch the target, in
+         * grouping order; an immutable empty list until the first one.
+         */
+        private List<CSObj> lambdaReceivers = List.of();
+
         private int slot;
 
         private CalleeGrouper(CSCallSite csCallSite, MethodRef targetRef,
@@ -632,9 +842,15 @@ public class LambdaAnalysis implements Plugin {
             this.path = path;
         }
 
+        /**
+         * @return the method {@code type} dispatches for the target,
+         * {@link #LAMBDA_RECEIVER} if it dispatches none but may be the type
+         * of a lambda object whose functional method the target is
+         * ({@link #mayBeLambdaReceiverType}), otherwise null.
+         */
         @Override
         @Nullable
-        public JMethod enter(Type type) {
+        public Object enter(Type type) {
             JMethod callee = hierarchy.dispatch(type, targetRef);
             if (counted) {
                 ++enterCalls;
@@ -642,21 +858,50 @@ public class LambdaAnalysis implements Plugin {
                     counters.enter(path, callee != null);
                 }
             }
+            Object state = callee != null ? callee
+                    : mayBeLambdaReceiverType(type, targetRef) ? LAMBDA_RECEIVER : null;
             if (hits != null) {
-                if (callee != null) {
+                if (state != null) {
                     hits.addLast(slot);
                 }
                 ++slot;
             }
-            return callee;
+            return state;
         }
 
         @Override
-        public void accept(JMethod callee, CSObj recvObj) {
+        public void accept(Object state, CSObj recvObj) {
+            if (state == LAMBDA_RECEIVER) {
+                if (isLambdaObj(recvObj.getObject())) {
+                    if (lambdaReceivers.isEmpty()) {
+                        lambdaReceivers = new ArrayList<>();
+                    }
+                    lambdaReceivers.add(recvObj);
+                }
+                return;
+            }
+            JMethod callee = (JMethod) state;
             Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
             receiversByCallee.computeIfAbsent(csManager.getCSMethod(calleeCtx, callee),
                     m -> solver.makePointsToSet()).addObject(recvObj);
         }
+    }
+
+    /**
+     * @return whether {@code type}, which does not dispatch {@code targetRef},
+     * may be the type of a lambda object whose functional method
+     * {@code targetRef} is: an interface (the functional interface of a
+     * lambda object) or a synthetic lambda class ({@link LambdaClasses}),
+     * which is a subtype of the declaring class of {@code targetRef}, as
+     * a type that dispatches it would be.
+     */
+    private boolean mayBeLambdaReceiverType(Type type, MethodRef targetRef) {
+        if (!(type instanceof ClassType classType)) {
+            return false;
+        }
+        JClass jclass = classType.getJClass();
+        return (jclass.isInterface() || LambdaClasses.isLambdaClass(jclass))
+                && hierarchy.isSubclass(targetRef.getDeclaringClass(), jclass);
     }
 
     /**
@@ -669,7 +914,7 @@ public class LambdaAnalysis implements Plugin {
      * dispatches count in the {@link LambdaCounters} under
      * {@link LambdaCounters#PATH_CALL}.
      */
-    private Map<CSMethod, PointsToSet> groupKnownByCallee(
+    private CalleeGrouper groupKnownByCallee(
             CSCallSite csCallSite, MethodRef targetRef,
             ReceiverGroups<Type, CSObj> recvByType, ReceiverTargets targets) {
         enterFullScan += recvByType.keyCount();
@@ -687,10 +932,9 @@ public class LambdaAnalysis implements Plugin {
             recvByType.forEachGroup(known.slots(), known.count(), grouper);
         }
         if (verifier != null) {
-            verifier.checkInversion(csCallSite, targetRef, recvByType,
-                    grouper.receiversByCallee);
+            verifier.checkInversion(csCallSite, targetRef, recvByType, grouper);
         }
-        return grouper.receiversByCallee;
+        return grouper;
     }
 
     /**
@@ -701,17 +945,16 @@ public class LambdaAnalysis implements Plugin {
      * ({@link #matchTargets}). {@code path} names the caller for the
      * {@link LambdaCounters}.
      */
-    private Map<CSMethod, PointsToSet> groupDeltaByCallee(
+    private CalleeGrouper groupDeltaByCallee(
             CSCallSite csCallSite, ReceiverTargets.Target target,
             ReceiverGroups<Type, CSObj> ptsByType, int path) {
         enterFullScan += ptsByType.keyCount();
         CalleeGrouper grouper = new CalleeGrouper(csCallSite, target.ref(), null, true, path);
         ptsByType.forEachGroup(target.deltaSlots(), target.deltaCount(event), grouper);
         if (verifier != null) {
-            verifier.checkInversion(csCallSite, target.ref(), ptsByType,
-                    grouper.receiversByCallee);
+            verifier.checkInversion(csCallSite, target.ref(), ptsByType, grouper);
         }
-        return grouper.receiversByCallee;
+        return grouper;
     }
 
     /**
@@ -774,18 +1017,20 @@ public class LambdaAnalysis implements Plugin {
      * for that invocation: per callee, in the map's order, the points-to update
      * of the callee's this variable and, if the arguments fit, the call edge.
      * The map and its sets are only read, so one grouping may serve several
-     * invocations whose grouping it equals.
+     * invocations whose grouping it equals. The grouping's lambda receivers
+     * are queued for {@link #callLambda} ({@link #queueLambdaReceiverCalls}).
      */
     private void addLambdaCallEdges(
             CSCallSite csCallSite, LambdaSource source, PointsToSet recvObjs,
-            Map<CSMethod, PointsToSet> receiversByCallee) {
-        InvokeDynamic indy = source.getIndy();
+            CalleeGrouper grouping) {
+        Map<CSMethod, PointsToSet> receiversByCallee = grouping.receiversByCallee;
         if (verifier != null) {
-            verifier.checkGrouping(csCallSite, recvObjs, targetRefOf(source), indy,
+            verifier.checkGrouping(csCallSite, recvObjs, targetRefOf(source), source,
                     receiversByCallee);
         }
-        int argsToStatic = argsToStatic(csCallSite, indy);
-        int argsToInstance = argsToInstance(csCallSite, indy);
+        int argsToStatic = argsToStatic(csCallSite, source);
+        int argsToInstance = argsToInstance(csCallSite, source);
+        queueLambdaReceiverCalls(csCallSite, source, grouping);
         receiversByCallee.forEach((csCallee, receivers) -> {
             JMethod callee = csCallee.getMethod();
             // pass receiver objects to 'this' variable of callee
@@ -829,6 +1074,8 @@ public class LambdaAnalysis implements Plugin {
         recvByType.clear();
         nonCapturingSources.clear();
         capturingSources.clear();
+        chainedSources.clear();
+        chainedCalls.clear();
         targetsByVar.clear();
     }
 
@@ -945,7 +1192,7 @@ public class LambdaAnalysis implements Plugin {
 
         private void checkGrouping(
                 CSCallSite csCallSite, PointsToSet recvObjs, MethodRef targetRef,
-                InvokeDynamic indy, Map<CSMethod, PointsToSet> receiversByCallee) {
+                LambdaSource source, Map<CSMethod, PointsToSet> receiversByCallee) {
             Set<ThisFact> original = new HashSet<>();
             Set<CallFact> originalEdges = new HashSet<>();
             for (CSObj recvObj : recvObjs) {
@@ -956,14 +1203,14 @@ public class LambdaAnalysis implements Plugin {
                 Context calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
                 CSMethod csCallee = csManager.getCSMethod(calleeCtx, callee);
                 original.add(new ThisFact(csCallee, recvObj));
-                if (fitsParameterCount(csCallSite, indy, callee)) {
+                if (fitsParameterCount(csCallSite, source, callee)) {
                     originalEdges.add(new CallFact(csCallSite, csCallee));
                 }
             }
             Set<ThisFact> grouped = new HashSet<>();
             Set<CallFact> groupedEdges = new HashSet<>();
             receiversByCallee.forEach((csCallee, receivers) -> {
-                if (fitsParameterCount(csCallSite, indy, csCallee.getMethod())) {
+                if (fitsParameterCount(csCallSite, source, csCallee.getMethod())) {
                     groupedEdges.add(new CallFact(csCallSite, csCallee));
                 }
                 receivers.forEach(recv -> grouped.add(new ThisFact(csCallee, recv)));
@@ -996,19 +1243,21 @@ public class LambdaAnalysis implements Plugin {
 
         /**
          * (c) A grouping that dispatched only some slots of {@code groups}
-         * must equal, callees and receivers in the same order, the grouping
-         * that dispatches every type of {@code groups}.
+         * must equal, callees, receivers and lambda receivers in the same
+         * order, the grouping that dispatches every type of {@code groups}.
          */
         private void checkInversion(
                 CSCallSite csCallSite, MethodRef targetRef, ReceiverGroups<Type, CSObj> groups,
-                Map<CSMethod, PointsToSet> receiversByCallee) {
+                CalleeGrouper grouping) {
             CalleeGrouper everyType = new CalleeGrouper(csCallSite, targetRef, null, false,
                     LambdaCounters.PATH_CALL);
             groups.forEachGroup(everyType);
-            if (!orderOf(everyType.receiversByCallee).equals(orderOf(receiversByCallee))) {
+            if (!orderOf(everyType.receiversByCallee).equals(orderOf(grouping.receiversByCallee))
+                    || !everyType.lambdaReceivers.equals(grouping.lambdaReceivers)) {
                 throw new AnalysisException("[spd] lambda verify: grouping of " + targetRef
                         + " at " + csCallSite + " differs from the one over every type: "
-                        + everyType.receiversByCallee + " vs " + receiversByCallee);
+                        + everyType.receiversByCallee + " " + everyType.lambdaReceivers
+                        + " vs " + grouping.receiversByCallee + " " + grouping.lambdaReceivers);
             }
             ++inversionChecks;
         }
@@ -1114,15 +1363,29 @@ public class LambdaAnalysis implements Plugin {
                 shiftA = 0;
             }
             Invoke invoke = csCallSite.getCallSite();
-            List<Var> actualArgs = invoke.getInvokeExp().getArgs();
             Context callerContext = csCallSite.getContext();
-            for (int i = shiftA; i < actualArgs.size(); ++i, ++j) {
-                solver.addPFGEdge(new PointerFlowEdge(
-                        FlowKind.PARAMETER_PASSING,
-                        csManager.getCSVar(callerContext, actualArgs.get(i)),
-                        csManager.getCSVar(calleeContext, targetParams.get(j))),
-                        // filter spurious objects caused by imprecise lambda objects
-                         targetParams.get(j).getType());
+            List<CSVar> forwarded = lambdaCallEdge.getSource().getSamArgs();
+            if (forwarded == null) {
+                List<Var> actualArgs = invoke.getInvokeExp().getArgs();
+                for (int i = shiftA; i < actualArgs.size(); ++i, ++j) {
+                    solver.addPFGEdge(new PointerFlowEdge(
+                            FlowKind.PARAMETER_PASSING,
+                            csManager.getCSVar(callerContext, actualArgs.get(i)),
+                            csManager.getCSVar(calleeContext, targetParams.get(j))),
+                            // filter spurious objects caused by imprecise lambda objects
+                             targetParams.get(j).getType());
+                }
+            } else {
+                // a call through a method reference: pass the arguments the
+                // method reference passes to the lambda's functional method
+                for (int i = shiftA; i < forwarded.size(); ++i, ++j) {
+                    solver.addPFGEdge(new PointerFlowEdge(
+                            FlowKind.PARAMETER_PASSING,
+                            forwarded.get(i),
+                            csManager.getCSVar(calleeContext, targetParams.get(j))),
+                            // filter spurious objects caused by imprecise lambda objects
+                            targetParams.get(j).getType());
+                }
             }
             // pass return value
             Var result = invoke.getResult();
@@ -1176,6 +1439,7 @@ public class LambdaAnalysis implements Plugin {
             throw new IllegalStateException("lambda receiver event " + thisEvent
                     + " interrupted by event " + event);
         }
+        drainLambdaReceiverCalls();
     }
 
     /**
@@ -1213,9 +1477,9 @@ public class LambdaAnalysis implements Plugin {
     private void addSharedLambdaCallEdges(
             InstanceInvoInfos infos, PointsToSet pts,
             ReceiverGroups<Type, CSObj> ptsByType, ReceiverTargets targets) {
-        Map<MethodRef, Map<CSMethod, PointsToSet>> groupingByTarget = new HashMap<>();
+        Map<MethodRef, CalleeGrouper> groupingByTarget = new HashMap<>();
         infos.forEach((csCallSite, source) -> {
-            Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
+            CalleeGrouper receiversByCallee = groupingByTarget.computeIfAbsent(
                     targetRefOf(source),
                     targetRef -> groupDeltaByCallee(csCallSite,
                             targetOf(targets, targetRef), ptsByType,

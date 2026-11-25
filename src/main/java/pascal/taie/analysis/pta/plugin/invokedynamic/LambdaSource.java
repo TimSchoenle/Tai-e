@@ -22,14 +22,19 @@
 
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.CallKind;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
+import pascal.taie.analysis.pta.core.cs.element.CSVar;
 import pascal.taie.analysis.pta.core.cs.element.EdgeSource;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.util.Hashes;
+
+import java.util.List;
+import java.util.Objects;
 
 /**
  * The invokedynamic that created a lambda functional object and the context
@@ -37,6 +42,14 @@ import pascal.taie.util.Hashes;
  * variables: what a {@link LambdaCallEdge} carries beyond its call site and
  * callee. {@link LambdaAnalysis} interns one source per pair, so the call
  * sites and callees hold each lambda call edge as this shared source.
+ * <p>
+ * A call can also reach a lambda object as the receiver of a method
+ * reference whose target is the lambda's functional method (a bound
+ * {@code r1::run}, or an unbound {@code Runnable::run} applied to the lambda
+ * object {@code r1}). The source of such an edge also holds the
+ * {@link #getSamArgs() arguments} of that call of the functional method, the
+ * ones the method reference passes to its target, which the edge passes
+ * instead of the call site's.
  */
 final class LambdaSource implements EdgeSource {
 
@@ -44,9 +57,17 @@ final class LambdaSource implements EdgeSource {
 
     private final Context context;
 
+    @Nullable
+    private final List<CSVar> samArgs;
+
     LambdaSource(InvokeDynamic indy, Context context) {
+        this(indy, context, null);
+    }
+
+    LambdaSource(InvokeDynamic indy, Context context, @Nullable List<CSVar> samArgs) {
         this.indy = indy;
         this.context = context;
+        this.samArgs = samArgs == null ? null : List.copyOf(samArgs);
     }
 
     InvokeDynamic getIndy() {
@@ -55,6 +76,17 @@ final class LambdaSource implements EdgeSource {
 
     Context getContext() {
         return context;
+    }
+
+    /**
+     * @return the arguments of the call of the functional method of this
+     * source's lambda objects, when a method reference whose receiver they
+     * are makes that call; null if the call site calls them directly (the
+     * arguments are then the call site's).
+     */
+    @Nullable
+    List<CSVar> getSamArgs() {
+        return samArgs;
     }
 
     @Override
@@ -81,6 +113,7 @@ final class LambdaSource implements EdgeSource {
         int result = edgeHash;
         result = 31 * result + indy.hashCode();
         result = 31 * result + context.hashCode();
+        result = 31 * result + Objects.hashCode(samArgs);
         return result;
     }
 
@@ -93,16 +126,21 @@ final class LambdaSource implements EdgeSource {
             return false;
         }
         LambdaSource that = (LambdaSource) o;
-        return indy.equals(that.indy) && context.equals(that.context);
+        return indy.equals(that.indy) && context.equals(that.context)
+                && Objects.equals(samArgs, that.samArgs);
     }
 
     @Override
     public int hashCode() {
-        return Hashes.hash(indy, context);
+        return samArgs == null
+                ? Hashes.hash(indy, context)
+                : Hashes.hash(indy, context, samArgs);
     }
 
     @Override
     public String toString() {
-        return context + ":" + indy;
+        return samArgs == null
+                ? context + ":" + indy
+                : context + ":" + indy + " with " + samArgs;
     }
 }
