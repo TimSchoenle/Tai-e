@@ -154,6 +154,12 @@ public class LambdaAnalysis implements Plugin {
     private LambdaCounters counters;
 
     /**
+     * Whether {@link #counters} were logged (they are kept for a reader
+     * after the finish).
+     */
+    private boolean countersLogged;
+
+    /**
      * @return whether {@code obj} is a lambda functional object that this
      * analysis creates at a lambda meta factory call.
      */
@@ -175,6 +181,7 @@ public class LambdaAnalysis implements Plugin {
         }
         counters = DefaultSolver.countersEnabled(solver.getOptions())
                 ? new LambdaCounters() : null;
+        countersLogged = false;
     }
 
     @Override
@@ -567,11 +574,13 @@ public class LambdaAnalysis implements Plugin {
      */
     private void logCounters() {
         LambdaCounters c = counters;
-        if (c != null) {
+        if (c != null && !countersLogged) {
             List<Integer> infoCounts = new ArrayList<>();
             invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
             logger.info("Lambda counters: {}", c.line(infoCounts));
-            counters = null;
+            // keep only the counts: drop the last event's callees
+            c.startEvent();
+            countersLogged = true;
         }
     }
 

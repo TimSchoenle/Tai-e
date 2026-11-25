@@ -454,7 +454,7 @@ public class TypeFilter implements Transfer {
         sorted.sort(Comparator.comparingLong((GuardRow r) -> r.known - r.pass).reversed()
                 .thenComparing(Comparator.comparingLong((GuardRow r) -> r.known).reversed())
                 .thenComparing(r -> r.type));
-        long allPass = sorted.stream().filter(r -> r.pass == r.known).count();
+        long allPass = sorted.stream().filter(r -> r.known > 0 && r.pass == r.known).count();
         long allFail = sorted.stream().filter(r -> r.pass == 0 && r.known > 0).count();
         StringBuilder block = new StringBuilder("guards=").append(sorted.size())
                 .append(" all_pass=").append(allPass).append(" all_fail=").append(allFail);
