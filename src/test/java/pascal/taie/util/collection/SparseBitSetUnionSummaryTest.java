@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Checks {@link SparseBitSet#orSummary} and {@link SparseBitSet#minus}
@@ -73,6 +74,68 @@ class SparseBitSetUnionSummaryTest {
             assertEquals(selfBefore, self, at + " self changed");
             assertEquals(sourceBefore, source, at + " source changed");
         }
+    }
+
+    /**
+     * {@link SparseBitSet#setSummary} against a fresh set rebuilt with the
+     * bits, for table and packed sets and bit lists with repeats, bits the
+     * set holds, several new bits in one word and bits far apart.
+     */
+    @Test
+    void setSummaryMatchesTheSetRebuiltWithTheBits() {
+        Random random = new Random(0x5e75L);
+        for (int sequence = 0; sequence < 800; sequence++) {
+            int range = RANGES[sequence % RANGES.length];
+            SparseBitSet self = randomSet(random, range);
+            boolean packed = sequence % 3 == 0;
+            if (packed) {
+                self.pack();
+            } else if (random.nextBoolean()) {
+                self.andNot(randomSet(random, range));
+                self.hashCode();
+            }
+            int[] bits = new int[random.nextInt(9)];
+            for (int i = 0; i < bits.length; i++) {
+                int kind = random.nextInt(4);
+                int held = self.nextSetBit(random.nextInt(range));
+                if (kind == 0 && i > 0) {
+                    bits[i] = bits[random.nextInt(i)];
+                } else if (kind == 1 && held >= 0) {
+                    bits[i] = held;
+                } else if (kind == 2 && i > 0) {
+                    // another bit of the word of an earlier bit
+                    int word = bits[random.nextInt(i)] & -Long.SIZE;
+                    bits[i] = word + random.nextInt(Long.SIZE);
+                } else {
+                    bits[i] = random.nextInt(range);
+                }
+            }
+            SparseBitSet selfBefore = (SparseBitSet) self.copy();
+            String at = "sequence " + sequence;
+
+            long summary = self.setSummary(bits);
+            SparseBitSet expected = rebuilt(self, new SparseBitSet());
+            for (int bit : bits) {
+                expected.set(bit);
+            }
+            assertEquals(expected.hashCode(), SparseBitSet.unionHash(summary), at + " hash");
+            assertEquals(expected.cardinality(), SparseBitSet.unionCardinality(summary),
+                    at + " cardinality");
+            assertEquals(selfBefore, self, at + " self changed");
+            assertEquals(packed, self.isPacked(), at + " packed form changed");
+        }
+    }
+
+    @Test
+    void setSummaryRefusesTheBitsThatSetRefuses() {
+        SparseBitSet set = randomSet(new Random(11), BLOCK_BITS);
+        assertThrows(IndexOutOfBoundsException.class, () -> set.setSummary(new int[]{1, -1}));
+        assertThrows(IndexOutOfBoundsException.class, () -> set.set(Integer.MAX_VALUE));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> set.setSummary(new int[]{Integer.MAX_VALUE}));
+        long empty = set.setSummary(new int[0]);
+        assertEquals(set.hashCode(), SparseBitSet.unionHash(empty));
+        assertEquals(set.cardinality(), SparseBitSet.unionCardinality(empty));
     }
 
     @Test

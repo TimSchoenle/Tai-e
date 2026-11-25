@@ -429,7 +429,7 @@ class PointsToSetInternerTest {
         interner.addAllDiff(p5, small(7));
         interner.unshare(p5);
         interner.addAllDiff(p5, small(8));
-        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3, 0, 0, 0),
+        assertEquals(new PointsToSetInterner.Counters(1, 1, 6, 1, 8, 3, 0, 0, 0, 0, 0),
                 interner.counters());
     }
 
@@ -511,8 +511,64 @@ class PointsToSetInternerTest {
         assertSame(before, p4.getPointsToSet());
         assertEquals(List.of(1, 2, 3, 40), sequence(before));
         // p2 and p4 took p1's set from the empty set without a copy
-        assertEquals(new PointsToSetInterner.Counters(0, 0, 5, 1, 3, 0, 2, 1, 2),
+        assertEquals(new PointsToSetInterner.Counters(0, 0, 5, 1, 3, 0, 2, 1, 2, 0, 0),
                 interner.counters());
+    }
+
+    /**
+     * A large set held by two or more that takes a small set finds the
+     * result in the table without copying the large set; the difference has
+     * the elements, order and form a copy would give.
+     */
+    @Test
+    void sharedLargeSetTakesAnEqualSharedResultOfASmallSetWithoutACopy() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        Pointer p4 = TestElements.pointer(4);
+        Pointer p5 = TestElements.pointer(5);
+        interner.addAllDiff(p1, large(1, 2, 3, 40));
+        interner.addAllDiff(p2, large(1, 2, 3, 40));
+        interner.addAllDiff(p4, large(1, 2, 3, 40));
+        PointsToSet before = p1.getPointsToSet();
+        assertSame(before, p2.getPointsToSet());
+        interner.addAllDiff(p3, large(1, 2, 3, 5, 6, 40));
+        PointsToSet target = p3.getPointsToSet();
+        // the same elements in the small form: not the large result
+        interner.addAllDiff(p5, small(1, 2, 3, 40, 60));
+        int sharedSets = interner.size();
+        long copies = interner.counters().copies();
+
+        // two new objects in one word, one known, in an order a copy keeps
+        PointsToSet reference = before.copy();
+        PointsToSet referenceDiff = reference.addAllDiff(small(6, 3, 5));
+        PointsToSet diff = interner.addAllDiff(p1, small(6, 3, 5));
+        assertEquals(copies, interner.counters().copies(), "the held set was copied");
+        assertSame(target, p1.getPointsToSet());
+        assertEquals(List.of(6, 5), sequence(referenceDiff));
+        assertEquals(sequence(referenceDiff), sequence(diff));
+        assertEquals(isLarge(referenceDiff), isLarge(diff));
+        assertFalse(diff.isShared());
+        assertEquals(sequence(reference), sequence(target));
+        assertSame(before, p2.getPointsToSet());
+        assertEquals(List.of(1, 2, 3, 40), sequence(before));
+        assertEquals(sharedSets, interner.size());
+
+        // a singleton whose result the table holds only in the small form,
+        // and a probe that finds nothing, both copy as before
+        PointsToSet singletonDiff = interner.addAllDiff(p2, small(60));
+        assertEquals(copies + 1, interner.counters().copies());
+        assertEquals(List.of(60), sequence(singletonDiff));
+        assertFalse(isLarge(singletonDiff));
+        assertTrue(isLarge(p2.getPointsToSet()));
+        assertNotSame(p5.getPointsToSet(), p2.getPointsToSet());
+        assertEquals(List.of(1, 2, 3, 40, 60), sequence(p2.getPointsToSet()));
+        assertSame(before, p4.getPointsToSet());
+        assertEquals(List.of(1, 2, 3, 40), sequence(before));
+        PointsToSetInterner.Counters counters = interner.counters();
+        assertEquals(2, counters.smallProbes());
+        assertEquals(1, counters.smallProbeHits());
+        assertEquals(0, counters.probes());
     }
 
     /**
@@ -528,6 +584,8 @@ class PointsToSetInternerTest {
         long probes = 0;
         long probeHits = 0;
         long adoptions = 0;
+        long smallProbes = 0;
+        long smallProbeHits = 0;
         for (long seed = 1; seed <= 40; ++seed) {
             Random random = new Random(seed);
             PointsToSetInterner sharing = new PointsToSetInterner(factory, 2);
@@ -586,10 +644,14 @@ class PointsToSetInternerTest {
             probes += sharing.counters().probes();
             probeHits += sharing.counters().probeHits();
             adoptions += sharing.counters().adoptions();
+            smallProbes += sharing.counters().smallProbes();
+            smallProbeHits += sharing.counters().smallProbeHits();
         }
         // the sequences take both outcomes of a probe before a copy
         assertTrue(probeHits > 0, "no probe found its result");
         assertTrue(probes > probeHits, "every probe found its result");
+        assertTrue(smallProbeHits > 0, "no probe by a small set found its result");
+        assertTrue(smallProbes > smallProbeHits, "every probe by a small set found its result");
         assertTrue(adoptions > 0, "no empty set adopted a shared set");
     }
 
