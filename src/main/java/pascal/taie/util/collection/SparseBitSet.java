@@ -1249,8 +1249,11 @@ public class SparseBitSet extends AbstractBitSet
      * hold; neither set changes.
      */
     public SparseBitSet minus(SparseBitSet other) {
-        SparseBitSet result = new SparseBitSet();
         long[] words = packed;
+        SparseBitSet result = new SparseBitSet(new State());
+        // grown as getOrCreateArea grows it, so the result has the table of
+        // a set built bit by bit
+        long[][][] resultTable = result.table;
         boolean otherPacked = other.packed != null;
         // the header of other at or after the block of the walk, if packed
         int otherHeader = 0;
@@ -1274,49 +1277,72 @@ public class SparseBitSet extends AbstractBitSet
                             ? other.packedWordAt(otherHeader, index) : other.wordAt(index));
                     if (word != 0) {
                         if (resultBlock == null) {
-                            resultBlock = result.getOrCreateBlock(
-                                    blockIndex >> LEVEL2, blockIndex & MASK2);
+                            int w1 = blockIndex >> LEVEL2;
+                            if (w1 >= resultTable.length) {
+                                result.resize(bitIndex(w1, 0, 0));
+                                resultTable = result.table;
+                            }
+                            long[][] resultArea = resultTable[w1];
+                            if (resultArea == null) {
+                                resultArea = resultTable[w1] = new long[LENGTH2][];
+                            }
+                            resultBlock = resultArea[blockIndex & MASK2] = new long[LENGTH3];
                         }
                         resultBlock[w3] = word;
                     }
                 }
             }
-            result.invalidateState();
-            return result;
-        }
-        // other is read in place, packed or not
-        for (int w1 = 0; w1 < table.length; ++w1) {
-            long[][] area = table[w1];
-            if (area == null) {
-                continue;
-            }
-            for (int w2 = 0; w2 < LENGTH2; ++w2) {
-                long[] block = area[w2];
-                if (block == null) {
+        } else {
+            // other is read in place, packed or not
+            for (int w1 = 0; w1 < table.length; ++w1) {
+                long[][] area = table[w1];
+                if (area == null) {
                     continue;
                 }
-                long[] otherBlock = otherPacked ? null : getBlock(other.table, w1, w2);
-                if (otherPacked) {
-                    otherHeader = other.packedSeek(otherHeader, (w1 << LEVEL2) + w2);
-                }
-                long[] resultBlock = null;
-                for (int w3 = 0; w3 < LENGTH3; ++w3) {
-                    long word = otherBlock != null ? block[w3] & ~otherBlock[w3]
-                            : otherPacked && block[w3] != 0
-                            ? block[w3] & ~other.packedWordAt(otherHeader, wordIndex(w1, w2, w3))
-                            : block[w3];
-                    if (word != 0) {
-                        if (resultBlock == null) {
-                            resultBlock = result.getOrCreateBlock(w1, w2);
+                long[][] resultArea = null;
+                for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                    long[] block = area[w2];
+                    if (block == null) {
+                        continue;
+                    }
+                    long[] otherBlock = otherPacked ? null : getBlock(other.table, w1, w2);
+                    if (otherPacked) {
+                        otherHeader = other.packedSeek(otherHeader, (w1 << LEVEL2) + w2);
+                    }
+                    long[] resultBlock = null;
+                    for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                        long word = otherBlock != null ? block[w3] & ~otherBlock[w3]
+                                : otherPacked && block[w3] != 0
+                                ? block[w3] & ~other.packedWordAt(otherHeader, wordIndex(w1, w2, w3))
+                                : block[w3];
+                        if (word != 0) {
+                            if (resultBlock == null) {
+                                if (resultArea == null) {
+                                    if (w1 >= resultTable.length) {
+                                        result.resize(bitIndex(w1, 0, 0));
+                                        resultTable = result.table;
+                                    }
+                                    resultArea = resultTable[w1] = new long[LENGTH2][];
+                                }
+                                resultBlock = resultArea[w2] = new long[LENGTH3];
+                            }
+                            resultBlock[w3] = word;
                         }
-                        resultBlock[w3] = word;
                     }
                 }
             }
         }
-        // the blocks were written directly
-        result.invalidateState();
         return result;
+    }
+
+    /**
+     * An empty set of one area, as {@link #SparseBitSet()} makes it, but
+     * with the given (invalid) state and without the pass that computes it,
+     * for a result that writes its areas and blocks directly.
+     */
+    private SparseBitSet(State state) {
+        this.state = state;
+        resize(0);
     }
 
     @Override
@@ -2194,8 +2220,56 @@ public class SparseBitSet extends AbstractBitSet
      */
     private void updateState() {
         if (!state.valid) {
-            iterateBlocks(this, this, new UpdateAction(this));
+            if (packed != null) {
+                updatePackedState();
+            } else {
+                iterateBlocks(this, this, new UpdateAction(this));
+            }
         }
+    }
+
+    /**
+     * {@link #updateState()} of a packed set, read in place: every packed
+     * block holds a non-zero word, so this computes the state that the pass
+     * over the restored blocks would, and the set stays packed. Today a
+     * packed set keeps the valid state that {@link #pack()} computed, as
+     * every change restores the blocks first; this keeps a state read of a
+     * packed set from restoring its blocks should that ever change.
+     */
+    private void updatePackedState() {
+        long[] words = packed;
+        int blocks = packedBlocks;
+        long hash = State.HASH_SEED;
+        int count = 0;
+        int cardinality = 0;
+        int maxWordIndex = 0;
+        long maxWord = 0L;
+        for (int h = 0; h < blocks; ++h) {
+            long header = words[h];
+            int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+            int mask = packedMask(header);
+            int at = blocks + packedRank(header);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) != 0) {
+                    long word = words[at++];
+                    int index = firstWord + w3;
+                    ++count;
+                    hash ^= word * (long) (index + 1);
+                    cardinality += Long.bitCount(word);
+                    maxWordIndex = index;
+                    maxWord = word;
+                }
+            }
+        }
+        State s = state;
+        s.count = count;
+        s.cardinality = cardinality;
+        s.maxWordIndex = maxWordIndex;
+        s.maxWord = maxWord;
+        s.blockCount = blocks;
+        s.rawHash = hash;
+        s.incremental = true;
+        s.valid = true;
     }
 
     @Serial
@@ -2335,7 +2409,7 @@ public class SparseBitSet extends AbstractBitSet
 
         @Override
         void start(SparseBitSet iterated) {
-            hash = 1234L; // Magic number
+            hash = State.HASH_SEED;
             maxWordIndex = 0; // index of last non-zero word
             maxWord = 0L; // word at that index
             count = 0; // count of non-zero words in whole set
@@ -2408,6 +2482,9 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     private static class State {
+
+        /** The hash of an empty set before folding (a magic number). */
+        private static final long HASH_SEED = 1234L;
 
         /**
          * Boolean value indicating whether the values in current state is valid;
