@@ -1165,20 +1165,28 @@ public class SparseBitSet extends AbstractBitSet
         long rawHash = state.rawHash;
         int cardinality = state.cardinality;
         long[] sourceWords = source.packed;
+        boolean selfPacked = packed != null;
+        // the header of this packed set at or after the block of the walk
+        int selfHeader = 0;
         if (sourceWords != null) {
             int blocks = source.packedBlocks;
             for (int h = 0; h < blocks; ++h) {
                 long header = sourceWords[h];
-                int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                int firstWord = blockIndex << SHIFT2;
                 int mask = packedMask(header);
                 int at = blocks + packedRank(header);
+                if (selfPacked) {
+                    selfHeader = packedSeek(selfHeader, blockIndex);
+                }
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     if ((mask & (1 << w3)) == 0) {
                         continue;
                     }
                     long sourceWord = sourceWords[at++];
                     int index = firstWord + w3;
-                    long selfWord = wordAt(index);
+                    long selfWord = selfPacked
+                            ? packedWordAt(selfHeader, index) : wordAt(index);
                     long newWord = selfWord | sourceWord;
                     if (newWord != selfWord) {
                         long weight = index + 1;
@@ -1203,10 +1211,13 @@ public class SparseBitSet extends AbstractBitSet
                     continue;
                 }
                 long[] selfBlock = selfArea != null ? selfArea[w2] : null;
+                if (selfPacked) {
+                    selfHeader = packedSeek(selfHeader, (w1 << LEVEL2) + w2);
+                }
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     long selfWord = selfBlock != null ? selfBlock[w3]
                             : selfTable == null && sourceBlock[w3] != 0
-                            ? packedWord(wordIndex(w1, w2, w3)) : 0L;
+                            ? packedWordAt(selfHeader, wordIndex(w1, w2, w3)) : 0L;
                     long newWord = selfWord | sourceBlock[w3];
                     if (newWord != selfWord) {
                         long weight = wordIndex(w1, w2, w3) + 1;
@@ -1240,6 +1251,9 @@ public class SparseBitSet extends AbstractBitSet
     public SparseBitSet minus(SparseBitSet other) {
         SparseBitSet result = new SparseBitSet();
         long[] words = packed;
+        boolean otherPacked = other.packed != null;
+        // the header of other at or after the block of the walk, if packed
+        int otherHeader = 0;
         if (words != null) {
             // both sets are read in place
             for (int h = 0; h < packedBlocks; ++h) {
@@ -1247,12 +1261,17 @@ public class SparseBitSet extends AbstractBitSet
                 int blockIndex = (int) (header >>> Integer.SIZE);
                 int mask = packedMask(header);
                 int at = packedBlocks + packedRank(header);
+                if (otherPacked) {
+                    otherHeader = other.packedSeek(otherHeader, blockIndex);
+                }
                 long[] resultBlock = null;
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     if ((mask & (1 << w3)) == 0) {
                         continue;
                     }
-                    long word = words[at++] & ~other.wordAt((blockIndex << SHIFT2) + w3);
+                    int index = (blockIndex << SHIFT2) + w3;
+                    long word = words[at++] & ~(otherPacked
+                            ? other.packedWordAt(otherHeader, index) : other.wordAt(index));
                     if (word != 0) {
                         if (resultBlock == null) {
                             resultBlock = result.getOrCreateBlock(
@@ -1266,7 +1285,6 @@ public class SparseBitSet extends AbstractBitSet
             return result;
         }
         // other is read in place, packed or not
-        boolean otherPacked = other.packed != null;
         for (int w1 = 0; w1 < table.length; ++w1) {
             long[][] area = table[w1];
             if (area == null) {
@@ -1278,11 +1296,14 @@ public class SparseBitSet extends AbstractBitSet
                     continue;
                 }
                 long[] otherBlock = otherPacked ? null : getBlock(other.table, w1, w2);
+                if (otherPacked) {
+                    otherHeader = other.packedSeek(otherHeader, (w1 << LEVEL2) + w2);
+                }
                 long[] resultBlock = null;
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     long word = otherBlock != null ? block[w3] & ~otherBlock[w3]
                             : otherPacked && block[w3] != 0
-                            ? block[w3] & ~other.packedWord(wordIndex(w1, w2, w3))
+                            ? block[w3] & ~other.packedWordAt(otherHeader, wordIndex(w1, w2, w3))
                             : block[w3];
                     if (word != 0) {
                         if (resultBlock == null) {
@@ -1623,11 +1644,57 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * {@link #packedCeiling} for a walk over nondecreasing block indexes:
+     * searches forward from {@code from}, a header index that is not past
+     * the answer (0, or the answer for an earlier block index of the walk),
+     * in steps that double and then by halving, so a walk costs one seek per
+     * block of the walked set, each the logarithm of the headers it skips,
+     * instead of a full binary search per word.
+     *
+     * @return the index of the first header of {@link #packed} whose block
+     * index is at least {@code blockIndex}, or {@link #packedBlocks} if
+     * there is none.
+     */
+    private int packedSeek(int from, int blockIndex) {
+        long[] words = packed;
+        int blocks = packedBlocks;
+        if (from >= blocks || (int) (words[from] >>> Integer.SIZE) >= blockIndex) {
+            return from;
+        }
+        // every header before low has a smaller block index
+        int low = from + 1;
+        int step = 1;
+        int high = low;
+        while (high < blocks && (int) (words[high] >>> Integer.SIZE) < blockIndex) {
+            low = high + 1;
+            step <<= 1;
+            high = Math.min(blocks, from + step);
+        }
+        // the answer is in [low, high]
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if ((int) (words[mid] >>> Integer.SIZE) < blockIndex) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    /**
      * @return the word of this packed set at {@code wordIndex}, 0 if absent.
      */
     private long packedWord(int wordIndex) {
+        return packedWordAt(packedCeiling(wordIndex >> SHIFT2), wordIndex);
+    }
+
+    /**
+     * @param h the {@link #packedCeiling} of the block of {@code wordIndex}
+     * @return the word of this packed set at {@code wordIndex}, 0 if absent.
+     */
+    private long packedWordAt(int h, int wordIndex) {
         int blockIndex = wordIndex >> SHIFT2;
-        int h = packedCeiling(blockIndex);
         if (h == packedBlocks) {
             return 0L;
         }
@@ -1687,17 +1754,26 @@ public class SparseBitSet extends AbstractBitSet
      */
     private boolean containsWords(SparseBitSet other) {
         long[] words = other.packed;
+        boolean selfPacked = packed != null;
+        // the header of this packed set at or after the block of the walk
+        int selfHeader = 0;
         if (words != null) {
             int blocks = other.packedBlocks;
             for (int h = 0; h < blocks; ++h) {
                 long header = words[h];
-                int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                int firstWord = blockIndex << SHIFT2;
                 int mask = packedMask(header);
                 int at = blocks + packedRank(header);
+                if (selfPacked) {
+                    selfHeader = packedSeek(selfHeader, blockIndex);
+                }
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     if ((mask & (1 << w3)) != 0) {
                         long word = words[at++];
-                        if ((word & ~wordAt(firstWord + w3)) != 0) {
+                        long selfWord = selfPacked
+                                ? packedWordAt(selfHeader, firstWord + w3) : wordAt(firstWord + w3);
+                        if ((word & ~selfWord) != 0) {
                             return false;
                         }
                     }
@@ -1716,10 +1792,18 @@ public class SparseBitSet extends AbstractBitSet
                 if (block == null) {
                     continue;
                 }
+                if (selfPacked) {
+                    selfHeader = packedSeek(selfHeader, (w1 << LEVEL2) + w2);
+                }
                 for (int w3 = 0; w3 < LENGTH3; ++w3) {
                     long word = block[w3];
-                    if (word != 0 && (word & ~wordAt(wordIndex(w1, w2, w3))) != 0) {
-                        return false;
+                    if (word != 0) {
+                        int index = wordIndex(w1, w2, w3);
+                        long selfWord = selfPacked
+                                ? packedWordAt(selfHeader, index) : wordAt(index);
+                        if ((word & ~selfWord) != 0) {
+                            return false;
+                        }
                     }
                 }
             }
