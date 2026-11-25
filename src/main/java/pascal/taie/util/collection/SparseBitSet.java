@@ -1298,6 +1298,73 @@ public class SparseBitSet extends AbstractBitSet
         return result;
     }
 
+    /**
+     * @return a new set of the bits that both this set and {@code other}
+     * hold: the set that {@link #copy()} of this set and then
+     * {@link #and and(other)} on the copy make, not packed and without an
+     * all-zero block. Neither set changes; a packed set is read in place.
+     */
+    public SparseBitSet intersection(SparseBitSet other) {
+        if (packed == null && other.packed != null) {
+            // the packed set is walked, the other one is read word by word
+            return other.intersection(this);
+        }
+        SparseBitSet result = new SparseBitSet();
+        long[] words = packed;
+        if (words != null) {
+            for (int h = 0; h < packedBlocks; ++h) {
+                long header = words[h];
+                int blockIndex = (int) (header >>> Integer.SIZE);
+                int mask = packedMask(header);
+                int at = packedBlocks + packedRank(header);
+                long[] resultBlock = null;
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) == 0) {
+                        continue;
+                    }
+                    long word = words[at++] & other.wordAt((blockIndex << SHIFT2) + w3);
+                    if (word != 0) {
+                        if (resultBlock == null) {
+                            resultBlock = result.getOrCreateBlock(
+                                    blockIndex >> LEVEL2, blockIndex & MASK2);
+                        }
+                        resultBlock[w3] = word;
+                    }
+                }
+            }
+        } else {
+            long[][][] otherTable = other.table;
+            int areas = Math.min(table.length, otherTable.length);
+            for (int w1 = 0; w1 < areas; ++w1) {
+                long[][] area = table[w1];
+                long[][] otherArea = otherTable[w1];
+                if (area == null || otherArea == null) {
+                    continue;
+                }
+                for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                    long[] block = area[w2];
+                    long[] otherBlock = otherArea[w2];
+                    if (block == null || otherBlock == null) {
+                        continue;
+                    }
+                    long[] resultBlock = null;
+                    for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                        long word = block[w3] & otherBlock[w3];
+                        if (word != 0) {
+                            if (resultBlock == null) {
+                                resultBlock = result.getOrCreateBlock(w1, w2);
+                            }
+                            resultBlock[w3] = word;
+                        }
+                    }
+                }
+            }
+        }
+        // the blocks were written directly
+        result.invalidateState();
+        return result;
+    }
+
     @Override
     public boolean xor(IBitSet set) {
         if (this == set) {

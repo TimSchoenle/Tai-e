@@ -447,7 +447,7 @@ public class TypeFilter implements Transfer {
         if (input instanceof DelegatePointsToSet delegate
                 && delegate.set instanceof AbstractHybridSet<CSObj> hybrid
                 && hybrid.set instanceof GenericBitSet<CSObj> in) {
-            PointsToSet result = filterLarge(m, input, in, hybrid.getThreshold());
+            PointsToSet result = filterLarge(m, delegate, in, hybrid.getThreshold());
             if (result != null) {
                 return result;
             }
@@ -467,7 +467,7 @@ public class TypeFilter implements Transfer {
      * object passes and the input is above the threshold, the result is the
      * input itself (as for {@link Identity}): consumers only read it.
      */
-    private @Nullable PointsToSet filterLarge(Memo m, PointsToSet input,
+    private @Nullable PointsToSet filterLarge(Memo m, DelegatePointsToSet input,
                                               GenericBitSet<CSObj> in, int threshold) {
         if (stats) {
             ++largeApplications;
@@ -478,6 +478,11 @@ public class TypeFilter implements Transfer {
         if (passing > threshold) {
             if (passing == in.size()) {
                 return input;
+            }
+            if (input.canIntersectLarge(m.pass)) {
+                // built from the words of input AND pass, without copying
+                // the input
+                return input.largeIntersection(m.pass);
             }
             PointsToSet result = input.copy();
             if (!(result instanceof DelegatePointsToSet delegate

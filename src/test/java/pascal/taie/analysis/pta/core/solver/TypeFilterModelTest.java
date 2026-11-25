@@ -34,9 +34,11 @@ import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.Indexer;
+import pascal.taie.util.collection.AbstractHybridSet;
 import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.Sets;
 
+import java.lang.management.ManagementFactory;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
@@ -83,6 +85,23 @@ class TypeFilterModelTest {
     private static int identityResults;
 
     private static int packedInputs;
+
+    /**
+     * Bits of one block of a sparse bit set (8 words).
+     */
+    private static final int BLOCK_BITS = 8 * Long.SIZE;
+
+    /**
+     * Bytes of one block of a sparse bit set (a long[8] with its header).
+     */
+    private static final int BLOCK_BYTES = 8 * Long.BYTES + 16;
+
+    private static final int ALLOCATION_REPS = 2000;
+
+    /**
+     * Keeps the results of the allocation probe reachable.
+     */
+    private static Object sink;
 
     /**
      * Runs the trials on the solver's objects at the end of the analysis.
@@ -132,6 +151,110 @@ class TypeFilterModelTest {
             probeTypeIdsBeyondFirstWord(types, objects, true);
             probeTypeIdsBeyondFirstWord(types, objects, false);
             probeNoObjectLookupForKnownTypes(types, objects);
+            probeResultWithoutInputCopy(types, objects);
+        }
+
+        /**
+         * Filters two bit-set inputs with the same passing objects (more
+         * than a small set holds, all in one block of the bit set): one
+         * input with a failing object only in that block, one with failing
+         * objects in further blocks too. The large result is built from the
+         * words of input AND pass, so both applications allocate the same
+         * bytes; a copy of the input would also allocate its further blocks.
+         */
+        private void probeResultWithoutInputCopy(TypeSystem types, List<CSObj> objects) {
+            if (Boolean.getBoolean("spd.typefilter.verify")) {
+                // the per-application check allocates by the size of the input
+                return;
+            }
+            com.sun.management.ThreadMXBean bean =
+                    (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+            if (!bean.isThreadAllocatedMemorySupported()
+                    || !bean.isThreadAllocatedMemoryEnabled()) {
+                FAILURES.add("allocation probe: thread allocation is not measured");
+                return;
+            }
+            PointsToSet empty = solver.makePointsToSet();
+            if (!(empty instanceof DelegatePointsToSet delegate
+                    && delegate.set instanceof AbstractHybridSet<CSObj> hybrid)) {
+                FAILURES.add("allocation probe: points-to sets are not hybrid sets");
+                return;
+            }
+            int smallSet = hybrid.getThreshold();
+            Indexer<CSObj> indexer = solver.getCSManager().getObjectIndexer();
+            Set<Type> guards = Sets.newLinkedSet();
+            objects.forEach(o -> guards.add(o.getObject().getType()));
+            guards.add(types.getClassType("java.lang.Object"));
+            for (Type guard : guards) {
+                Map<Integer, List<CSObj>> passingByBlock = new LinkedHashMap<>();
+                Map<Integer, List<CSObj>> failingByBlock = new LinkedHashMap<>();
+                for (CSObj o : objects) {
+                    int block = indexer.getIndex(o) / BLOCK_BITS;
+                    (types.isAssignable(guard, o.getObject().getType())
+                            ? passingByBlock : failingByBlock)
+                            .computeIfAbsent(block, b -> new ArrayList<>()).add(o);
+                }
+                for (Map.Entry<Integer, List<CSObj>> e : passingByBlock.entrySet()) {
+                    List<CSObj> sameBlockFailing = failingByBlock.get(e.getKey());
+                    if (e.getValue().size() <= smallSet || sameBlockFailing == null) {
+                        continue;
+                    }
+                    PointsToSet near = solver.makePointsToSet();
+                    e.getValue().forEach(near::addObject);
+                    near.addObject(sameBlockFailing.get(0));
+                    PointsToSet far = near.copy();
+                    failingByBlock.forEach((block, failing) -> {
+                        if (!block.equals(e.getKey()) && !passingByBlock.containsKey(block)) {
+                            failing.forEach(far::addObject);
+                        }
+                    });
+                    if (far.size() == near.size()) {
+                        continue;
+                    }
+                    if (TypeFilter.representation(near) != 2) {
+                        FAILURES.add("allocation probe: " + near.size()
+                                + " objects are not held in a bit set");
+                        return;
+                    }
+                    TypeFilter filter = new TypeFilter(guard, solver);
+                    for (int i = 0; i < ALLOCATION_REPS * 4; ++i) {
+                        sink = filter.apply(null, near);
+                        sink = filter.apply(null, far);
+                    }
+                    // the rounds alternate, so a change of compiled code
+                    // between them cannot favour one input
+                    long nearBytes = Long.MAX_VALUE;
+                    long farBytes = Long.MAX_VALUE;
+                    for (int round = 0; round < 5; ++round) {
+                        nearBytes = Math.min(nearBytes, bytesPerApplication(bean, filter, near));
+                        farBytes = Math.min(farBytes, bytesPerApplication(bean, filter, far));
+                    }
+                    System.out.println("type filter result allocation: " + nearBytes
+                            + " B per application (input of one block), " + farBytes
+                            + " B (input of more blocks)");
+                    if (Math.abs(farBytes - nearBytes) >= BLOCK_BYTES / 2) {
+                        FAILURES.add("large result allocates " + farBytes + " B for an input of "
+                                + far.size() + " objects and " + nearBytes + " B for "
+                                + near.size() + " objects with the same result");
+                    }
+                    return;
+                }
+            }
+            FAILURES.add("no guard with more than " + smallSet
+                    + " passing objects in one block and failing objects beside them");
+        }
+
+        /**
+         * @return the bytes this thread allocated per application of the
+         * filter to the input, over one round of applications
+         */
+        private static long bytesPerApplication(com.sun.management.ThreadMXBean bean,
+                                                TypeFilter filter, PointsToSet input) {
+            long before = bean.getCurrentThreadAllocatedBytes();
+            for (int i = 0; i < ALLOCATION_REPS; ++i) {
+                sink = filter.apply(null, input);
+            }
+            return (bean.getCurrentThreadAllocatedBytes() - before) / ALLOCATION_REPS;
         }
 
         /**
