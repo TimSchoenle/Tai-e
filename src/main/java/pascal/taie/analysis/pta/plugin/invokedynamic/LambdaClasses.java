@@ -23,6 +23,7 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import org.jspecify.annotations.Nullable;
+import pascal.taie.World;
 import pascal.taie.frontend.java.classes.DefaultClassLoader;
 import pascal.taie.frontend.java.classes.PhantomClassBuilder;
 import pascal.taie.frontend.java.classes.PhantomClassSource;
@@ -49,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -75,15 +77,23 @@ import java.util.Set;
  * of an added interface, but no declared method: its lookup ends at an abstract
  * method of a final class, so a call of the interface method or of a bridge
  * stays unresolved and {@link LambdaAnalysis#onUnresolvedCall} connects it to
- * the implementation, as for a lambda object of {@code metafactory}. One class
- * serves every call with the same functional interface, added interfaces and
- * declared methods; it is added to the class hierarchy at its first use and
- * reused by later analyses of the same world.
+ * the implementation. One class serves every call with the same functional
+ * interface, added interfaces and declared methods; it is added to the class
+ * hierarchy at its first use and reused by later analyses of the same world.
  * <p>
- * A call that adds no interface, whose static arguments are not of the
- * documented kinds, or whose functional or added interface is missing or not
- * an interface (its linkage fails at run time) keeps the return type of the
- * invokedynamic as the type of its lambda object.
+ * A lambda object of a call that adds no interface ({@code metafactory}, or
+ * altMetafactory without such flags) gets such a class too if the functional
+ * interface or a superinterface declares a default method of a subsignature
+ * the lambda class declares (the interface method re-abstracted over an
+ * inherited default, or a bridge): typed by the functional interface, its call
+ * would be dispatched to that default method, which the run time never runs.
+ * Otherwise the functional interface types it exactly.
+ * <p>
+ * An added interface missing from the analysed classes (phantom) is left out
+ * of the class. A call whose static arguments are not of the documented
+ * kinds, whose functional interface is missing or not an interface, or whose
+ * added class is not an interface (its linkage fails at run time) keeps the
+ * return type of the invokedynamic as the type of its lambda object.
  */
 final class LambdaClasses {
 
@@ -96,14 +106,21 @@ final class LambdaClasses {
 
     private static final String NAME_PREFIX = "pascal.taie.lambda.Lambda$";
 
+    /**
+     * The synthetic classes of each class hierarchy by name, kept until the
+     * world is reset, so that a later analysis of the same world reuses
+     * them without scanning the hierarchy.
+     */
+    private static final Map<ClassHierarchy, Map<String, ClassType>> REGISTRY =
+            new IdentityHashMap<>();
+
+    static {
+        World.registerResetCallback(LambdaClasses::clearRegistry);
+    }
+
     private final ClassHierarchy hierarchy;
 
     private final TypeSystem typeSystem;
-
-    /**
-     * The class type of each synthetic class name used so far.
-     */
-    private final Map<String, ClassType> types = new HashMap<>();
 
     /**
      * Interfaces and declared methods of a synthetic class.
@@ -150,22 +167,27 @@ final class LambdaClasses {
      */
     Type typeOf(InvokeDynamic indy) {
         Type returnType = indy.getMethodType().getReturnType();
-        if (!isAltMetafactory(indy)
-                || !(returnType instanceof ClassType functional)) {
+        if (!(returnType instanceof ClassType functional)) {
             return returnType;
         }
         Shape shape = shapeOf(indy, functional);
         if (shape == null) {
             return returnType;
         }
-        return types.computeIfAbsent(shape.className(), name -> getOrCreate(shape, name));
+        return getOrCreate(shape);
     }
 
     /**
-     * @return the number of synthetic class types used so far.
+     * @return whether {@code jclass} is a synthetic class of lambda objects
+     * built by this class.
      */
-    int size() {
-        return types.size();
+    static boolean isLambdaClass(JClass jclass) {
+        return jclass.isSynthetic() && jclass.isFinal()
+                && jclass.getName().startsWith(NAME_PREFIX);
+    }
+
+    private static synchronized void clearRegistry() {
+        REGISTRY.clear();
     }
 
     private static boolean isAltMetafactory(InvokeDynamic indy) {
@@ -175,60 +197,132 @@ final class LambdaClasses {
 
     /**
      * @return the shape of the class of {@code indy}'s lambda objects, or
-     * null if it adds no interface or cannot link (see the class comment).
+     * null if the functional interface types them exactly or the call
+     * cannot link (see the class comment).
      */
     private @Nullable Shape shapeOf(InvokeDynamic indy, ClassType functional) {
         List<Literal> args = indy.getBootstrapArgs();
-        if (args.size() <= FLAGS_INDEX
-                || !(args.get(0) instanceof MethodType interfaceMethod)
-                || !(args.get(FLAGS_INDEX) instanceof IntLiteral flagsLiteral)) {
+        if (args.isEmpty() || !(args.get(0) instanceof MethodType interfaceMethod)) {
             return null;
         }
-        int flags = flagsLiteral.getValue();
+        JClass functionalClass = functional.getJClass();
+        if (functionalClass == null || functionalClass.isPhantom()
+                || !functionalClass.isInterface()) {
+            return null;
+        }
         Set<ClassType> interfaces = new LinkedHashSet<>();
         interfaces.add(functional);
-        if ((flags & LambdaMetafactory.FLAG_SERIALIZABLE) != 0) {
-            interfaces.add(typeSystem.getClassType(ClassNames.SERIALIZABLE));
+        List<MethodType> methods = new ArrayList<>();
+        methods.add(interfaceMethod);
+        if (isAltMetafactory(indy) && !addAltArguments(args, interfaces, methods)) {
+            return null;
+        }
+        if (interfaces.size() == 1
+                && !shadowsDefault(functionalClass, indy.getMethodName(), methods)) {
+            return null;
+        }
+        return new Shape(List.copyOf(interfaces), indy.getMethodName(), List.copyOf(methods));
+    }
+
+    /**
+     * @return whether {@code functional} or a superinterface declares a
+     * default method of a subsignature that the lambda class declares (a
+     * bridge, or the interface method re-abstracted over a default): the
+     * hierarchy would dispatch a call of it on {@code functional} to that
+     * default method, while the run time calls the lambda's own method.
+     */
+    private static boolean shadowsDefault(JClass functional, String name,
+                                          List<MethodType> methods) {
+        for (MethodType m : methods) {
+            if (declaresDefault(functional, Subsignature.get(
+                    name, m.getParamTypes(), m.getReturnType()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean declaresDefault(JClass iface, Subsignature subsignature) {
+        if (iface.isPhantom()) {
+            return false;
+        }
+        JMethod method = iface.getDeclaredMethod(subsignature);
+        if (method != null && !method.isAbstract() && !method.isStatic()) {
+            return true;
+        }
+        for (JClass sup : iface.getInterfaces()) {
+            if (declaresDefault(sup, subsignature)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Adds the interfaces and bridges of the flags of an altMetafactory call.
+     * An added interface missing from the analysed classes (phantom) is left
+     * out: a filter of it drops the lambda object as any other object.
+     *
+     * @return false if the static arguments are not of the documented kinds
+     * or an added class is not an interface (the call cannot link).
+     */
+    private boolean addAltArguments(List<Literal> args, Set<ClassType> interfaces,
+                                    List<MethodType> methods) {
+        if (args.size() <= FLAGS_INDEX
+                || !(args.get(FLAGS_INDEX) instanceof IntLiteral flagsLiteral)) {
+            return false;
+        }
+        int flags = flagsLiteral.getValue();
+        if ((flags & LambdaMetafactory.FLAG_SERIALIZABLE) != 0
+                && !addInterface(interfaces, typeSystem.getClassType(ClassNames.SERIALIZABLE))) {
+            return false;
         }
         int next = FLAGS_INDEX + 1;
         if ((flags & LambdaMetafactory.FLAG_MARKERS) != 0) {
             int count = countAt(args, next);
             if (count < 0) {
-                return null;
+                return false;
             }
             for (int i = next + 1; i <= next + count; ++i) {
                 if (!(args.get(i) instanceof ClassLiteral marker
-                        && marker.getTypeValue() instanceof ClassType markerType)) {
-                    return null;
+                        && marker.getTypeValue() instanceof ClassType markerType)
+                        || !addInterface(interfaces, markerType)) {
+                    return false;
                 }
-                interfaces.add(markerType);
             }
             next += 1 + count;
         }
-        List<MethodType> methods = new ArrayList<>();
-        methods.add(interfaceMethod);
         if ((flags & LambdaMetafactory.FLAG_BRIDGES) != 0) {
             int count = countAt(args, next);
             if (count < 0) {
-                return null;
+                return false;
             }
             for (int i = next + 1; i <= next + count; ++i) {
                 if (!(args.get(i) instanceof MethodType bridge)) {
-                    return null;
+                    return false;
                 }
                 methods.add(bridge);
             }
         }
-        if (interfaces.size() == 1) {
-            return null;
+        return true;
+    }
+
+    /**
+     * Adds {@code type} to {@code interfaces} unless its class is missing
+     * from the analysed classes.
+     *
+     * @return false if its class is present and not an interface.
+     */
+    private static boolean addInterface(Set<ClassType> interfaces, ClassType type) {
+        JClass jclass = type.getJClass();
+        if (jclass == null || jclass.isPhantom()) {
+            return true;
         }
-        for (ClassType i : interfaces) {
-            JClass jclass = i.getJClass();
-            if (jclass == null || jclass.isPhantom() || !jclass.isInterface()) {
-                return null;
-            }
+        if (!jclass.isInterface()) {
+            return false;
         }
-        return new Shape(List.copyOf(interfaces), indy.getMethodName(), List.copyOf(methods));
+        interfaces.add(type);
+        return true;
     }
 
     /**
@@ -243,12 +337,11 @@ final class LambdaClasses {
         return count >= 0 && index + count < args.size() ? count : -1;
     }
 
-    private ClassType getOrCreate(Shape shape, String name) {
-        return hierarchy.allClasses()
-                .filter(c -> c.getName().equals(name))
-                .map(JClass::getType)
-                .findFirst()
-                .orElseGet(() -> create(shape, name));
+    private ClassType getOrCreate(Shape shape) {
+        synchronized (LambdaClasses.class) {
+            return REGISTRY.computeIfAbsent(hierarchy, h -> new HashMap<>())
+                    .computeIfAbsent(shape.className(), name -> create(shape, name));
+        }
     }
 
     private ClassType create(Shape shape, String name) {

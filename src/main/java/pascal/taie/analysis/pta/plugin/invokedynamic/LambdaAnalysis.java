@@ -246,6 +246,16 @@ public class LambdaAnalysis implements Plugin {
         return obj instanceof MockObj mock && mock.getDescriptor() == LAMBDA_DESC;
     }
 
+    /**
+     * @return whether {@code jclass} is a synthetic class that this analysis
+     * adds to the class hierarchy to type lambda objects by (see
+     * {@link LambdaClasses}); only lambda objects have it as their type, and
+     * no class loader can define or instantiate it.
+     */
+    public static boolean isLambdaClass(JClass jclass) {
+        return LambdaClasses.isLambdaClass(jclass);
+    }
+
     @Override
     public void setSolver(Solver solver) {
         this.solver = solver;
@@ -289,7 +299,7 @@ public class LambdaAnalysis implements Plugin {
                 invoke.isDynamic() &&
                 isLambdaMetaFactory(invoke)) {
             InvokeDynamic indy = (InvokeDynamic) invoke.getInvokeExp();
-            // the return type, or the class of the interfaces altMetafactory adds
+            // the return type, or a synthetic class (LambdaClasses)
             Type type = lambdaClasses.typeOf(indy);
             // record lambda meta factories of new reachable methods
             lambdaObjs.put(container,

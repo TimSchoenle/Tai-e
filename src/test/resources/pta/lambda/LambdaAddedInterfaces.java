@@ -45,6 +45,28 @@ class LambdaAddedInterfaces {
         negOtherArrayStore();
         negPlainLambda();
         shadowedDefault();
+        plainShadowedDefault();
+        bridge();
+    }
+
+    interface Taker<T> {
+        void take(T t);
+    }
+
+    interface StringTaker extends Taker<String> {
+        @Override
+        void take(String s);
+    }
+
+    static void plainShadowedDefault() {
+        Act act = () -> plainActBody();
+        act.act();
+    }
+
+    @SuppressWarnings("unchecked")
+    static void bridge() {
+        Object lambda = (StringTaker & Serializable) s -> bridgeBody();
+        ((Taker<String>) lambda).take("x");
     }
 
     static void cast() {
@@ -134,6 +156,12 @@ class LambdaAddedInterfaces {
     }
 
     static void actBody() {
+    }
+
+    static void plainActBody() {
+    }
+
+    static void bridgeBody() {
     }
 
     static void negCastBody() {

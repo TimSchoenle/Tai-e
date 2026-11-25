@@ -56,7 +56,7 @@ public class LambdaAddedInterfacesTest {
 
     private static final List<String> REACHED = List.of(
             "castBody", "storeBody", "parameterBody", "reflectiveBody",
-            "markBody", "actBody");
+            "markBody", "actBody", "plainActBody", "bridgeBody");
 
     private static final List<String> UNREACHED = List.of(
             "negCastBody", "negStoreBody", "negPlainBody", "negBaseBody");
@@ -117,7 +117,8 @@ public class LambdaAddedInterfacesTest {
         // per method of the fixture: Runnable & Serializable (cast, array
         // store, lambda parameter, reflective argument, negOtherArrayStore),
         // Runnable & Marker (markerDefault, negOtherCast), Act &
-        // Serializable, the plain Runnable and the Consumer of
+        // Serializable, StringTaker & Serializable (bridge), the plain Act
+        // (plainShadowedDefault), the plain Runnable and the Consumer of
         // lambdaParameter
         long markerLambdas = lambdas.stream()
                 .filter(o -> hierarchy.isSubclass(marker, jclassOf(o)))
@@ -126,10 +127,17 @@ public class LambdaAddedInterfacesTest {
                 .filter(o -> hierarchy.isSubclass(serializable, jclassOf(o)))
                 .count();
         assertEquals(2, markerLambdas);
-        assertEquals(6, serializableLambdas);
+        assertEquals(7, serializableLambdas);
         assertTrue(lambdas.stream().noneMatch(o -> hierarchy.isSubclass(other, jclassOf(o))));
-        // the plain lambda keeps its functional interface
+        // the plain Runnable and Consumer keep their functional interfaces;
+        // the plain Act, whose act() re-abstracts a default, gets a class
         assertEquals(1, lambdas.stream().filter(o -> jclassOf(o) == runnable).count());
+        assertEquals(10, lambdas.stream()
+                .filter(o -> LambdaAnalysis.isLambdaClass(jclassOf(o)))
+                .count());
+        assertFalse(LambdaAnalysis.isLambdaClass(runnable));
+        JMethod toString = hierarchy.getMethod("<java.lang.Object: java.lang.String toString()>");
+        assertNotNull(toString);
         // the classes of the marker lambdas dispatch the marker's default
         // method and no method they declare, the run method of the lambda
         JMethod mark = hierarchy.getMethod("<" + MAIN + "$Marker: void mark()>");
@@ -141,6 +149,7 @@ public class LambdaAddedInterfacesTest {
             assertTrue(c.isFinal());
             assertEquals(mark, hierarchy.dispatch(c, mark.getRef()));
             assertNull(hierarchy.dispatch(c, run.getRef()));
+            assertEquals(toString, hierarchy.dispatch(c, toString.getRef()));
         });
     }
 
