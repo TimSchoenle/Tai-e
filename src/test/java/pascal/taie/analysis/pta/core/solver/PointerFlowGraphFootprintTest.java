@@ -146,9 +146,9 @@ public class PointerFlowGraphFootprintTest {
             Class<?> type = Class.forName(
                     "pascal.taie.analysis.pta.core.cs.element.AbstractPointer");
             Field edgesField = type.getDeclaredField("edges");
-            Field successorsField = type.getDeclaredField("successors");
+            Field dedupField = type.getDeclaredField("dedup");
             edgesField.setAccessible(true);
-            successorsField.setAccessible(true);
+            dedupField.setAccessible(true);
             Set<TypeFilter.EdgeTag> tags = Collections.newSetFromMap(new IdentityHashMap<>());
             long count = 0;
             long bad = 0;
@@ -165,9 +165,16 @@ public class PointerFlowGraphFootprintTest {
                         ++bad;
                     }
                 }
-                int[] set = (int[]) successorsField.get(p);
-                if (set != null) {
-                    dedupBytes += arrayBytes(set.length);
+                Object set = dedupField.get(p);
+                if (set instanceof byte[] bytes) {
+                    dedupBytes += align(16L + bytes.length);
+                } else if (set instanceof char[] chars) {
+                    dedupBytes += align(16L + 2L * chars.length);
+                } else if (set instanceof int[] ints) {
+                    dedupBytes += arrayBytes(ints.length);
+                } else if (set != null) {
+                    // the dedup state after a removal: this analysis removes no edge
+                    ++bad;
                 }
             }
             Field filtersField = DefaultSolver.class.getDeclaredField("typeFilters");
