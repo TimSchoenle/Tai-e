@@ -45,6 +45,16 @@ public class PointsToSetFactory {
     }
 
     /**
+     * @return true if the set is a hybrid bit set in its large (bit set)
+     * form, which iterates its objects in the order of their indexes
+     */
+    public boolean isLarge(PointsToSet pts) {
+        return pts instanceof HybridBitPointsToSet hybrid
+                && hybrid.set instanceof HybridBitSet<CSObj> set
+                && set.isLarge();
+    }
+
+    /**
      * Packs a large points-to set made by this factory into the words of
      * {@link SparseBitSet#toPacked()}, a compact snapshot for sets that wait
      * long before they are read.

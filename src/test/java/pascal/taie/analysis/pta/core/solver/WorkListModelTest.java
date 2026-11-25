@@ -194,7 +194,7 @@ class WorkListModelTest {
         assertEquals("pending_pointers=0 pending_peak=3 new_entries=4"
                 + " merged_entries=3 packs=1 unpacks=1 shared_entries=0 shared_copies=0"
                 + " packed_by_reference=0 packed_copy_bytes=" + words.length * Long.BYTES
-                + " packed_reference_bytes=0",
+                + " packed_reference_bytes=0 referenced_entries=0 skipped_merges=0",
                 workList.countersLine());
     }
 
@@ -333,6 +333,144 @@ class WorkListModelTest {
         assertEquals(List.of(objects.get(0)), order(polled));
         assertSame(c, workList.pollPointer());
         assertEquals(List.of(objects.get(0), objects.get(1)), order(workList.takePolledDelta()));
+    }
+
+    @Test
+    void takenDeltaTravelsByReference() {
+        assertTakenDeltaTravelsByReference();
+    }
+
+    /**
+     * Without packing, the delta handed out last travels on as one object:
+     * fan-out entries that receive it store that very set, a merge of it
+     * into a slot that holds it is skipped, a merge of another set copies it
+     * first, and the set itself never changes.
+     */
+    private static void assertTakenDeltaTravelsByReference() {
+        boolean packLarge = false;
+        Pointer a = pointers.get(0);
+        Pointer b = pointers.get(1);
+        Pointer c = pointers.get(2);
+        Pointer d = pointers.get(3);
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        PointsToSet other = factory.make();
+        other.addObject(lowest);
+        WorkList workList = new WorkList(factory, packLarge);
+        workList.addEntry(a, large);
+        assertSame(a, workList.pollPointer());
+        PointsToSet taken = workList.takePolledDelta();
+        workList.addFanOutEntry(b, taken);
+        workList.addFanOutEntry(c, taken);
+        workList.addFanOutEntry(d, taken);
+        workList.endFanOut();
+        workList.addEntry(b, taken);
+        workList.addEntry(c, other);
+        assertSame(b, workList.pollPointer());
+        PointsToSet polledB = workList.takePolledDelta();
+        assertSame(taken, polledB);
+        workList.addFanOutEntry(a, polledB);
+        workList.endFanOut();
+        assertSame(c, workList.pollPointer());
+        PointsToSet polledC = workList.takePolledDelta();
+        List<CSObj> withLowest = new ArrayList<>();
+        withLowest.add(lowest);
+        withLowest.addAll(objects);
+        assertEquals(withLowest, order(polledC));
+        assertSame(d, workList.pollPointer());
+        assertSame(taken, workList.takePolledDelta());
+        assertSame(a, workList.pollPointer());
+        assertSame(taken, workList.takePolledDelta());
+        assertTrue(workList.isEmpty());
+        assertEquals(objects, order(taken));
+        assertEquals(formProbe(large), formProbe(taken));
+        long[] words = factory.toPackedLarge(large);
+        assertNotNull(words);
+        assertEquals("pending_pointers=0 pending_peak=3 new_entries=5 merged_entries=2"
+                + (packLarge ? " packs=1 unpacks=1" : " packs=0 unpacks=0")
+                + " shared_entries=2 shared_copies=1 packed_by_reference=0"
+                + " packed_copy_bytes=" + (packLarge ? words.length * Long.BYTES : 0)
+                + " packed_reference_bytes=0 referenced_entries=2 skipped_merges=1",
+                workList.countersLine());
+    }
+
+    @Test
+    void randomWavesMatchTheCopyingWorkList() {
+        assertWavesMatch(true);
+    }
+
+    @Test
+    void randomWavesWithoutPackingMatchTheCopyingWorkList() {
+        assertWavesMatch(false);
+    }
+
+    /**
+     * Random waves as the solver makes them: each polled delta fans out to
+     * random pointers, itself or other sets, with plain entries of it and
+     * of other sets among them; contents, form, poll order and counts match
+     * the copying work list, and the polled delta is never changed.
+     */
+    private static void assertWavesMatch(boolean packLarge) {
+        long referenced = 0;
+        long skipped = 0;
+        for (int seed = 0; seed < 300; ++seed) {
+            Random random = new Random(seed);
+            WorkList workList = new WorkList(factory, packLarge);
+            CopyingWorkList model = new CopyingWorkList();
+            int range = Math.min(pointers.size(), 4 + random.nextInt(40));
+            for (int i = 0; i < 3; ++i) {
+                PointsToSet seedSet = randomSet(factory, random);
+                Pointer pointer = pointers.get(random.nextInt(range));
+                workList.addEntry(pointer, seedSet);
+                model.addEntry(pointer, seedSet);
+            }
+            int waves = 20 + random.nextInt(120);
+            for (int wave = 0; wave < waves && !model.isEmpty(); ++wave) {
+                String at = seed + "/" + wave;
+                Map.Entry<Pointer, PointsToSet> expected = model.poll();
+                assertSame(expected.getKey(), workList.pollPointer(), at);
+                PointsToSet taken = workList.takePolledDelta();
+                List<CSObj> takenOrder = order(taken);
+                assertEquals(order(expected.getValue()), takenOrder, at);
+                assertEquals(formProbe(expected.getValue()), formProbe(taken), at);
+                PointsToSet source = randomSet(factory, random);
+                int targets = random.nextInt(6);
+                for (int t = 0; t < targets; ++t) {
+                    Pointer pointer = pointers.get(random.nextInt(range));
+                    int kind = random.nextInt(8);
+                    PointsToSet set = kind < 5 ? taken : source;
+                    if (kind == 7) {
+                        set = randomSet(factory, random);
+                    }
+                    if (kind == 4 || kind == 7) {
+                        workList.addEntry(pointer, set);
+                    } else {
+                        workList.addFanOutEntry(pointer, set);
+                    }
+                    model.addEntry(pointer, set);
+                }
+                workList.endFanOut();
+                source.addObject(objects.get(random.nextInt(objects.size())));
+                assertEquals(takenOrder, order(taken), at);
+                assertEquals(model.entries.size(), workList.pendingPointers(), at);
+            }
+            while (!model.isEmpty()) {
+                assertSamePoll(model, workList, seed + "/drain");
+            }
+            assertTrue(workList.isEmpty());
+            assertEquals(model.newEntries, workList.newEntries(), "seed " + seed);
+            assertEquals(model.mergedEntries, workList.mergedEntries(), "seed " + seed);
+            assertEquals(model.peak, workList.pendingPeak(), "seed " + seed);
+            referenced += workList.referencedEntries();
+            skipped += workList.skippedMerges();
+        }
+        if (packLarge) {
+            // packed deltas never hold the polled set itself
+            assertEquals(0, referenced + skipped);
+        } else {
+            assertTrue(referenced > 1000, "referenced entries: " + referenced);
+            assertTrue(skipped > 100, "skipped merges: " + skipped);
+        }
     }
 
     @Test
