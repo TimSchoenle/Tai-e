@@ -36,11 +36,13 @@ import pascal.taie.language.type.LongType;
 import pascal.taie.language.type.Type;
 import pascal.taie.util.collection.ArraySet;
 import pascal.taie.util.collection.HybridIndexableSet;
+import pascal.taie.util.collection.IntArraySets;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
@@ -484,5 +486,134 @@ class PointerOutEdgesTest {
                 Identity.get(), added), describe(stored));
         assertNull(pointer.addEdge(
                 new PointerFlowEdge(FlowKind.CAST, pointer, TARGET[0]), Identity.get()));
+    }
+
+    private static Object dedup(Pointer pointer) throws ReflectiveOperationException {
+        Field dedup = AbstractPointer.class.getDeclaredField("dedup");
+        dedup.setAccessible(true);
+        return dedup.get(pointer);
+    }
+
+    /**
+     * @return {@code count} pointers with distinct, spread indexes, the
+     * extremes 0 and {@code Integer.MAX_VALUE - 1} included.
+     */
+    private static List<Pointer> spreadTargets(int count) {
+        List<Pointer> targets = new ArrayList<>(count);
+        targets.add(new TestPointer(Integer.MAX_VALUE - 1));
+        for (int i = 0; i < count - 1; i++) {
+            targets.add(new TestPointer((int) (i * 2_654_435L % (Integer.MAX_VALUE - 1))));
+        }
+        return targets;
+    }
+
+    private static List<Pointer> storedTargets(Pointer pointer) {
+        List<Pointer> stored = new ArrayList<>();
+        for (PointerFlowEdge edge : pointer.getOutEdges()) {
+            stored.add(edge.target());
+        }
+        return stored;
+    }
+
+    /**
+     * Up to 8 entries the edge array is scanned; beyond, the dedup index is
+     * a table of the narrowest type for the entry numbers. Every form keeps
+     * one edge per target and the insertion order.
+     */
+    @Test
+    void dedupScansSmallEdgeArraysAndIndexesLargeOnesInTheNarrowestTable()
+            throws ReflectiveOperationException {
+        List<Pointer> targets = spreadTargets(70_000);
+        TestPointer pointer = new TestPointer(TARGETS);
+        Set<Class<?>> seen = new HashSet<>();
+        int added = 0;
+        for (int count : new int[]{1, 6, 9, 100, 200, 1_000, 30_000, 70_000}) {
+            for (; added < count; added++) {
+                Pointer target = targets.get(added);
+                PointerFlowEdge first = new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, target);
+                assertSame(first, pointer.addEdge(first, Identity.get()), "target " + added);
+            }
+            // the entry numbers 1 to the capacity of the edge array must fit
+            int capacity = slots(pointer).length / 2;
+            Class<?> expected = capacity <= 8 ? null
+                    : capacity <= 0xFF ? byte[].class
+                    : capacity <= 0xFFFF ? char[].class : int[].class;
+            Object set = dedup(pointer);
+            assertEquals(expected, set == null ? null : set.getClass(), "after " + count);
+            seen.add(expected);
+            for (int i = 0; i < count; i += Math.max(1, count / 500)) {
+                Pointer target = targets.get(i);
+                assertNull(pointer.addEdge(
+                        new PointerFlowEdge(FlowKind.CAST, pointer, target), Identity.get()));
+                assertNull(pointer.addEdge(new PointerFlowEdge(FlowKind.RETURN, pointer, target)));
+            }
+            assertEquals(count, pointer.getOutDegree());
+        }
+        assertEquals(4, seen.size(), "every form of the dedup state reached");
+        assertEquals(targets, storedTargets(pointer));
+    }
+
+    private static long arrayBytes(Object array) {
+        long payload = array instanceof byte[] b ? b.length
+                : array instanceof char[] c ? 2L * c.length : 4L * ((int[]) array).length;
+        return (16 + payload + 7) & ~7L;
+    }
+
+    /**
+     * Up to 65,535 entries (no index, byte and char tables) the dedup index
+     * takes fewer bytes than the int set of target indexes it replaces, for
+     * the same targets. (An int table, sized for the capacity of the edge
+     * array, can be larger than that set.)
+     */
+    @Test
+    void theDedupIndexIsSmallerThanAnIntSetOfTheTargets() throws ReflectiveOperationException {
+        for (int count : new int[]{7, 20, 255, 300, 5_000, 40_000}) {
+            TestPointer pointer = new TestPointer(TARGETS);
+            int[] set = null;
+            for (Pointer target : spreadTargets(count)) {
+                pointer.addEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, target),
+                        Identity.get());
+                set = IntArraySets.add(set, target.getIndex());
+            }
+            Object index = dedup(pointer);
+            long bytes = index == null ? 0 : arrayBytes(index);
+            assertTrue(bytes < arrayBytes(set), count + " targets: " + bytes
+                    + " bytes, int set " + arrayBytes(set));
+        }
+    }
+
+    /**
+     * A target whose edges were all removed still counts as added, in
+     * every form of the dedup index.
+     */
+    @Test
+    void aRemovedTargetStaysAddedInEveryFormOfTheDedupIndex() {
+        for (int count : new int[]{5, 100, 1_000, 70_000}) {
+            List<Pointer> targets = spreadTargets(count + 1);
+            Pointer extra = targets.remove(count);
+            TestPointer pointer = new TestPointer(TARGETS);
+            for (Pointer target : targets) {
+                pointer.addEdge(new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, target),
+                        Identity.get());
+            }
+            Set<Pointer> removed = new HashSet<>();
+            for (int i = 0; i < count; i += 2) {
+                removed.add(targets.get(i));
+            }
+            pointer.removeEdgesIf(e -> removed.contains(e.target()));
+            for (Pointer target : targets) {
+                assertNull(pointer.addEdge(
+                        new PointerFlowEdge(FlowKind.CAST, pointer, target), Identity.get()),
+                        count + " targets");
+            }
+            List<Pointer> kept = new ArrayList<>(targets);
+            kept.removeAll(removed);
+            assertEquals(kept, storedTargets(pointer));
+            PointerFlowEdge last = new PointerFlowEdge(FlowKind.LOCAL_ASSIGN, pointer, extra);
+            assertSame(last, pointer.addEdge(last));
+            assertNull(pointer.addEdge(new PointerFlowEdge(FlowKind.CAST, pointer, extra)));
+            kept.add(extra);
+            assertEquals(kept, storedTargets(pointer));
+        }
     }
 }

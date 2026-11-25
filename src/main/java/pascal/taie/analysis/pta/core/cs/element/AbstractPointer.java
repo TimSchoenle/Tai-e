@@ -47,23 +47,38 @@ abstract class AbstractPointer implements Pointer {
     private final int index;
 
     /**
-     * Indexes of the targets of the out-edges, an {@link IntArraySets} set
-     * ({@code null} while empty); it only dedupes
+     * The out-edge dedup state; it only dedupes
      * {@link #addEdge(PointerFlowEdge)} and
-     * {@link #addEdge(PointerFlowEdge, Transfer)}.
+     * {@link #addEdge(PointerFlowEdge, Transfer)} by target: null or an
+     * {@link OutEdgeIndex} table of {@link #edges} (null while {@link #edges}
+     * has at most {@link OutEdgeIndex#LINEAR_ENTRIES} entries), until
+     * {@link #removeEdgesIf} first removes an edge; from then on an
+     * {@link EverAdded}, as a removed target still counts as present;
+     * {@link #RELEASED} after {@link #releaseEdgeDedup()}.
      */
-    private int[] successors;
+    private @Nullable Object dedup;
 
     /**
-     * Marks {@link #successors} as released by {@link #releaseEdgeDedup()};
-     * never passed to {@link IntArraySets}.
+     * Marks {@link #dedup} as released by {@link #releaseEdgeDedup()}.
      */
-    private static final int[] RELEASED = new int[0];
+    private static final Object RELEASED = new Object();
+
+    /**
+     * Indexes of the targets of every out edge ever added, an
+     * {@link IntArraySets} set: the dedup state after a removal.
+     */
+    private static final class EverAdded {
+        private int[] targets;
+
+        private EverAdded(int[] targets) {
+            this.targets = targets;
+        }
+    }
 
     /**
      * Slots per out edge in {@link #edges}.
      */
-    private static final int SLOTS = 2;
+    static final int SLOTS = 2;
 
     /**
      * Out edges in insertion order, {@link #SLOTS} slots each, or null
@@ -133,10 +148,8 @@ abstract class AbstractPointer implements Pointer {
     @Override
     public PointerFlowEdge addEdge(PointerFlowEdge edge) {
         assert edge.source() == this;
-        int[] added = IntArraySets.add(liveSuccessors(), edge.target().getIndex());
-        if (added != null) {
-            successors = added;
-            append(edge, null);
+        if (addTarget(edge.target().getIndex())) {
+            append(edge, null, true);
             return edge;
         } else if (edge.kind() == FlowKind.OTHER) {
             Object[] slots = edges;
@@ -157,7 +170,7 @@ abstract class AbstractPointer implements Pointer {
                     return outEdge;
                 }
             }
-            append(edge, null);
+            append(edge, null, false);
             return edge;
         }
         return null;
@@ -182,46 +195,62 @@ abstract class AbstractPointer implements Pointer {
             return Pointer.super.addEdge(edge, transfer);
         }
         assert edge.source() == this;
-        int[] added = IntArraySets.add(liveSuccessors(), edge.target().getIndex());
-        if (added == null) {
+        if (!addTarget(edge.target().getIndex())) {
             return null;
         }
-        successors = added;
         FlowKind kind = edge.kind();
         append(edge.target(), transfer == Identity.INSTANCE
-                ? kind : ((TypeFilter) transfer).edgeTag(kind));
+                ? kind : ((TypeFilter) transfer).edgeTag(kind), true);
         edge.addTransfer(transfer);
         return edge;
     }
 
     /**
-     * @return {@link #successors}
-     * @throws IllegalStateException if {@link #releaseEdgeDedup()} released it
+     * Records the target of an out edge being added, unless an out edge
+     * with that target was added before (and possibly removed).
+     *
+     * @return whether the target is new; if so the caller appends an
+     * entry for it with {@code newTarget} set.
+     * @throws IllegalStateException if {@link #releaseEdgeDedup()} released
+     *                               the dedup state
+     * @throws IllegalArgumentException if the index is negative or
+     *                                  {@link Integer#MAX_VALUE}, which
+     *                                  {@link IntArraySets} cannot hold
      */
-    private int[] liveSuccessors() {
-        int[] set = successors;
+    private boolean addTarget(int target) {
+        if (target < 0 || target == Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("target index out of range: " + target);
+        }
+        Object set = dedup;
         if (set == RELEASED) {
             throw new IllegalStateException("the out-edge dedup state of "
                     + this + " was released after the fixed point");
+        } else if (set instanceof EverAdded everAdded) {
+            int[] added = IntArraySets.add(everAdded.targets, target);
+            if (added == null) {
+                return false;
+            }
+            everAdded.targets = added;
+            return true;
         }
-        return set;
+        return !OutEdgeIndex.contains(set, liveEdges(), target);
     }
 
     /**
-     * Drops {@link #successors}; the out edges in {@link #edges} stay.
+     * Drops {@link #dedup}; the out edges in {@link #edges} stay.
      */
     @Override
     public void releaseEdgeDedup() {
-        successors = RELEASED;
+        dedup = RELEASED;
     }
 
     /**
-     * Drops {@link #edges} and {@link #successors}; later reads and adds of
+     * Drops {@link #edges} and {@link #dedup}; later reads and adds of
      * out edges throw.
      */
     @Override
     public void releaseOutEdges() {
-        successors = RELEASED;
+        dedup = RELEASED;
         edges = RELEASED_EDGES;
     }
 
@@ -262,9 +291,16 @@ abstract class AbstractPointer implements Pointer {
         return low * SLOTS;
     }
 
-    private void append(Object first, @Nullable Object tag) {
+    /**
+     * Appends an entry to {@link #edges} and keeps an {@link OutEdgeIndex}
+     * table in {@link #dedup} up to date.
+     *
+     * @param newTarget whether no other entry has the target of this one
+     */
+    private void append(Object first, @Nullable Object tag, boolean newTarget) {
         Object[] slots = edges;
         int used = used();
+        boolean replaced = true;
         if (slots == null) {
             slots = new Object[SLOTS];
             edges = slots;
@@ -272,9 +308,20 @@ abstract class AbstractPointer implements Pointer {
             int count = used / SLOTS;
             slots = Arrays.copyOf(slots, (count + Math.max(1, count >> 1)) * SLOTS);
             edges = slots;
+        } else {
+            replaced = false;
         }
         slots[used] = first;
         slots[used + 1] = tag;
+        Object set = dedup;
+        if (set instanceof EverAdded) {
+            return;
+        }
+        if (replaced) {
+            dedup = OutEdgeIndex.build(slots, used / SLOTS + 1);
+        } else if (newTarget && set != null) {
+            OutEdgeIndex.insert(set, slots, used / SLOTS);
+        }
     }
 
     /**
@@ -332,6 +379,23 @@ abstract class AbstractPointer implements Pointer {
             removed[i / SLOTS] = filter.test(edgeAt(slots, i));
         }
         int kept = 0;
+        boolean any = false;
+        for (boolean r : removed) {
+            any |= r;
+        }
+        Object set = dedup;
+        if (any && set != RELEASED && !(set instanceof EverAdded)) {
+            // the entries in use hold every target ever added, as none
+            // was removed before
+            int[] targets = null;
+            for (int i = 0; i < used; i += SLOTS) {
+                int[] added = IntArraySets.add(targets, OutEdgeIndex.targetIndex(slots, i / SLOTS));
+                if (added != null) {
+                    targets = added;
+                }
+            }
+            dedup = new EverAdded(targets);
+        }
         for (int i = 0; i < used; i += SLOTS) {
             if (!removed[i / SLOTS]) {
                 if (kept != i) {

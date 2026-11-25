@@ -142,21 +142,25 @@ public class PointerFlowGraphReleaseTest {
 
     /**
      * @return the number of pointers, mock pointers included, whose
-     * out-edge array or out-edge dedup set is still held: not released
-     * (the shared empty marker of the release has length 0) and not null.
+     * out-edge array or out-edge dedup state is still held: not released
+     * (the shared empty marker of the edge release has length 0, the dedup
+     * release has its own shared marker) and not null.
      */
     private static int liveEdgeArrays(CSManager csManager) throws ReflectiveOperationException {
         Class<?> type = Class.forName(
                 "pascal.taie.analysis.pta.core.cs.element.AbstractPointer");
         Field edges = type.getDeclaredField("edges");
-        Field successors = type.getDeclaredField("successors");
+        Field dedup = type.getDeclaredField("dedup");
+        Field released = type.getDeclaredField("RELEASED");
         edges.setAccessible(true);
-        successors.setAccessible(true);
+        dedup.setAccessible(true);
+        released.setAccessible(true);
+        Object releasedDedup = released.get(null);
         int live = 0;
         for (Pointer p : Stream.concat(csManager.pointers(), csManager.mockPointers()).toList()) {
             Object[] slots = (Object[]) edges.get(p);
-            int[] set = (int[]) successors.get(p);
-            if ((slots != null && slots.length != 0) || (set != null && set.length != 0)) {
+            Object set = dedup.get(p);
+            if ((slots != null && slots.length != 0) || (set != null && set != releasedDedup)) {
                 ++live;
             }
         }
