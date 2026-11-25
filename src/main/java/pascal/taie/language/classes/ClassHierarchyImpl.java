@@ -448,6 +448,15 @@ public class ClassHierarchyImpl implements ClassHierarchy {
             if (method != null && (allowAbstract || !method.isAbstract())) {
                 return method;
             }
+            if (method != null && c.isFinal()) {
+                // JVM Spec. 5.4.6: selection ends at the abstract declaration
+                // (AbstractMethodError), and a final class has no subclass
+                // that could implement it, so no method of a superclass or a
+                // superinterface runs. javac emits no such class; the classes
+                // of lambda objects that LambdaAnalysis builds declare their
+                // own methods so, whose bodies it resolves itself.
+                return null;
+            }
         }
         // 3. Otherwise, method resolution attempts to locate the
         // referenced method in the superinterfaces of the specified class C

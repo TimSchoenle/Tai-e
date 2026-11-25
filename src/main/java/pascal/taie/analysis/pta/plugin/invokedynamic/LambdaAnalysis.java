@@ -92,6 +92,12 @@ public class LambdaAnalysis implements Plugin {
 
     private ClassHierarchy hierarchy;
 
+    /**
+     * The types of the lambda objects whose altMetafactory call adds
+     * interfaces.
+     */
+    private LambdaClasses lambdaClasses;
+
     private CSManager csManager;
 
     /**
@@ -246,6 +252,7 @@ public class LambdaAnalysis implements Plugin {
         this.heapModel = solver.getHeapModel();
         this.selector = solver.getContextSelector();
         this.hierarchy = solver.getHierarchy();
+        this.lambdaClasses = new LambdaClasses(hierarchy, solver.getTypeSystem());
         this.csManager = solver.getCSManager();
         this.callSiteFreeContexts = selector.isInstanceContextCallSiteFree();
         this.objectClass = Objects.requireNonNull(hierarchy.getJREClass(ClassNames.OBJECT),
@@ -282,7 +289,8 @@ public class LambdaAnalysis implements Plugin {
                 invoke.isDynamic() &&
                 isLambdaMetaFactory(invoke)) {
             InvokeDynamic indy = (InvokeDynamic) invoke.getInvokeExp();
-            Type type = indy.getMethodType().getReturnType();
+            // the return type, or the class of the interfaces altMetafactory adds
+            Type type = lambdaClasses.typeOf(indy);
             // record lambda meta factories of new reachable methods
             lambdaObjs.put(container,
                     heapModel.getMockObj(LAMBDA_DESC, invoke, type, container));
