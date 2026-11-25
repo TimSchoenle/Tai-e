@@ -38,9 +38,11 @@ import pascal.taie.ir.proginfo.ExceptionEntry;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.JumpStmt;
+import pascal.taie.ir.stmt.LoadField;
 import pascal.taie.ir.stmt.New;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.StoreArray;
+import pascal.taie.ir.stmt.SwitchStmt;
 import pascal.taie.language.classes.ClassNames;
 import pascal.taie.language.classes.JClass;
 import pascal.taie.language.type.ArrayType;
@@ -104,18 +106,26 @@ final class ArgumentSlots {
             return null;
         }
         New def = null;
+        NewArray newArray = null;
+        int stores = 0;
         for (Stmt stmt : ir.getStmts()) {
             if (stmt.getDef().filter(args::equals).isPresent()) {
                 if (def != null || !(stmt instanceof New newStmt)
-                        || !(newStmt.getRValue() instanceof NewArray)) {
+                        || !(newStmt.getRValue() instanceof NewArray array)) {
                     return null;
                 }
                 def = newStmt;
-            } else if (stmt.getUses().contains(args) && !isAllowedUse(stmt, call, args)) {
-                return null;
+                newArray = array;
+            } else if (stmt.getUses().contains(args)) {
+                if (!isAllowedUse(stmt, call, args)) {
+                    return null;
+                }
+                if (stmt != call) {
+                    ++stores;
+                }
             }
         }
-        if (def == null || !(def.getRValue() instanceof NewArray newArray)) {
+        if (def == null || newArray == null) {
             return null;
         }
         int length = constantInt(newArray.getLength());
@@ -126,6 +136,7 @@ final class ArgumentSlots {
         }
         Var[] stored = new Var[length];
         List<Stmt> stmts = ir.getStmts();
+        int runStores = 0;
         for (int i = from + 1; i < to; ++i) {
             if (stmts.get(i) instanceof StoreArray store
                     && store.getArrayAccess().getBase().equals(args)) {
@@ -134,7 +145,13 @@ final class ArgumentSlots {
                     return null;
                 }
                 stored[index] = store.getRValue();
+                ++runStores;
             }
+        }
+        if (runStores != stores) {
+            // a store outside the run: not needed for the proof, but no
+            // javac shape has one, so give up rather than rely on the run
+            return null;
         }
         Slot[] slots = new Slot[length];
         for (int i = 0; i < length; ++i) {
@@ -155,7 +172,7 @@ final class ArgumentSlots {
      * parameter.
      */
     boolean admits(int i, Type paramType, TypeSystem typeSystem) {
-        return slots.get(i).admits(paramType, typeSystem);
+        return isUncertain(paramType) || slots.get(i).admits(paramType, typeSystem);
     }
 
     /**
@@ -191,19 +208,29 @@ final class ArgumentSlots {
         for (Stmt stmt : ir.getStmts()) {
             if (stmt instanceof JumpStmt jump) {
                 for (Stmt target : jump.getTargets()) {
-                    if (target.getIndex() > from && target.getIndex() <= to) {
+                    if (isBetween(target, from, to)) {
                         return true;
                     }
                 }
             }
+            // SwitchStmt.getTargets() leaves the default target out
+            if (stmt instanceof SwitchStmt switchStmt) {
+                Stmt defaultTarget = switchStmt.getDefaultTarget();
+                if (defaultTarget == null || isBetween(defaultTarget, from, to)) {
+                    return true;
+                }
+            }
         }
         for (ExceptionEntry entry : ir.getExceptionEntries()) {
-            int handler = entry.handler().getIndex();
-            if (handler > from && handler <= to) {
+            if (isBetween(entry.handler(), from, to)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isBetween(Stmt stmt, int from, int to) {
+        return stmt.getIndex() > from && stmt.getIndex() <= to;
     }
 
     /**
@@ -218,17 +245,15 @@ final class ArgumentSlots {
     /**
      * The element a store of {@code value} leaves: {@code null} for the
      * {@code null} constant, an object of a known class for a string or
-     * class constant, and, when {@code value} is not a parameter and has
-     * exactly one definition, for a definition that cannot yield
-     * {@code null} (a {@code new}, a lambda meta factory call). Else (and
-     * for {@code this}, which may be of a subclass) a value of the static
-     * type of {@code value} or {@code null}.
+     * class constant, and, when {@code value} has exactly one definition
+     * (or is a parameter with none), for a definition that cannot yield
+     * {@code null} (a {@code new}, a lambda meta factory call). Else a
+     * value or {@code null} of the type the bytecode declares for it (a
+     * parameter, a field load, a call result), or of any type. The type
+     * the IR infers for a variable is not used: the verifier does not back
+     * it.
      */
     private static Slot slotOf(IR ir, Var value) {
-        if (value.equals(ir.getThis())) {
-            // this is never null; its class may be any subclass
-            return new TypedSlot(value.getType());
-        }
         if (value.isConst()) {
             // the IR's null constant has no definition statement
             Literal literal = value.getConstValue();
@@ -238,39 +263,78 @@ final class ArgumentSlots {
             if (literal instanceof StringLiteral || literal instanceof ClassLiteral) {
                 return new ExactSlot(literal.getType());
             }
-            return new TypedSlot(value.getType());
+            return new TypedSlot(null);
+        }
+        if (value.equals(ir.getThis())) {
+            return new TypedSlot(null);
         }
         Stmt def = null;
-        if (!ir.isParam(value)) {
-            for (Stmt stmt : ir.getStmts()) {
-                if (stmt.getDef().filter(value::equals).isPresent()) {
-                    if (def != null) {
-                        return new TypedSlot(value.getType());
-                    }
-                    def = stmt;
+        for (Stmt stmt : ir.getStmts()) {
+            if (stmt.getDef().filter(value::equals).isPresent()) {
+                if (def != null) {
+                    return new TypedSlot(null);
                 }
+                def = stmt;
             }
+        }
+        if (ir.isParam(value)) {
+            return new TypedSlot(def == null
+                    ? ir.getMethod().getParamType(ir.getParams().indexOf(value))
+                    : null);
         }
         if (def instanceof New newStmt) {
             return new ExactSlot(newStmt.getRValue().getType());
         }
-        if (def instanceof Invoke invoke
-                && invoke.getInvokeExp() instanceof InvokeDynamic indy) {
-            MethodRef bootstrap = indy.getBootstrapMethodRef();
-            if (LAMBDA_META_FACTORY.equals(bootstrap.getDeclaringClass().getName())) {
-                Type iface = indy.getMethodType().getReturnType();
-                return switch (bootstrap.getName()) {
-                    case "metafactory" -> new LambdaSlot(iface, true);
-                    case "altMetafactory" -> new LambdaSlot(iface, false);
-                    default -> new TypedSlot(value.getType());
-                };
-            }
+        if (def instanceof LoadField load) {
+            return new TypedSlot(load.getFieldAccess().getFieldRef().getType());
         }
-        return new TypedSlot(value.getType());
+        if (def instanceof Invoke invoke) {
+            if (invoke.getInvokeExp() instanceof InvokeDynamic indy) {
+                MethodRef bootstrap = indy.getBootstrapMethodRef();
+                if (LAMBDA_META_FACTORY.equals(bootstrap.getDeclaringClass().getName())) {
+                    Type iface = indy.getMethodType().getReturnType();
+                    return switch (bootstrap.getName()) {
+                        case "metafactory" -> new LambdaSlot(iface, true);
+                        case "altMetafactory" -> new LambdaSlot(iface, false);
+                        default -> new TypedSlot(null);
+                    };
+                }
+                return new TypedSlot(null);
+            }
+            return new TypedSlot(invoke.getMethodRef().getReturnType());
+        }
+        return new TypedSlot(null);
     }
 
     private static boolean isBox(Type type) {
         return type instanceof ClassType classType && BOXES.contains(classType.getName());
+    }
+
+    /**
+     * @return whether the hierarchy of {@code type} is not fully known: a
+     * class of it, or of an array's base type, is missing or phantom (a
+     * phantom class has no supertypes but Object, though the real one may
+     * have any), or a supertype of one is
+     */
+    private static boolean isUncertain(Type type) {
+        Type base = type instanceof ArrayType arrayType ? arrayType.baseType() : type;
+        return base instanceof ClassType classType && isUncertain(classType.getJClass());
+    }
+
+    private static boolean isUncertain(@Nullable JClass jclass) {
+        if (jclass == null || jclass.isPhantom()) {
+            return true;
+        }
+        JClass superClass = jclass.getSuperClass();
+        if (superClass != null && isUncertain(superClass)) {
+            return true;
+        }
+        for (JClass iface : jclass.getInterfaces()) {
+            if (isUncertain(iface)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -300,7 +364,7 @@ final class ArgumentSlots {
                 // any box: invoke unboxes, then widens
                 return isBox(type);
             }
-            return typeSystem.isSubtype(paramType, type);
+            return isUncertain(type) || typeSystem.isSubtype(paramType, type);
         }
     }
 
@@ -317,7 +381,7 @@ final class ArgumentSlots {
             if (paramType instanceof PrimitiveType) {
                 return false;
             }
-            if (typeSystem.isSubtype(paramType, iface)
+            if (isUncertain(iface) || typeSystem.isSubtype(paramType, iface)
                     || paramType instanceof ClassType classType
                     && ClassNames.OBJECT.equals(classType.getName())) {
                 return true;
@@ -328,17 +392,18 @@ final class ArgumentSlots {
     }
 
     /**
-     * {@code null} or an object of any subtype of static type {@code type}:
-     * any reference parameter admits it. A primitive parameter admits it
-     * unless {@code type} is a class that no box class extends, or an array
-     * type: the verifier guarantees a value of a class type is an instance
-     * of that class (not so for an interface type).
+     * {@code null} or an object of any subtype of {@code type}, the type
+     * the bytecode declares for the value ({@code null}: any type). Any
+     * reference parameter admits it. A primitive parameter admits it unless
+     * {@code type} is an array type or a known class that no box class
+     * extends: the verifier guarantees a value of a declared class type is
+     * an instance of that class (not so for an interface type).
      */
-    private record TypedSlot(Type type) implements Slot {
+    private record TypedSlot(@Nullable Type type) implements Slot {
 
         @Override
         public boolean admits(Type paramType, TypeSystem typeSystem) {
-            if (!(paramType instanceof PrimitiveType)) {
+            if (!(paramType instanceof PrimitiveType) || type == null) {
                 return true;
             }
             if (type instanceof ArrayType) {
@@ -346,7 +411,7 @@ final class ArgumentSlots {
             }
             if (type instanceof ClassType classType) {
                 JClass jclass = classType.getJClass();
-                return jclass == null || jclass.isInterface()
+                return jclass == null || jclass.isPhantom() || jclass.isInterface()
                         || isBox(type) || BOX_SUPERCLASSES.contains(classType.getName());
             }
             return true;

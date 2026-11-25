@@ -37,6 +37,10 @@ public class ArgTypes {
         unstoredElement();
         reflectiveBox();
         branchedStore(args.length);
+        lastStoreWins();
+        storeAfterCall();
+        interfaceTyped(Integer.valueOf(2));
+        abstractClassNewInstance(args.length);
         argumentOrder();
         constructorArgument();
         abstractConstructor(args.length);
@@ -146,6 +150,42 @@ public class ArgTypes {
         Object r = AtVk.class.getMethod("calloc", int.class).invoke(null, a);
         PTAAssert.callsExact(INVOKE, CALLOC_STACK, CALLOC_INT);
         return r;
+    }
+
+    /** The last store to an index is the element: the Integer, not the AtStack. */
+    static Object lastStoreWins() throws Exception {
+        Object[] a = new Object[1];
+        a[0] = new AtStack();
+        a[0] = Integer.valueOf(4);
+        Object r = AtVk.class.getMethod("calloc", int.class).invoke(null, a);
+        PTAAssert.callsExact(INVOKE, CALLOC_STACK, CALLOC_INT);
+        return r;
+    }
+
+    /** A store after the call: the look gives up, both stay. */
+    static Object storeAfterCall() throws Exception {
+        Object[] a = new Object[1];
+        a[0] = new AtStack();
+        Object r = AtVk.class.getMethod("calloc", int.class).invoke(null, a);
+        PTAAssert.callsExact(INVOKE, CALLOC_STACK, CALLOC_INT);
+        a[0] = r;
+        return r;
+    }
+
+    /** An interface type may hold a box: calloc(int) stays. */
+    static Object interfaceTyped(Comparable<?> value) throws Exception {
+        Object r = AtVk.class.getMethod("calloc", int.class).invoke(null, value);
+        PTAAssert.callsExact(INVOKE, CALLOC_STACK, CALLOC_INT);
+        return r;
+    }
+
+    @SuppressWarnings("deprecation")
+    static Object abstractClassNewInstance(int n) throws Exception {
+        Class<?> k = n > 5 ? AtChannel.class : AtAbstractBuf.class;
+        Object c = k.newInstance();
+        PTAAssert.callsExact("<java.lang.Class: java.lang.Object newInstance()>",
+                "<AtChannel: void <init>()>");
+        return c;
     }
 
     static void argumentOrder() throws Exception {
