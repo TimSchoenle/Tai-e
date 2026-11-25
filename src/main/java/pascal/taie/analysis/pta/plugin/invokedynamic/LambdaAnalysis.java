@@ -23,6 +23,8 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.cs.context.Context;
@@ -36,6 +38,7 @@ import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.core.solver.DefaultSolver;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
@@ -57,6 +60,7 @@ import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -139,6 +143,24 @@ public class LambdaAnalysis implements Plugin {
     @Nullable
     private GroupingVerifier verifier;
 
+    private static final Logger logger = LoggerFactory.getLogger(LambdaAnalysis.class);
+
+    /**
+     * The measurement counters, or null unless the pointer analysis keeps
+     * counters ({@link DefaultSolver#countersEnabled}); logged once, at the
+     * first of {@link #onRelease} and {@link #onFinish}.
+     */
+    @Nullable
+    private LambdaCounters counters;
+
+    /**
+     * @return whether {@code obj} is a lambda functional object that this
+     * analysis creates at a lambda meta factory call.
+     */
+    public static boolean isLambdaObj(Obj obj) {
+        return obj instanceof MockObj mock && mock.getDescriptor() == LAMBDA_DESC;
+    }
+
     @Override
     public void setSolver(Solver solver) {
         this.solver = solver;
@@ -151,6 +173,8 @@ public class LambdaAnalysis implements Plugin {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
         }
+        counters = DefaultSolver.countersEnabled(solver.getOptions())
+                ? new LambdaCounters() : null;
     }
 
     @Override
@@ -213,6 +237,9 @@ public class LambdaAnalysis implements Plugin {
             // TODO: use more information to filter out mismatches?
             return;
         }
+        if (counters != null) {
+            counters.startEvent();
+        }
         Context indyCtx = capturedArgsContext(indy, recv.getContext());
         CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
         MethodHandle mh = getMethodHandle(indy);
@@ -264,7 +291,7 @@ public class LambdaAnalysis implements Plugin {
                 InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, indy, indyCtx,
                         targetRef, argsToStatic(csCallSite, indy),
                         argsToInstance(csCallSite, indy));
-                addLambdaCallEdges(info, recvObjs, recvObjsByType);
+                addLambdaCallEdges(info, recvObjs, recvObjsByType, LambdaCounters.PATH_CALL);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
                 invoInfos.put(csRecvVar, info);
@@ -368,6 +395,9 @@ public class LambdaAnalysis implements Plugin {
             calleeCtx = selector.selectContext(csCallSite, recvObj, callee);
             // pass receiver object to 'this' variable of callee
             solver.addVarPointsTo(calleeCtx, callee.getIR().getThis(), recvObj);
+            if (counters != null) {
+                counters.thisUpdate(calleeCtx, callee);
+            }
         } else { // otherwise, callee is static method
             callee = targetRef.resolveNullable();
             if (callee == null) {
@@ -384,6 +414,9 @@ public class LambdaAnalysis implements Plugin {
         }
         LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite,
                 csManager.getCSMethod(calleeCtx, callee), indy, indyCtx);
+        if (counters != null) {
+            counters.edgeBuilt();
+        }
         solver.addCallEdge(callEdge);
     }
 
@@ -422,9 +455,9 @@ public class LambdaAnalysis implements Plugin {
      */
     private void addLambdaCallEdges(
             InstanceInvoInfo info, PointsToSet recvObjs,
-            ReceiverGroups<Type, CSObj> recvByType) {
+            ReceiverGroups<Type, CSObj> recvByType, int path) {
         addLambdaCallEdges(info, recvObjs, groupByCallee(
-                info.getCSCallSite(), info.getTargetRef(), recvByType));
+                info.getCSCallSite(), info.getTargetRef(), recvByType, path));
     }
 
     /**
@@ -433,16 +466,21 @@ public class LambdaAnalysis implements Plugin {
      * callees in first-seen order (the grouping of
      * {@link #addLambdaCallEdges(InstanceInvoInfo, PointsToSet, ReceiverGroups)}).
      * A receiver whose type does not dispatch {@code targetRef} is left out.
+     * {@code path} names the caller for the counters ({@link LambdaCounters}).
      */
     private Map<CSMethod, PointsToSet> groupByCallee(
             CSCallSite csCallSite, MethodRef targetRef,
-            ReceiverGroups<Type, CSObj> recvByType) {
+            ReceiverGroups<Type, CSObj> recvByType, int path) {
         Map<CSMethod, PointsToSet> receiversByCallee = new LinkedHashMap<>();
         recvByType.forEachGroup(new ReceiverGroups.Visitor<Type, CSObj, JMethod>() {
             @Override
             @Nullable
             public JMethod enter(Type type) {
-                return hierarchy.dispatch(type, targetRef);
+                JMethod callee = hierarchy.dispatch(type, targetRef);
+                if (counters != null) {
+                    counters.enter(path, callee != null);
+                }
+                return callee;
             }
 
             @Override
@@ -478,8 +516,14 @@ public class LambdaAnalysis implements Plugin {
             // pass receiver objects to 'this' variable of callee
             solver.addVarPointsTo(csCallee.getContext(),
                     callee.getIR().getThis(), receivers);
+            if (counters != null) {
+                counters.thisUpdate(csCallee.getContext(), callee);
+            }
             if (fitsParameterCount(callee, info.getArgsToStatic(),
                     info.getArgsToInstance())) {
+                if (counters != null) {
+                    counters.edgeBuilt();
+                }
                 solver.addCallEdge(new LambdaCallEdge(
                         csCallSite, csCallee, indy, info.getLambdaContext()));
             }
@@ -503,6 +547,7 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onRelease() {
         checkFinish();
+        logCounters();
         lambdaObjs.clear();
         invoInfos.clear();
         recvByType.clear();
@@ -511,7 +556,23 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onFinish() {
         checkFinish();
+        logCounters();
         recvByType.clear();
+    }
+
+    /**
+     * Logs the counters once, at the first of {@link #onRelease} and
+     * {@link #onFinish}, while {@link #invoInfos} still holds the receiver
+     * variables.
+     */
+    private void logCounters() {
+        LambdaCounters c = counters;
+        if (c != null) {
+            List<Integer> infoCounts = new ArrayList<>();
+            invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
+            logger.info("Lambda counters: {}", c.line(infoCounts));
+            counters = null;
+        }
     }
 
     /**
@@ -668,6 +729,9 @@ public class LambdaAnalysis implements Plugin {
     @Override
     public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (edge instanceof LambdaCallEdge lambdaCallEdge) {
+            if (counters != null) {
+                counters.edgeNew();
+            }
             CSCallSite csCallSite = lambdaCallEdge.getCallSite();
             CSMethod csCallee = lambdaCallEdge.getCallee();
             Context calleeContext = csCallee.getContext();
@@ -742,6 +806,9 @@ public class LambdaAnalysis implements Plugin {
         if (infos.isEmpty()) {
             return;
         }
+        if (counters != null) {
+            counters.startEvent();
+        }
         // grouped once per new points-to set, shared by every lambda
         // invocation on this receiver variable, and appended to the
         // variable's cached grouping (present since its first invocation)
@@ -754,7 +821,8 @@ public class LambdaAnalysis implements Plugin {
         if (callSiteFreeContexts && infos.size() > 1) {
             addSharedLambdaCallEdges(infos, pts, ptsByType);
         } else {
-            infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType));
+            infos.forEach(info -> addLambdaCallEdges(info, pts, ptsByType,
+                    LambdaCounters.PATH_NEW_PTS));
         }
     }
 
@@ -777,7 +845,8 @@ public class LambdaAnalysis implements Plugin {
         for (InstanceInvoInfo info : infos) {
             Map<CSMethod, PointsToSet> receiversByCallee = groupingByTarget.computeIfAbsent(
                     info.getTargetRef(),
-                    targetRef -> groupByCallee(info.getCSCallSite(), targetRef, ptsByType));
+                    targetRef -> groupByCallee(info.getCSCallSite(), targetRef, ptsByType,
+                            LambdaCounters.PATH_SHARED));
             addLambdaCallEdges(info, pts, receiversByCallee);
         }
     }

@@ -269,6 +269,19 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
         return result;
     }
 
+    /**
+     * @return the estimated bytes of the bits of this set in the packed form
+     * of {@link SparseBitSet#toPacked()} (a 16-byte array header and eight
+     * bytes a word), or of the words up to {@link IBitSet#length()} for a
+     * bit set that is not sparse. A measurement: it may copy the words.
+     */
+    public long packedBytes() {
+        long words = bitSet instanceof SparseBitSet sparse
+                ? sparse.toPacked().length
+                : (bitSet.length() + (long) Long.SIZE - 1) / Long.SIZE;
+        return 16L + 8L * words;
+    }
+
     @Override
     public SetEx<E> copy() {
         GenericBitSet<E> copy = newSet();

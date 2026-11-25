@@ -31,11 +31,13 @@ import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
+import pascal.taie.language.type.Type;
 import pascal.taie.util.Indexer;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -110,11 +112,18 @@ public class SolverCountersTest {
     }
 
     @Test
-    void objectCensusTellsLambdaObjectsFromOtherMockObjects() {
-        MockObj lambda = new MockObj(() -> CSObjCensus.LAMBDA_DESCRIPTOR,
-                "indy", null, null, true);
-        assertEquals(CSObjCensus.KIND_LAMBDA, CSObjCensus.kindOf(lambda));
+    void objectCensusTellsLambdaObjectsByTheAnalysisDescriptorNotByText() {
+        // a mock object whose descriptor only reads like the lambda one
+        MockObj lookalike = new MockObj(() -> "LambdaObj", "indy", null, null, true);
+        assertEquals(CSObjCensus.KIND_MOCK, CSObjCensus.kindOf(lookalike));
         assertEquals(CSObjCensus.KIND_MOCK, CSObjCensus.kindOf(objs[0].getObject()));
+    }
+
+    @Test
+    void guardsBlockIsEmptyWhenOffAndCountsNoGuardWithoutFilters() {
+        assertEquals("", TypeFilter.guardsBlock(List.of(), false, 5));
+        assertEquals("", TypeFilter.statsLine(List.of(), false));
+        assertEquals("guards=0 all_pass=0 all_fail=0", TypeFilter.guardsBlock(List.of(), true, 5));
     }
 
     @Test
@@ -134,6 +143,10 @@ public class SolverCountersTest {
         assertTrue(Probe.polledBits >= Probe.diffBits && Probe.diffBits > 0,
                 Probe.polledBits + " polled, " + Probe.diffBits + " diff");
         assertTrue(Probe.typeFilterLine.contains("type_tests="), Probe.typeFilterLine);
+        assertTrue(Probe.typeFilterLine.matches(".* memo_bytes=[1-9][0-9]*"), Probe.typeFilterLine);
+        assertTrue(Probe.guards.startsWith("guards=") && Probe.guards.contains("\nguard ")
+                && Probe.guards.contains(" fail="), Probe.guards);
+        assertTrue(Probe.countersLine.contains("copied_bytes_small_small="), Probe.countersLine);
         assertTrue(Probe.countersLine.contains("copies_small_small="), Probe.countersLine);
         CSObjCensus objs = Probe.objs;
         assertNotNull(objs);
@@ -216,6 +229,8 @@ public class SolverCountersTest {
 
         static String countersLine = "";
 
+        static String guards = "";
+
         static long polledBits;
 
         static long diffBits;
@@ -250,8 +265,11 @@ public class SolverCountersTest {
             int at = countersLine.indexOf("; type filters ") + "; type filters ".length();
             int end = countersLine.indexOf(';', at);
             typeFilterLine = countersLine.substring(at, end < 0 ? countersLine.length() : end);
-            SolverCensus census = census(s);
+            SolverCensus census = (SolverCensus) field(s, "census");
             objs = census == null ? null : census.objs();
+            @SuppressWarnings("unchecked")
+            Map<Type, TypeFilter> filters = (Map<Type, TypeFilter>) field(s, "typeFilters");
+            guards = TypeFilter.guardsBlock(filters.values(), true, 5);
             Indexer<CSObj> objects = solver.getCSManager().getObjectIndexer();
             List<Long> ps = new ArrayList<>();
             List<String> ns = new ArrayList<>();
@@ -280,11 +298,11 @@ public class SolverCountersTest {
                     .map(e -> (long) e.toString().hashCode()).sorted().toList();
         }
 
-        private static SolverCensus census(DefaultSolver s) {
+        private static Object field(DefaultSolver s, String name) {
             try {
-                java.lang.reflect.Field field = DefaultSolver.class.getDeclaredField("census");
+                java.lang.reflect.Field field = DefaultSolver.class.getDeclaredField(name);
                 field.setAccessible(true);
-                return (SolverCensus) field.get(s);
+                return field.get(s);
             } catch (ReflectiveOperationException e) {
                 throw new AssertionError(e);
             }

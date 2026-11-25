@@ -30,6 +30,7 @@ import pascal.taie.analysis.pta.core.heap.ConstantObj;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.NewObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.plugin.invokedynamic.LambdaAnalysis;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.ir.stmt.Invoke;
 
@@ -51,12 +52,6 @@ import pascal.taie.ir.stmt.Invoke;
  */
 record CSObjCensus(long[] byKind, long[] emptyContext, long lambdaCapturing,
                    long lambdaFields, long lambdaIndexes) {
-
-    /**
-     * The descriptor text of the functional objects that the lambda
-     * analysis creates at a lambda meta factory call.
-     */
-    static final String LAMBDA_DESCRIPTOR = "LambdaObj";
 
     static final int KIND_LAMBDA = 0;
 
@@ -103,9 +98,8 @@ record CSObjCensus(long[] byKind, long[] emptyContext, long lambdaCapturing,
     }
 
     static int kindOf(Obj obj) {
-        if (obj instanceof MockObj mock) {
-            return mock.getDescriptor().string().equals(LAMBDA_DESCRIPTOR)
-                    ? KIND_LAMBDA : KIND_MOCK;
+        if (obj instanceof MockObj) {
+            return LambdaAnalysis.isLambdaObj(obj) ? KIND_LAMBDA : KIND_MOCK;
         }
         if (obj instanceof NewObj) {
             return KIND_NEW;

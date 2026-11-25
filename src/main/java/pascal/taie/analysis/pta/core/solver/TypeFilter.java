@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -146,6 +147,14 @@ public class TypeFilter implements Transfer {
             return types.get(id);
         }
 
+        /**
+         * @return the estimated bytes of the type id table: a 16-byte array
+         * header and four bytes an object index.
+         */
+        long bytes() {
+            return 16L + 4L * idPlusOne.length;
+        }
+
         private int assign(CSObj o, int index) {
             Type type = o.getObject().getType();
             Integer id = ids.get(type);
@@ -198,6 +207,16 @@ public class TypeFilter implements Transfer {
             return (typePass[word] & bit) != 0 ? 1 : 0;
         }
 
+        /**
+         * @return the estimated bytes of this memo's bits: the known and pass
+         * sets in packed form and the two type word arrays (a 16-byte array
+         * header and eight bytes a word each).
+         */
+        long bytes() {
+            return known.packedBytes() + pass.packedBytes()
+                    + 32L + 8L * (typeKnown.length + typePass.length);
+        }
+
         void recordType(int typeId, boolean passes) {
             int word = typeId >>> 6;
             if (word >= typeKnown.length) {
@@ -241,11 +260,11 @@ public class TypeFilter implements Transfer {
     private long applications;
 
     /**
-     * Whether the measurement counters below are kept; set by the solver
-     * for each solve (see {@link #setStats}). They change no result and no
-     * order.
+     * Whether the measurement counters below are kept; turned on by the
+     * solver that created this filter (see {@link #enableStats}). They
+     * change no result and no order.
      */
-    private static boolean stats;
+    private boolean stats;
 
     /**
      * Applications that took the bit set path, objects in the inputs of
@@ -340,10 +359,10 @@ public class TypeFilter implements Transfer {
     }
 
     /**
-     * Turns the measurement counters of all type filters on or off.
+     * Turns the measurement counters of this filter on.
      */
-    static void setStats(boolean on) {
-        stats = on;
+    void enableStats() {
+        stats = true;
     }
 
     long largeApplications() {
@@ -360,12 +379,17 @@ public class TypeFilter implements Transfer {
 
     /**
      * Sums the measurement counters of the filters, with the objects their
-     * memos know and those that pass, each shared memo counted once.
+     * memos know and those that pass, and the estimated bytes of the memos
+     * (their known and pass bit sets in the packed form of
+     * {@link GenericBitSet#packedBytes()}, their type words, and the shared
+     * table of object type ids), each shared memo and table counted once.
      *
+     * @param counting whether the solver that created the filters keeps
+     *                 the counters
      * @return the summary line, or the empty text if the counters are off.
      */
-    static String statsLine(Collection<TypeFilter> filters) {
-        if (!stats) {
+    static String statsLine(Collection<TypeFilter> filters, boolean counting) {
+        if (!counting) {
             return "";
         }
         long apps = 0;
@@ -374,7 +398,9 @@ public class TypeFilter implements Transfer {
         long tests = 0;
         long memoKnown = 0;
         long memoPass = 0;
+        long memoBytes = 0;
         Set<Memo> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        Set<ObjectTypes> seenTypes = Collections.newSetFromMap(new IdentityHashMap<>());
         for (TypeFilter f : filters) {
             apps += f.applications;
             large += f.largeApplications;
@@ -384,6 +410,10 @@ public class TypeFilter implements Transfer {
             if (m != null && seen.add(m)) {
                 memoKnown += m.known.size();
                 memoPass += m.pass.size();
+                memoBytes += m.bytes();
+                if (seenTypes.add(m.types)) {
+                    memoBytes += m.types.bytes();
+                }
             }
         }
         return "filters=" + filters.size()
@@ -392,7 +422,86 @@ public class TypeFilter implements Transfer {
                 + " input_bits=" + bits
                 + " type_tests=" + tests
                 + " memo_known_objects=" + memoKnown
-                + " memo_pass_objects=" + memoPass;
+                + " memo_pass_objects=" + memoPass
+                + " memo_bytes=" + memoBytes;
+    }
+
+    /**
+     * The block of the guards: per memo (one guard type) that the filters
+     * hold, the filters sharing it with their applications, large
+     * applications and input bits, and the objects the memo knows, passes
+     * and fails at this point (the solver logs it at the exit of the
+     * solve). Lists the {@code limit} guards with the most failing objects
+     * (ties by the most known objects, then by the guard type's name),
+     * after a line with the number of guards, of guards that pass every
+     * known object and of guards that fail every known object.
+     *
+     * @return the block, or the empty text if the counters are off.
+     */
+    static String guardsBlock(Collection<TypeFilter> filters, boolean counting, int limit) {
+        if (!counting) {
+            return "";
+        }
+        Map<Memo, GuardRow> rows = new IdentityHashMap<>();
+        for (TypeFilter f : filters) {
+            Memo m = f.memo;
+            if (m != null) {
+                rows.computeIfAbsent(m, k -> new GuardRow(f.type.getName(),
+                        k.known.size(), k.pass.size())).add(f);
+            }
+        }
+        List<GuardRow> sorted = new ArrayList<>(rows.values());
+        sorted.sort(Comparator.comparingLong((GuardRow r) -> r.known - r.pass).reversed()
+                .thenComparing(Comparator.comparingLong((GuardRow r) -> r.known).reversed())
+                .thenComparing(r -> r.type));
+        long allPass = sorted.stream().filter(r -> r.pass == r.known).count();
+        long allFail = sorted.stream().filter(r -> r.pass == 0 && r.known > 0).count();
+        StringBuilder block = new StringBuilder("guards=").append(sorted.size())
+                .append(" all_pass=").append(allPass).append(" all_fail=").append(allFail);
+        for (GuardRow r : sorted.subList(0, Math.min(limit, sorted.size()))) {
+            block.append('\n').append(r);
+        }
+        return block.toString();
+    }
+
+    /**
+     * One guard of {@link #guardsBlock}.
+     */
+    private static final class GuardRow {
+
+        private final String type;
+
+        private final long known;
+
+        private final long pass;
+
+        private long filters;
+
+        private long applications;
+
+        private long largeApplications;
+
+        private long inputBits;
+
+        private GuardRow(String type, long known, long pass) {
+            this.type = type;
+            this.known = known;
+            this.pass = pass;
+        }
+
+        private void add(TypeFilter f) {
+            ++filters;
+            applications += f.applications;
+            largeApplications += f.largeApplications;
+            inputBits += f.inputBits;
+        }
+
+        @Override
+        public String toString() {
+            return "guard " + type + " filters=" + filters + " applications=" + applications
+                    + " large_applications=" + largeApplications + " input_bits=" + inputBits
+                    + " known=" + known + " pass=" + pass + " fail=" + (known - pass);
+        }
     }
 
     /**

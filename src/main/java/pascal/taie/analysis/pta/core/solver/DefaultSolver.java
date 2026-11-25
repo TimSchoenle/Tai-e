@@ -250,6 +250,22 @@ public class DefaultSolver implements Solver {
     static final String COUNTERS_PROPERTY = "taie.pta.counters";
 
     /**
+     * The guards listed in the type filter block at the finish (see
+     * {@link TypeFilter#guardsBlock}).
+     */
+    private static final int GUARD_LINES = 20;
+
+    /**
+     * @return whether the measurement counters are kept for a pointer
+     * analysis with these options: with the option {@code census} or the
+     * system property {@value #COUNTERS_PROPERTY}. Plugins that keep
+     * counters of their own ask this too.
+     */
+    public static boolean countersEnabled(AnalysisOptions options) {
+        return options.getBoolean("census") || Boolean.getBoolean(COUNTERS_PROPERTY);
+    }
+
+    /**
      * The origins of new points-to work that the counters tell apart, an
      * index into {@link #addsByOrigin}: the initial flow of a new pointer
      * flow edge, the fan-out of a propagation, the receiver objects of
@@ -306,7 +322,7 @@ public class DefaultSolver implements Solver {
         ptsFactory = new PointsToSetFactory(csManager.getObjectIndexer());
         interner = options.getBoolean("share-points-to-sets")
                 ? new PointsToSetInterner(ptsFactory) : null;
-        counting = options.getBoolean("census") || Boolean.getBoolean(COUNTERS_PROPERTY);
+        counting = countersEnabled(options);
         if (counting && interner != null) {
             interner.enableFormCounters();
         }
@@ -462,7 +478,6 @@ public class DefaultSolver implements Solver {
         progressCounters.reset();
         addOrigin = ORIGIN_OTHER;
         Arrays.fill(addsByOrigin, 0);
-        TypeFilter.setStats(counting);
         solveStartNanos = System.nanoTime();
         lastProgressNanos = solveStartNanos;
         if (timeLimit != UNLIMITED) {
@@ -566,6 +581,8 @@ public class DefaultSolver implements Solver {
         }
         if (counting) {
             logger.info("Solver counters: {}", countersLine());
+            logger.info("Type filter guards: {}",
+                    TypeFilter.guardsBlock(typeFilters.values(), true, GUARD_LINES));
         }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager);
@@ -635,7 +652,8 @@ public class DefaultSolver implements Solver {
      */
     String countersLine() {
         StringBuilder line = new StringBuilder(addsLine());
-        line.append("; type filters ").append(TypeFilter.statsLine(typeFilters.values()));
+        line.append("; type filters ")
+                .append(TypeFilter.statsLine(typeFilters.values(), counting));
         if (interner != null) {
             line.append("; interner ").append(interner.formCopiesLine());
         }
@@ -1250,6 +1268,9 @@ public class DefaultSolver implements Solver {
         TypeFilter filter = typeFilters.get(type);
         if (filter == null) {
             filter = new TypeFilter(type, this);
+            if (counting) {
+                filter.enableStats();
+            }
             typeFilters.put(type, filter);
         }
         addPFGEdge(edge, filter);

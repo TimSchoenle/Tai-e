@@ -28,6 +28,7 @@ import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.core.cs.element.TestElements;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The interner's copies counted by the forms of the held set and of the
@@ -70,10 +71,33 @@ class PointsToSetInternerFormCountersTest {
         copyShared(interner, 0, set(0, 1), set(1, 2));
         copyShared(interner, 2, set(0, OBJECTS - 1), set(OBJECTS - 1, OBJECTS));
         // the first change of each pointer copies the shared empty set
-        assertEquals("copies_small_small=3/1 copies_small_large=2/0"
-                        + " copies_large_small=1/" + (OBJECTS - 1) + " copies_large_large=0/0",
-                interner.formCopiesLine());
+        String line = interner.formCopiesLine();
+        assertTrue(line.startsWith("copies_small_small=3/1 copies_small_large=2/0"
+                + " copies_large_small=1/" + (OBJECTS - 1) + " copies_large_large=0/0 "), line);
         assertEquals(6, interner.counters().copies());
+        long largeHeld = PointsToSetInterner.copiedBytes(set(0, OBJECTS - 1));
+        assertEquals(largeHeld, copiedBytes(line, "large_small"));
+        assertEquals(0, copiedBytes(line, "large_large"));
+        assertTrue(copiedBytes(line, "small_small") > 0, line);
+        assertTrue(copiedBytes(line, "small_large") > 0, line);
+    }
+
+    @Test
+    void estimatesALargeHeldSetByItsPackedWords() {
+        long large = PointsToSetInterner.copiedBytes(set(0, OBJECTS - 1));
+        long small = PointsToSetInterner.copiedBytes(set(0, 2));
+        // the 63 dense objects fit in one packed block: fewer bytes than
+        // one reference per object, more than an empty array
+        assertTrue(large > 16 && large < 4L * (OBJECTS - 1), "large " + large);
+        assertTrue(small > 16 && small < large, "small " + small);
+    }
+
+    private static long copiedBytes(String line, String form) {
+        String key = "copied_bytes_" + form + "=";
+        int at = line.indexOf(key);
+        assertTrue(at >= 0, line);
+        int end = line.indexOf(' ', at);
+        return Long.parseLong(line.substring(at + key.length(), end < 0 ? line.length() : end));
     }
 
     @Test
