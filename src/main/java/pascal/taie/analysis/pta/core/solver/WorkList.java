@@ -35,6 +35,7 @@ import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.NoSuchElementException;
 import java.util.Queue;
+import java.util.function.Consumer;
 
 /**
  * Represents work list in pointer analysis.
@@ -68,6 +69,13 @@ import java.util.Queue;
  * holds it and copied on its first merge there. A delta handed out by
  * {@link #takePolledDelta()} may thus be the pending delta of other
  * pointers: the caller only reads it.
+ * <p>
+ * With a cold window (option {@code pack-cold-sets}), a pending delta that
+ * a merge restored or changed and that then waits for as many later merges
+ * as the window holds without one of its own is packed again by
+ * {@link #packColdDeltas()}: it is held as the packed words of
+ * {@link PointsToSetFactory#toPackedLarge}, the form a large delta takes
+ * on arrival, which the next merge or the poll restores.
  */
 final class WorkList {
 
@@ -184,13 +192,60 @@ final class WorkList {
     private long sharedCopies;
 
     /**
+     * The window over the pointers whose pending deltas were merged last,
+     * or null without a cold window.
+     */
+    private final @Nullable ColdSetQueue coldDeltas;
+
+    private final @Nullable Consumer<Pointer> packColdDelta;
+
+    /**
+     * By ring slot, with a cold window: whether the slot's packed words
+     * were packed by {@link #packColdDeltas()}.
+     */
+    private boolean @Nullable [] ringCold;
+
+    /**
+     * Pending deltas packed by {@link #packColdDeltas()}, the words they
+     * were packed into, and the restores of such deltas by a merge or poll.
+     */
+    private long coldPacks;
+
+    private long coldPackedWords;
+
+    private long coldUnpacks;
+
+    /**
      * @param ptsFactory the factory of the pending sets
      * @param packLarge  whether a pending delta that is a large set on
      *                   arrival is held as packed words
      */
     WorkList(PointsToSetFactory ptsFactory, boolean packLarge) {
+        this(ptsFactory, packLarge, 0);
+    }
+
+    /**
+     * @param ptsFactory the factory of the pending sets
+     * @param packLarge  whether a pending delta that is a large set on
+     *                   arrival is held as packed words
+     * @param coldWindow the merges a merged pending delta waits for without
+     *                   one of its own before {@link #packColdDeltas()}
+     *                   packs it; 0 packs no merged delta
+     */
+    WorkList(PointsToSetFactory ptsFactory, boolean packLarge, int coldWindow) {
+        if (coldWindow < 0) {
+            throw new IllegalArgumentException("negative cold window: " + coldWindow);
+        }
         this.ptsFactory = ptsFactory;
         this.packLarge = packLarge;
+        if (coldWindow > 0) {
+            coldDeltas = new ColdSetQueue(coldWindow);
+            packColdDelta = this::packColdDelta;
+            ringCold = new boolean[INITIAL_CAPACITY];
+        } else {
+            coldDeltas = null;
+            packColdDelta = null;
+        }
     }
 
     /**
@@ -276,6 +331,9 @@ final class WorkList {
         ringPointers[slot] = pointer;
         ringDeltas[slot] = delta;
         ringShared[slot] = false;
+        if (ringCold != null) {
+            ringCold[slot] = false;
+        }
         seqByIndex[index] = seq;
         ++size;
         ++newEntries;
@@ -321,11 +379,60 @@ final class WorkList {
                 set = held;
             }
         } else {
+            countColdRestore(slot);
             set = restore(pending);
             ringDeltas[slot] = set;
         }
         set.addAll(pointsToSet);
         ++mergedEntries;
+        if (coldDeltas != null) {
+            coldDeltas.touch(ringPointers[slot]);
+        }
+    }
+
+    /**
+     * Counts the restore of the packed delta of {@code slot} if
+     * {@link #packColdDeltas()} packed it.
+     */
+    private void countColdRestore(int slot) {
+        if (ringCold != null && ringCold[slot]) {
+            ringCold[slot] = false;
+            ++coldUnpacks;
+        }
+    }
+
+    /**
+     * Packs the merged pending deltas that left the cold window without a
+     * later merge of their own (see the class comment). Called only where
+     * no caller reads a pending delta and no fan-out is open: between the
+     * solver's polls.
+     */
+    void packColdDeltas() {
+        if (coldDeltas != null && packColdDelta != null && coldDeltas.size() != 0) {
+            if (fanSize != 0) {
+                throw new IllegalStateException("cold deltas packed during a fan-out");
+            }
+            coldDeltas.drain(packColdDelta);
+        }
+    }
+
+    /**
+     * Holds the pending delta of {@code pointer} as packed words, if the
+     * pointer is pending with a large set that no other slot holds.
+     */
+    private void packColdDelta(Pointer pointer) {
+        int slot = pendingSlot(pointer);
+        if (slot < 0 || ringShared[slot]
+                || !(ringDeltas[slot] instanceof PointsToSet set)) {
+            return;
+        }
+        long[] words = ptsFactory.toPackedLarge(set);
+        if (words != null && ringCold != null) {
+            ringDeltas[slot] = words;
+            ringCold[slot] = true;
+            ++coldPacks;
+            coldPackedWords += words.length;
+        }
     }
 
     /**
@@ -386,15 +493,21 @@ final class WorkList {
         Pointer[] newPointers = new Pointer[oldCapacity * 2];
         Object[] newDeltas = new Object[oldCapacity * 2];
         boolean[] newShared = new boolean[oldCapacity * 2];
+        boolean[] oldCold = ringCold;
+        boolean[] newCold = oldCold == null ? null : new boolean[oldCapacity * 2];
         for (int i = 0; i < size; ++i) {
             int seq = headSeq + i;
             newPointers[seq & newMask] = ringPointers[seq & oldMask];
             newDeltas[seq & newMask] = ringDeltas[seq & oldMask];
             newShared[seq & newMask] = ringShared[seq & oldMask];
+            if (oldCold != null && newCold != null) {
+                newCold[seq & newMask] = oldCold[seq & oldMask];
+            }
         }
         ringPointers = newPointers;
         ringDeltas = newDeltas;
         ringShared = newShared;
+        ringCold = newCold;
     }
 
     private void growIndex(int index) {
@@ -446,6 +559,10 @@ final class WorkList {
         --size;
         if (fanSize != 0) {
             endFanOut();
+        }
+        if (coldDeltas != null) {
+            coldDeltas.forget(pointer);
+            countColdRestore(slot);
         }
         if (pending instanceof PointsToSet set) {
             polledDelta = set;
@@ -547,9 +664,37 @@ final class WorkList {
     }
 
     /**
-     * @return the counters of the pointer entries, for the log.
+     * @return the pending deltas packed by {@link #packColdDeltas()}
+     */
+    long coldPacks() {
+        return coldPacks;
+    }
+
+    /**
+     * @return the bytes of the words of the pending deltas packed by
+     * {@link #packColdDeltas()}
+     */
+    long coldPackedBytes() {
+        return coldPackedWords * Long.BYTES;
+    }
+
+    /**
+     * @return the restores, by a merge or poll, of pending deltas packed by
+     * {@link #packColdDeltas()}
+     */
+    long coldUnpacks() {
+        return coldUnpacks;
+    }
+
+    /**
+     * @return the counters of the pointer entries, for the log; with a cold
+     * window, followed by the counters of {@link #packColdDeltas()}.
      */
     String countersLine() {
+        String cold = coldDeltas == null ? ""
+                : " cold_packs=" + coldPacks
+                + " cold_packed_bytes=" + coldPackedBytes()
+                + " cold_unpacks=" + coldUnpacks;
         return "pending_pointers=" + size
                 + " pending_peak=" + pendingPeak
                 + " new_entries=" + newEntries
@@ -560,6 +705,7 @@ final class WorkList {
                 + " shared_copies=" + sharedCopies
                 + " packed_by_reference=" + packedByReference
                 + " packed_copy_bytes=" + packedCopyBytes()
-                + " packed_reference_bytes=" + packedReferenceBytes();
+                + " packed_reference_bytes=" + packedReferenceBytes()
+                + cold;
     }
 }

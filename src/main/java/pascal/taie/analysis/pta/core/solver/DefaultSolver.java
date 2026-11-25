@@ -93,6 +93,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 import static pascal.taie.language.classes.Signatures.FINALIZE;
@@ -151,6 +152,19 @@ public class DefaultSolver implements Solver {
      */
     @Nullable
     private final PointsToSetInterner interner;
+
+    /**
+     * With {@link #interner} and the option {@code pack-cold-sets} above 0:
+     * the window over the pointers whose shared sets, held by them alone,
+     * were changed last; a set that leaves it without a later change is
+     * packed between two polls. Null otherwise, and after
+     * {@link #releaseSolverState()}.
+     */
+    @Nullable
+    private ColdSetQueue coldSoleSets;
+
+    @Nullable
+    private Consumer<Pointer> packColdSole;
 
     private final PropagateTypes propTypes;
 
@@ -268,8 +282,20 @@ public class DefaultSolver implements Solver {
         hierarchy = World.get().getClassHierarchy();
         typeSystem = World.get().getTypeSystem();
         ptsFactory = new PointsToSetFactory(csManager.getObjectIndexer());
+        int coldWindow = options.getInt("pack-cold-sets");
+        if (coldWindow < 0) {
+            throw new IllegalArgumentException(
+                    "pack-cold-sets must not be negative: " + coldWindow);
+        }
         interner = options.getBoolean("share-points-to-sets")
-                ? new PointsToSetInterner(ptsFactory) : null;
+                ? new PointsToSetInterner(ptsFactory, coldWindow > 0) : null;
+        if (interner != null && coldWindow > 0) {
+            coldSoleSets = new ColdSetQueue(coldWindow);
+            packColdSole = interner::packSoleHeld;
+        } else {
+            coldSoleSets = null;
+            packColdSole = null;
+        }
         propTypes = new PropagateTypes(
                 (List<String>) options.get("propagate-types"),
                 typeSystem);
@@ -430,7 +456,8 @@ public class DefaultSolver implements Solver {
     }
 
     private WorkList newWorkList() {
-        return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"));
+        return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"),
+                options.getInt("pack-cold-sets"));
     }
 
     private class TimeLimiter {
@@ -468,6 +495,19 @@ public class DefaultSolver implements Solver {
     }
 
     /**
+     * Packs the sets that left the cold windows (option
+     * {@code pack-cold-sets}). Runs only between two polls: there no
+     * caller iterates a points-to set or a pending delta, and no fan-out
+     * is open.
+     */
+    private void packColdSets() {
+        if (coldSoleSets != null && packColdSole != null) {
+            coldSoleSets.drain(packColdSole);
+        }
+        workList.packColdDeltas();
+    }
+
+    /**
      * Processes work list entries until the work list is empty.
      */
     private void analyze() {
@@ -478,6 +518,7 @@ public class DefaultSolver implements Solver {
                         && progressIntervalNanos != 0) {
                     checkProgress();
                 }
+                packColdSets();
                 if (workList.hasCallEdge()) {
                     processCallEdge(workList.pollCallEdge());
                 } else {
@@ -507,6 +548,10 @@ public class DefaultSolver implements Solver {
         if (interner != null) {
             logger.info("Points-to set interner: {} shared sets, {}",
                     interner.size(), interner.counters());
+            if (coldSoleSets != null) {
+                logger.info("Cold sole sets: packed={} packed_sole_writes={}",
+                        interner.solePacks(), interner.packedSoleWrites());
+            }
         }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager);
@@ -585,7 +630,10 @@ public class DefaultSolver implements Solver {
      */
     private void releaseSolverState() {
         solverStateReleased = true;
-        workList = newWorkList();
+        // the solver refuses new work from here on: no cold window is needed
+        workList = new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"));
+        coldSoleSets = null;
+        packColdSole = null;
         csManager.pointers().forEach(Pointer::releaseEdgeDedup);
         csManager.mockPointers().forEach(Pointer::releaseEdgeDedup);
         if (options.getBoolean("release-pointer-flow-graph")) {
@@ -613,6 +661,10 @@ public class DefaultSolver implements Solver {
         PointsToSet diff = sharing != null
                 ? sharing.addAllDiff(pointer, pointsToSet)
                 : getPointsToSetOf(pointer).addAllDiff(pointsToSet);
+        if (coldSoleSets != null && sharing != null && !diff.isEmpty()
+                && sharing.holdsUnpackedSole(pointer)) {
+            coldSoleSets.touch(pointer);
+        }
         if (!diff.isEmpty()) {
             try {
                 pointer.forEachOutTransfer((edge, target, transfer) ->

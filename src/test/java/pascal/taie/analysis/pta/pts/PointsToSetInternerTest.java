@@ -672,6 +672,99 @@ class PointsToSetInternerTest {
         }
     }
 
+    /**
+     * A large set held by one pointer alone is packed in place on request:
+     * its contents, order and table place stay; a set that is small, held
+     * by two or packed already is left alone; a change in place restores it.
+     */
+    @Test
+    void soleHeldLargeSetPacksInPlaceAndAChangeRestoresIt() {
+        Pointer p1 = TestElements.pointer(1);
+        Pointer p2 = TestElements.pointer(2);
+        Pointer p3 = TestElements.pointer(3);
+        interner.addAllDiff(p1, large(1, 2, 3, 40));
+        interner.addAllDiff(p2, small(5));
+        interner.addAllDiff(p3, large(7, 8, 9, 41));
+        interner.addAllDiff(TestElements.pointer(4), large(7, 8, 9, 41));
+        PointsToSet sole = p1.getPointsToSet();
+        assertTrue(interner.holdsUnpackedSole(p1));
+        assertFalse(interner.holdsUnpackedSole(p2), "small");
+        assertFalse(interner.holdsUnpackedSole(p3), "held by two");
+        assertFalse(interner.packSoleHeld(p2));
+        assertFalse(interner.packSoleHeld(p3));
+        assertEquals(0, interner.solePacks());
+
+        assertTrue(interner.packSoleHeld(p1));
+        assertSame(sole, p1.getPointsToSet());
+        assertTrue(((DelegatePointsToSet) sole).isPacked());
+        assertEquals(1, ((DelegatePointsToSet) sole).holders);
+        assertEquals(List.of(1, 2, 3, 40), sequence(sole));
+        assertTrue(isLarge(sole));
+        assertSame(sole, interner.find(large(1, 2, 3, 40)));
+        assertFalse(interner.holdsUnpackedSole(p1), "packed already");
+        assertFalse(interner.packSoleHeld(p1));
+        assertEquals(1, interner.solePacks());
+
+        PointsToSet diff = interner.addAllDiff(p1, large(3, 50));
+        assertEquals(List.of(50), sequence(diff));
+        assertEquals(List.of(1, 2, 3, 40, 50), sequence(p1.getPointsToSet()));
+        assertEquals(0, interner.packedSoleWrites(), "not counted by default");
+        assertTrue(interner.holdsUnpackedSole(p1));
+
+        PointsToSetInterner counting = new PointsToSetInterner(factory, true);
+        Pointer q = TestElements.pointer(5);
+        counting.addAllDiff(q, large(1, 2, 3, 40));
+        counting.addAllDiff(q, large(41));
+        assertEquals(0, counting.packedSoleWrites(), "an unpacked set");
+        assertTrue(counting.packSoleHeld(q));
+        counting.addAllDiff(q, large(42));
+        assertEquals(1, counting.packedSoleWrites());
+        assertEquals(List.of(1, 2, 3, 40, 41, 42), sequence(q.getPointsToSet()));
+    }
+
+    /**
+     * Random writes with and without packing sole held sets between them
+     * give the same sets, differences, forms, table sizes and counters.
+     */
+    @Test
+    void packingSoleHeldSetsKeepsEveryResult() {
+        for (long seed = 1; seed <= 20; ++seed) {
+            Random random = new Random(seed);
+            PointsToSetInterner plain = new PointsToSetInterner(factory);
+            PointsToSetInterner packing = new PointsToSetInterner(factory);
+            int n = 12;
+            Pointer[] plainPointers = new Pointer[n];
+            Pointer[] packingPointers = new Pointer[n];
+            for (int i = 0; i < n; ++i) {
+                plainPointers[i] = TestElements.pointer(i);
+                packingPointers[i] = TestElements.pointer(i);
+            }
+            for (int step = 0; step < 300; ++step) {
+                String at = "seed " + seed + " step " + step;
+                for (int i = 0; i < n; ++i) {
+                    if (random.nextInt(3) == 0 && packingPointers[i].getPointsToSet() != null) {
+                        packing.packSoleHeld(packingPointers[i]);
+                    }
+                }
+                int i = random.nextInt(n);
+                int[] picked = pick(random);
+                PointsToSet delta = random.nextBoolean() || picked.length > 4
+                        ? large(picked) : small(picked);
+                PointsToSet plainDiff = plain.addAllDiff(plainPointers[i], delta);
+                PointsToSet packingDiff = packing.addAllDiff(packingPointers[i], delta.copy());
+                assertEquals(sequence(plainDiff), sequence(packingDiff), at);
+                assertEquals(isLarge(plainDiff), isLarge(packingDiff), at);
+                PointsToSet plainSet = plainPointers[i].getPointsToSet();
+                PointsToSet packingSet = packingPointers[i].getPointsToSet();
+                assertEquals(sequence(plainSet), sequence(packingSet), at);
+                assertEquals(isLarge(plainSet), isLarge(packingSet), at);
+                assertEquals(plain.size(), packing.size(), at);
+            }
+            assertEquals(plain.counters(), packing.counters(), "seed " + seed);
+            assertTrue(packing.solePacks() > 0, "seed " + seed);
+        }
+    }
+
     private static int[] pick(Random random) {
         int size = 1 + random.nextInt(random.nextInt(3) == 0 ? 12 : 4);
         int[] picked = new int[size];

@@ -73,6 +73,14 @@ public final class Tests {
             Boolean.getBoolean("taie.test.share-points-to-sets");
 
     /**
+     * The window of the pta option {@code pack-cold-sets} that pointer
+     * analysis tests run with (system property
+     * {@code taie.test.pack-cold-sets}); 0 leaves the option at its default.
+     */
+    private static final int PACK_COLD_SETS =
+            Integer.getInteger("taie.test.pack-cold-sets", 0);
+
+    /**
      * Whether dump control-flow graphs or not.
      */
     private static final boolean DUMP_CFG = false;
@@ -209,6 +217,9 @@ public final class Tests {
                 "distinguish-string-constants:all"));
         if (SHARE_POINTS_TO_SETS) {
             ptaArgs.add("share-points-to-sets:true");
+        }
+        if (PACK_COLD_SETS != 0) {
+            ptaArgs.add("pack-cold-sets:" + PACK_COLD_SETS);
         }
         if (processResult) {
             ptaArgs.add(GENERATE_EXPECTED_RESULTS
