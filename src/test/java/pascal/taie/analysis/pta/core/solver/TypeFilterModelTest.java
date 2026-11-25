@@ -35,6 +35,7 @@ import pascal.taie.language.type.Type;
 import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.Indexer;
 import pascal.taie.util.collection.AbstractHybridSet;
+import pascal.taie.util.collection.GenericBitSet;
 import pascal.taie.util.collection.HybridBitSet;
 import pascal.taie.util.collection.Sets;
 
@@ -152,6 +153,160 @@ class TypeFilterModelTest {
             probeTypeIdsBeyondFirstWord(types, objects, false);
             probeNoObjectLookupForKnownTypes(types, objects);
             probeResultWithoutInputCopy(types, objects);
+            probeObjectPathKeepsNoObjectMemo(types, objects);
+            probeMemoMarksTheFewerSide(types, objects);
+            probeLateObjectInEmptySlot(types, objects);
+        }
+
+        /**
+         * Filters every object alone (the object-by-object path) with the
+         * guard java.lang.Object: the answers come from the memo of the
+         * object types, so the memo holds no bit per object.
+         */
+        private void probeObjectPathKeepsNoObjectMemo(TypeSystem types, List<CSObj> objects) {
+            TypeFilter.clearMemos();
+            TypeFilter filter = new TypeFilter(types.getClassType("java.lang.Object"), solver);
+            for (CSObj o : objects) {
+                PointsToSet one = solver.makePointsToSet();
+                one.addObject(o);
+                filter.apply(null, one);
+            }
+            long bits = memoObjectBits(filter);
+            if (bits != 0) {
+                FAILURES.add("object-by-object path: the memo holds " + bits
+                        + " object bits after " + objects.size() + " objects");
+            }
+            TypeFilter.clearMemos();
+        }
+
+        /**
+         * Filters all objects in one bit set: the memo of a guard that every
+         * object passes (java.lang.Object) holds only the indexes that hold
+         * no object, and the memo of a guard that some objects fail (A) at
+         * most two thirds of the objects besides those.
+         */
+        private void probeMemoMarksTheFewerSide(TypeSystem types, List<CSObj> objects) {
+            Indexer<CSObj> indexer = solver.getCSManager().getObjectIndexer();
+            PointsToSet all = solver.makePointsToSet();
+            objects.forEach(all::addObject);
+            int length = 0;
+            for (CSObj o : objects) {
+                length = Math.max(length, indexer.getIndex(o) + 1);
+            }
+            int empty = 0;
+            for (int i = 0; i < length; ++i) {
+                if (indexer.getObject(i) == null) {
+                    ++empty;
+                }
+            }
+            for (String name : List.of("java.lang.Object", "A")) {
+                TypeFilter.clearMemos();
+                TypeFilter filter = new TypeFilter(types.getClassType(name), solver);
+                filter.apply(null, all);
+                long bits = memoObjectBits(filter);
+                long limit = name.equals("A") ? empty + 2L * objects.size() / 3 : empty;
+                if (bits > limit) {
+                    FAILURES.add(name + " bit set path: the memo holds " + bits
+                            + " object bits for " + objects.size() + " objects and "
+                            + empty + " empty indexes");
+                }
+            }
+            TypeFilter.clearMemos();
+        }
+
+        /**
+         * Filters a bit set while the index of one object still holds no
+         * object (as an index of a reserved range of the object indexer
+         * before its object is created), then, once the object is there, a
+         * bit set with it: the late object is filtered by its type, for a
+         * guard it passes and one it fails, each marking either side.
+         */
+        private void probeLateObjectInEmptySlot(TypeSystem types, List<CSObj> objects) {
+            Indexer<CSObj> real = solver.getCSManager().getObjectIndexer();
+            List<CSObj> sorted = new ArrayList<>(objects);
+            sorted.sort(java.util.Comparator.comparingInt(real::getIndex));
+            CSObj late = sorted.get(sorted.size() / 2);
+            int lateIndex = real.getIndex(late);
+            boolean[] hidden = {true};
+            Indexer<CSObj> hiding = new Indexer<>() {
+                @Override
+                public int getIndex(CSObj o) {
+                    return real.getIndex(o);
+                }
+
+                @Override
+                public CSObj getObject(int index) {
+                    return hidden[0] && index == lateIndex ? null : real.getObject(index);
+                }
+            };
+            PointsToSetFactory factory = new PointsToSetFactory(hiding);
+            CSManager csManager = (CSManager) Proxy.newProxyInstance(
+                    CSManager.class.getClassLoader(), new Class<?>[]{CSManager.class},
+                    (proxy, method, args) -> method.getName().equals("getObjectIndexer")
+                            ? hiding : invoke(method, solver.getCSManager(), args));
+            Solver hidingSolver = (Solver) Proxy.newProxyInstance(
+                    Solver.class.getClassLoader(), new Class<?>[]{Solver.class},
+                    (proxy, method, args) -> switch (method.getName()) {
+                        case "getCSManager" -> csManager;
+                        case "makePointsToSet" -> factory.make();
+                        default -> invoke(method, solver, args);
+                    });
+            Type lateType = late.getObject().getType();
+            Type failed = null;
+            for (CSObj o : objects) {
+                if (!types.isAssignable(o.getObject().getType(), lateType)) {
+                    failed = o.getObject().getType();
+                    break;
+                }
+            }
+            if (failed == null) {
+                FAILURES.add("late object probe: every object type accepts " + lateType);
+                return;
+            }
+            for (Type guard : List.of(lateType, types.getClassType("java.lang.Object"), failed)) {
+                TypeFilter.clearMemos();
+                hidden[0] = true;
+                PointsToSet without = factory.make();
+                objects.stream().filter(o -> o != late).forEach(without::addObject);
+                new TypeFilter(guard, hidingSolver).apply(null, without);
+                hidden[0] = false;
+                PointsToSet with = factory.make();
+                objects.forEach(with::addObject);
+                PointsToSet got = new TypeFilter(guard, hidingSolver).apply(null, with);
+                boolean want = types.isAssignable(guard, lateType);
+                if (got.contains(late) != want) {
+                    FAILURES.add("late object " + late + " in an index without object "
+                            + "before: filtered by " + guard + " to " + got.contains(late)
+                            + ", expected " + want);
+                }
+            }
+            TypeFilter.clearMemos();
+        }
+
+        /**
+         * @return the number of objects in the bit sets of the memo of the
+         * filter, read by reflection (whatever bit sets the memo has).
+         */
+        private static long memoObjectBits(TypeFilter filter) {
+            try {
+                java.lang.reflect.Field field = TypeFilter.class.getDeclaredField("memo");
+                field.setAccessible(true);
+                Object memo = field.get(filter);
+                if (memo == null) {
+                    return 0;
+                }
+                long bits = 0;
+                for (java.lang.reflect.Field f : memo.getClass().getDeclaredFields()) {
+                    if (GenericBitSet.class.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        Object set = f.get(memo);
+                        bits += set == null ? 0 : ((GenericBitSet<?>) set).size();
+                    }
+                }
+                return bits;
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("cannot read the memo of " + filter, e);
+            }
         }
 
         /**
@@ -379,8 +534,14 @@ class TypeFilterModelTest {
 
                 @Override
                 public CSObj getObject(int index) {
-                    lookups[0]++;
-                    return real.getObject(index);
+                    CSObj o = real.getObject(index);
+                    if (o != null) {
+                        // an index without object holds nothing to check;
+                        // each guard's watermark reads such an index again,
+                        // as no type id is kept for it
+                        lookups[0]++;
+                    }
+                    return o;
                 }
             };
             PointsToSetFactory factory = new PointsToSetFactory(counting);

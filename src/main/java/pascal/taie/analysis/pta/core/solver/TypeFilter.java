@@ -46,7 +46,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 
 /**
@@ -56,20 +55,27 @@ import java.util.function.Supplier;
  * The result is the objects of the input whose type is assignable to the
  * guard type, in a points-to set of the same representation (singleton,
  * small set up to the hybrid threshold, bit set above it) and the same
- * iteration order as inserting them one by one. Per guard type, a memo
- * remembers which objects were already checked (known) and which passed
- * (pass), both bit sets over the solver's object index, so each
- * (guard type, object) pair is tested at most once per solver. The test of
- * an object goes through a second memo per guard type over dense ids of
- * the objects' types (objects of one type share the answer), so the type
- * system is asked at most once per (guard type, object type). An input
- * held in a bit set is filtered word by word: in one pass over its words
- * only the bits of input AND NOT known are checked (and added to the memo)
- * by their object index, whose type id is read from a flat array (the
- * object itself is read only the first time its type id is assigned),
- * and the bits of input AND pass are counted; the result is the input AND
- * pass (the input itself if all pass). A smaller input
- * is filtered object by object through the same memo. The memos of the
+ * iteration order as inserting them one by one. The test of an object goes
+ * through a memo per guard type over dense ids of the objects' types
+ * (objects of one type share the answer), so the type system is asked at
+ * most once per (guard type, object type); the type id of an object is
+ * read from a flat array over the solver's object index, shared by all
+ * guard types (the object itself is read only the first time its type id
+ * is assigned). An input held in a bit set is filtered word by word
+ * through a second memo per guard type, a bit set over the object index
+ * that is complete below a watermark: every object below it is decided,
+ * and the set marks either the passing or the failing ones (whichever are
+ * fewer, so a guard that almost every object passes marks few). The
+ * watermark is raised to the highest object of each such input, deciding
+ * every object up to it, including objects that were never in an input of
+ * the guard (this asks the type system for their types too, which gives
+ * the same answers as long as the type system's assignability test has
+ * no side effect on its answers). An index that held no object when the
+ * watermark passed it (a reserved index range of the object indexer) is
+ * kept as a hole and decided when it first occurs in an input. The bits
+ * of input AND marks are counted, and the result is the input AND the
+ * passing objects (the input itself if all pass). A smaller input is
+ * filtered object by object through the type memo alone. The memos of the
  * last solver are kept until the next solver replaces them or the world is
  * reset (a pointer analysis run as an analysis of the world keeps its
  * result there until then anyway). The
@@ -131,15 +137,17 @@ public class TypeFilter implements Transfer {
         }
 
         /**
-         * @return the type id of the object of the index; the object is read
-         * from the indexer only if its id is not assigned yet.
+         * @return the type id of the object of the index, or -1 if the index
+         * holds no object (yet); the object is read from the indexer only if
+         * its id is not assigned yet.
          */
-        int idOfIndex(int index) {
+        int idOfIndexOrEmpty(int index) {
             int[] table = idPlusOne;
             if (index < table.length && table[index] != 0) {
                 return table[index] - 1;
             }
-            return assign(indexer.getObject(index), index);
+            CSObj o = indexer.getObject(index);
+            return o == null ? -1 : assign(o, index);
         }
 
         Type typeOf(int id) {
@@ -163,26 +171,106 @@ public class TypeFilter implements Transfer {
     }
 
     /**
-     * Memo of one guard type: objects already checked, and those that
-     * passed; and per object type id (see {@link ObjectTypes}) the types
-     * already checked, and those that passed.
+     * Memo of one guard type: per object type id (see {@link ObjectTypes})
+     * the types already checked, and those that passed; and the objects
+     * decided below a watermark, as the marks of one polarity (see the
+     * class comment).
      */
     private static final class Memo {
 
-        final IndexerBitSet<CSObj> known;
-
-        final IndexerBitSet<CSObj> pass;
-
         final ObjectTypes types;
+
+        private final Indexer<CSObj> indexer;
 
         private long[] typeKnown = new long[0];
 
         private long[] typePass = new long[0];
 
+        /**
+         * Every index below it is decided, except the holes.
+         */
+        int watermark;
+
+        /**
+         * True if the marks are the passing objects below the watermark,
+         * false if they are the failing ones.
+         */
+        boolean marksPass = true;
+
+        /**
+         * The marked objects below the watermark; null while there are
+         * none.
+         */
+        @Nullable IndexerBitSet<CSObj> marks;
+
+        /**
+         * The number of marked objects, and of decided objects (the indexes
+         * below the watermark that are not holes).
+         */
+        int marked;
+
+        int decided;
+
+        /**
+         * The indexes below the watermark that held no object when it
+         * passed them, and were not in an input since; null while there are
+         * none.
+         */
+        @Nullable IndexerBitSet<CSObj> holes;
+
         Memo(Indexer<CSObj> indexer, ObjectTypes types) {
-            known = new IndexerBitSet<>(indexer, true);
-            pass = new IndexerBitSet<>(indexer, true);
+            this.indexer = indexer;
             this.types = types;
+        }
+
+        /**
+         * Records the answer of a decided object.
+         */
+        void decide(int index, boolean passes) {
+            if (passes == marksPass) {
+                IndexerBitSet<CSObj> set = marks;
+                if (set == null) {
+                    set = new IndexerBitSet<>(indexer, true);
+                    marks = set;
+                }
+                set.addIndex(index);
+                ++marked;
+            }
+            ++decided;
+        }
+
+        void addHole(int index) {
+            IndexerBitSet<CSObj> set = holes;
+            if (set == null) {
+                set = new IndexerBitSet<>(indexer, true);
+                holes = set;
+            }
+            set.addIndex(index);
+        }
+
+        /**
+         * Switches the polarity if more than two thirds of the decided
+         * objects are marked; afterwards fewer than a third are. The decided
+         * objects must more than double between two switches, so all
+         * switches together cost time linear in the highest watermark.
+         */
+        void balance() {
+            IndexerBitSet<CSObj> old = marks;
+            if (old == null || 3L * marked <= 2L * decided) {
+                return;
+            }
+            IndexerBitSet<CSObj> gaps = holes;
+            IndexerBitSet<CSObj> flipped = new IndexerBitSet<>(indexer, true);
+            int count = 0;
+            for (int i = 0; i < watermark; ++i) {
+                if (!old.containsIndex(i) && (gaps == null || !gaps.containsIndex(i))) {
+                    flipped.addIndex(i);
+                    ++count;
+                }
+            }
+            marks = count == 0 ? null : flipped;
+            marked = count;
+            marksPass = !marksPass;
         }
 
         /**
@@ -229,12 +317,6 @@ public class TypeFilter implements Transfer {
     private final Supplier<PointsToSet> ptsFactory;
 
     private final Indexer<CSObj> indexer;
-
-    /**
-     * {@link #checkIndexWithMemo} as a predicate on object indexes, created
-     * once per filter.
-     */
-    private final IntPredicate checker = this::checkIndexWithMemo;
 
     private @Nullable Memo memo;
 
@@ -360,7 +442,8 @@ public class TypeFilter implements Transfer {
 
     /**
      * Sums the measurement counters of the filters, with the objects their
-     * memos know and those that pass, each shared memo counted once.
+     * memos decided, the objects and holes they hold, and the memos that
+     * mark the failing objects, each shared memo counted once.
      *
      * @return the summary line, or the empty text if the counters are off.
      */
@@ -372,8 +455,10 @@ public class TypeFilter implements Transfer {
         long large = 0;
         long bits = 0;
         long tests = 0;
-        long memoKnown = 0;
-        long memoPass = 0;
+        long memoDecided = 0;
+        long memoMarked = 0;
+        long memoHoles = 0;
+        long failMarking = 0;
         Set<Memo> seen = Collections.newSetFromMap(new IdentityHashMap<>());
         for (TypeFilter f : filters) {
             apps += f.applications;
@@ -382,8 +467,11 @@ public class TypeFilter implements Transfer {
             tests += f.typeTests;
             Memo m = f.memo;
             if (m != null && seen.add(m)) {
-                memoKnown += m.known.size();
-                memoPass += m.pass.size();
+                memoDecided += m.decided;
+                memoMarked += m.marked;
+                IndexerBitSet<CSObj> holes = m.holes;
+                memoHoles += holes == null ? 0 : holes.size();
+                failMarking += m.marksPass ? 0 : 1;
             }
         }
         return "filters=" + filters.size()
@@ -391,8 +479,10 @@ public class TypeFilter implements Transfer {
                 + " large_applications=" + large
                 + " input_bits=" + bits
                 + " type_tests=" + tests
-                + " memo_known_objects=" + memoKnown
-                + " memo_pass_objects=" + memoPass;
+                + " memo_decided_objects=" + memoDecided
+                + " memo_marked_objects=" + memoMarked
+                + " memo_holes=" + memoHoles
+                + " memo_fail_marking=" + failMarking;
     }
 
     /**
@@ -472,17 +562,24 @@ public class TypeFilter implements Transfer {
         if (stats) {
             ++largeApplications;
         }
-        // one pass over the words of the input: only its unchecked objects
-        // are checked (and added to the memo), the passing ones are counted
-        int passing = in.updateMemoAndCountByIndex(m.known, m.pass, checker);
+        // every object of the input is decided, then the marked ones are
+        // counted word by word
+        raiseWatermark(m, in.indexLength());
+        decideFilledHoles(m, in);
+        IndexerBitSet<CSObj> marks = m.marks;
+        int size = in.size();
+        int marked = marks == null ? 0 : in.countIntersection(marks);
+        int passing = m.marksPass ? marked : size - marked;
         if (passing > threshold) {
-            if (passing == in.size()) {
+            if (passing == size) {
                 return input;
             }
-            if (input.canIntersectLarge(m.pass)) {
+            // some objects pass and some fail, so there are marks
+            IndexerBitSet<CSObj> mk = Objects.requireNonNull(marks);
+            if (m.marksPass && input.canIntersectLarge(mk)) {
                 // built from the words of input AND pass, without copying
                 // the input
-                return input.largeIntersection(m.pass);
+                return input.largeIntersection(mk);
             }
             PointsToSet result = input.copy();
             if (!(result instanceof DelegatePointsToSet delegate
@@ -490,33 +587,80 @@ public class TypeFilter implements Transfer {
                     && hybrid.set instanceof GenericBitSet<CSObj> copied)) {
                 return null;
             }
-            copied.retainAll(m.pass);
+            if (m.marksPass) {
+                copied.retainAll(mk);
+            } else {
+                copied.removeAll(mk);
+            }
             return result;
         }
-        // a small result is collected from the words of input AND pass,
-        // without copying the input
+        // a small result is collected in the order of the input, without
+        // copying it
         PointsToSet small = ptsFactory.get();
-        in.forEachIntersection(m.pass, small::addObject);
+        if (passing == 0) {
+            return small;
+        }
+        if (m.marksPass) {
+            in.forEachIntersection(Objects.requireNonNull(marks), small::addObject);
+        } else {
+            for (CSObj o : in) {
+                if (marks == null || !marks.contains(o)) {
+                    small.addObject(o);
+                }
+            }
+        }
         return small;
     }
 
-    private boolean passes(Memo m, CSObj o) {
-        if (m.known.contains(o)) {
-            return m.pass.contains(o);
+    /**
+     * Decides every index from the watermark up to the given length (an
+     * index without an object becomes a hole) and raises the watermark to
+     * it. The watermark passes an index only after it was decided: a
+     * throwing check leaves that index and the later ones undecided.
+     */
+    private void raiseWatermark(Memo m, int length) {
+        if (length <= m.watermark) {
+            return;
         }
-        // checked before it is marked known: a throwing check leaves the
-        // object unknown
-        boolean ok = checkByType(m, m.types.idOf(o));
-        m.known.add(o);
-        if (ok) {
-            m.pass.add(o);
+        ObjectTypes types = m.types;
+        for (int i = m.watermark; i < length; ++i) {
+            int typeId = types.idOfIndexOrEmpty(i);
+            if (typeId < 0) {
+                m.addHole(i);
+            } else {
+                m.decide(i, checkByType(m, typeId));
+            }
+            m.watermark = i + 1;
         }
-        return ok;
+        m.balance();
     }
 
-    private boolean checkIndexWithMemo(int index) {
-        Memo m = Objects.requireNonNull(memo);
-        return checkByType(m, m.types.idOfIndex(index));
+    /**
+     * Decides the holes of the memo that hold an object of the input now
+     * (the objects of an input exist).
+     */
+    private void decideFilledHoles(Memo m, GenericBitSet<CSObj> in) {
+        IndexerBitSet<CSObj> holes = m.holes;
+        // counted by the blocks of the holes (intersects would unpack a
+        // packed input)
+        if (holes == null || holes.countIntersection(in) == 0) {
+            return;
+        }
+        List<CSObj> filled = new ArrayList<>();
+        in.forEachIntersection(holes, filled::add);
+        for (CSObj o : filled) {
+            // decided before the hole is removed: a throwing check leaves
+            // the hole
+            m.decide(indexer.getIndex(o), checkByType(m, m.types.idOf(o)));
+            holes.remove(o);
+        }
+        if (holes.isEmpty()) {
+            m.holes = null;
+        }
+    }
+
+    private boolean passes(Memo m, CSObj o) {
+        return checkByType(m, m.types.idOf(o));
     }
 
     /**

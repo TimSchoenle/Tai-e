@@ -337,6 +337,41 @@ public abstract class GenericBitSet<E> extends AbstractSetEx<E>
         bitSet.forEachAnd(other.bitSet, i -> action.accept(getElement(i)));
     }
 
+    /**
+     * @param other a bit set of the same context
+     * @return the number of elements in both this set and the given set
+     */
+    public int countIntersection(GenericBitSet<E> other) {
+        checkContext(other);
+        return bitSet.andCardinality(other.bitSet);
+    }
+
+    /**
+     * Adds the element of the index (see {@link #getIndex}) without looking
+     * it up.
+     *
+     * @return true if this set changed
+     */
+    public boolean addIndex(int index) {
+        return bitSet.set(index);
+    }
+
+    /**
+     * @return true if this set contains the element of the index (see
+     * {@link #getIndex}); the element is not looked up.
+     */
+    public boolean containsIndex(int index) {
+        return bitSet.get(index);
+    }
+
+    /**
+     * @return the highest index (see {@link #getIndex}) of an element of
+     * this set plus one, or 0 if this set is empty.
+     */
+    public int indexLength() {
+        return bitSet.length();
+    }
+
     @Override
     protected abstract GenericBitSet<E> newSet();
 

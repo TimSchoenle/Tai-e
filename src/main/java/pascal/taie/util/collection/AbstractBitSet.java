@@ -241,6 +241,17 @@ public abstract class AbstractBitSet implements IBitSet {
         }
     }
 
+    @Override
+    public int andCardinality(IBitSet set) {
+        int count = 0;
+        for (int i = nextSetBit(0); i != -1; i = nextSetBit(i + 1)) {
+            if (set.get(i)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     /**
      * Returns a string representation of this bit set. For every index
      * for which this {@code BitSet} contains a bit in the set

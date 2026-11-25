@@ -296,6 +296,15 @@ public interface IBitSet extends Copyable<IBitSet>, Serializable {
     void forEachAnd(IBitSet set, IntConsumer action);
 
     /**
+     * Counts the bits that are set in both this set and the given set.
+     * Neither set is changed.
+     *
+     * @param set a bit set
+     * @return the number of bits set in both sets
+     */
+    int andCardinality(IBitSet set);
+
+    /**
      * Sets all of the bits in this BitSet to {@code false}.
      */
     void clear();

@@ -1005,6 +1005,88 @@ public class SparseBitSet extends AbstractBitSet
         }
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * With a sparse argument this visits only the blocks present in both
+     * sets and counts the words of their intersection with
+     * {@link Long#bitCount}. A packed set is read in place: if this set is
+     * packed, its words are visited; if only the argument is, the blocks of
+     * this set are, so a small set counts its bits in a large packed one
+     * by its own blocks.
+     */
+    @Override
+    public int andCardinality(IBitSet set) {
+        if (!(set instanceof SparseBitSet other)) {
+            return super.andCardinality(set);
+        }
+        if (packed != null) {
+            return andCardinalityPacked(other);
+        }
+        long[][][] selfTable = table;
+        long[][][] otherTable = other.packed != null ? null : other.table;
+        int areas = otherTable == null ? selfTable.length
+                : Math.min(selfTable.length, otherTable.length);
+        int count = 0;
+        for (int w1 = 0; w1 < areas; ++w1) {
+            long[][] area = selfTable[w1];
+            if (area == null) {
+                continue;
+            }
+            long[][] otherArea = otherTable == null ? null : otherTable[w1];
+            if (otherTable != null && otherArea == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < LENGTH2; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                if (otherArea == null) {
+                    // the argument is packed
+                    int firstWord = wordIndex(w1, w2, 0);
+                    for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                        if (block[w3] != 0) {
+                            count += Long.bitCount(block[w3] & other.wordAt(firstWord + w3));
+                        }
+                    }
+                    continue;
+                }
+                long[] otherBlock = otherArea[w2];
+                if (otherBlock == null) {
+                    continue;
+                }
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    count += Long.bitCount(block[w3] & otherBlock[w3]);
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * {@link #andCardinality} of this packed set, read in place: per
+     * non-zero word, the bits it shares with the word of {@code other}
+     * (packed or not).
+     */
+    private int andCardinalityPacked(SparseBitSet other) {
+        long[] words = packed;
+        int blocks = packedBlocks;
+        int count = 0;
+        for (int h = 0; h < blocks; ++h) {
+            long header = words[h];
+            int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+            int mask = packedMask(header);
+            int at = blocks + packedRank(header);
+            for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                if ((mask & (1 << w3)) != 0) {
+                    count += Long.bitCount(words[at++] & other.wordAt(firstWord + w3));
+                }
+            }
+        }
+        return count;
+    }
+
     @Override
     public IBitSet orDiff(IBitSet set) {
         if (this == set) {
