@@ -23,20 +23,27 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import org.junit.jupiter.api.Test;
+import pascal.taie.Main;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.context.TrieContext;
 import pascal.taie.analysis.pta.core.heap.MockObj;
+import pascal.taie.analysis.pta.core.solver.DefaultSolver;
+import pascal.taie.analysis.pta.core.solver.Solver;
+import pascal.taie.analysis.pta.plugin.CompositePlugin;
+import pascal.taie.analysis.pta.plugin.Plugin;
 
+import java.lang.reflect.Field;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The lambda analysis' counters count what they name.
  */
-class LambdaCountersTest {
+public class LambdaCountersTest {
 
     private final TrieContext.Factory<String> contexts = new TrieContext.Factory<>();
 
@@ -80,6 +87,63 @@ class LambdaCountersTest {
         String line = c.line(List.of(1, 1, 3));
         assertTrue(line.startsWith("enter_call=0/0 enter_new_pts=0/0 enter_shared=0/0 "), line);
         assertTrue(line.contains(" edges_built=2 edges_new=1 receiver_vars=3 "), line);
+        assertTrue(line.endsWith(" infos_per_receiver_var={[1,1]=2, [2,3]=1}"), line);
+    }
+
+    /**
+     * A pointer analysis that keeps counters counts in its lambda analysis.
+     */
+    @Test
+    void lambdaAnalysisCountsWhenThePointerAnalysisKeepsCounters() {
+        Probe.counters = null;
+        Main.main("-cp", "src/test/resources/pta/lambda", "-m", "LambdaContexts",
+                "-a", "pta=implicit-entries:false;cs:1-obj;census:true;plugins:["
+                        + Probe.class.getName() + "];");
+        LambdaCounters c = Probe.counters;
+        assertNotNull(c, "the lambda analysis kept no counters");
+        assertTrue(c.enters(LambdaCounters.PATH_CALL) > 0, "no enter counted");
+        assertTrue(c.thisUpdates() > 0, "no this update counted");
+        assertTrue(c.edgesBuilt() > 0 && c.edgesNew() > 0
+                && c.edgesNew() <= c.edgesBuilt(), "edges not counted");
+    }
+
+    /**
+     * Reads at onFinish (after the lambda analysis' own onFinish) the
+     * counters of the solver's lambda analysis.
+     */
+    public static class Probe implements Plugin {
+
+        static LambdaCounters counters;
+
+        private Solver solver;
+
+        @Override
+        public void setSolver(Solver solver) {
+            this.solver = solver;
+        }
+
+        @Override
+        public void onFinish() {
+            Object composite = field(DefaultSolver.class, solver, "plugin");
+            @SuppressWarnings("unchecked")
+            List<Plugin> plugins = (List<Plugin>) field(CompositePlugin.class, composite,
+                    "allPlugins");
+            for (Plugin p : plugins) {
+                if (p instanceof LambdaAnalysis lambda) {
+                    counters = (LambdaCounters) field(LambdaAnalysis.class, lambda, "counters");
+                }
+            }
+        }
+
+        private static Object field(Class<?> owner, Object target, String name) {
+            try {
+                Field field = owner.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (ReflectiveOperationException e) {
+                throw new AssertionError(e);
+            }
+        }
     }
 
     @Test

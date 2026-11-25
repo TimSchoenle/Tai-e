@@ -69,6 +69,15 @@ public interface Plugin {
     }
 
     /**
+     * Invoked at a census during the solve (option {@code census-interval}
+     * or the census trigger file), between two polls of the work list: a
+     * plugin may log its own measurements here. It must only read: no new
+     * work, no change of any state the solve reads.
+     */
+    default void onCensus() {
+    }
+
+    /**
      * Invoked with the pta option {@code release-solver-state} after the
      * fixed point, once the solver has released its own solve-only state,
      * right before {@link #onFinish()}: a plugin may drop here the state

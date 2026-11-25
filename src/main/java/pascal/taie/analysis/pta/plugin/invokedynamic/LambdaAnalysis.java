@@ -227,6 +227,12 @@ public class LambdaAnalysis implements Plugin {
     private LambdaCounters counters;
 
     /**
+     * Whether {@link #counters} were logged (they are kept for a reader
+     * after the finish).
+     */
+    private boolean countersLogged;
+
+    /**
      * @return whether {@code obj} is a lambda functional object that this
      * analysis creates at a lambda meta factory call.
      */
@@ -252,6 +258,7 @@ public class LambdaAnalysis implements Plugin {
         }
         counters = DefaultSolver.countersEnabled(solver.getOptions())
                 ? new LambdaCounters() : null;
+        countersLogged = false;
     }
 
     /**
@@ -828,12 +835,33 @@ public class LambdaAnalysis implements Plugin {
      */
     private void logCounters() {
         LambdaCounters c = counters;
-        if (c != null) {
-            List<Integer> infoCounts = new ArrayList<>();
-            invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
-            logger.info("Lambda counters: {}", c.line(infoCounts));
-            counters = null;
+        if (c != null && !countersLogged) {
+            logger.info("Lambda counters: {}", countersLine(c));
+            // keep only the counts: drop the last event's callees
+            c.startEvent();
+            countersLogged = true;
         }
+    }
+
+    /**
+     * Logs the counters so far at a census during the solve; reads only.
+     */
+    @Override
+    public void onCensus() {
+        LambdaCounters c = counters;
+        if (c != null && !countersLogged) {
+            logger.info("Lambda counters at the census: {}", countersLine(c));
+        }
+    }
+
+    /**
+     * @return the line of {@code c} with the receiver variables that
+     * {@link #invoInfos} holds now.
+     */
+    private String countersLine(LambdaCounters c) {
+        List<Integer> infoCounts = new ArrayList<>();
+        invoInfos.forEachSet((var, infos) -> infoCounts.add(infos.size()));
+        return c.line(infoCounts);
     }
 
     /**

@@ -259,6 +259,12 @@ public class DefaultSolver implements Solver {
      */
     private long liveCensuses;
 
+    /**
+     * The time the censuses during the last solve took, reported apart
+     * from the solve (a time limit still counts it).
+     */
+    private long liveCensusNanos;
+
     private @Nullable SolverCensus lastLiveCensus;
 
     private @Nullable HeapOwnerCensus lastLiveOwners;
@@ -506,6 +512,7 @@ public class DefaultSolver implements Solver {
         lastProgressNanos = solveStartNanos;
         liveCensusClock = LiveCensusClock.of(options.getInt("census-interval"), solveStartNanos);
         liveCensuses = 0;
+        liveCensusNanos = 0;
         lastLiveCensus = null;
         lastLiveOwners = null;
         if (timeLimit != UNLIMITED) {
@@ -601,6 +608,11 @@ public class DefaultSolver implements Solver {
         }
         stoppedByTimeLimit = !workList.isEmpty() && isTimeout;
         logger.info("Work list: {}", workListCountersLine());
+        if (liveCensuses > 0) {
+            logger.info("Censuses during the solve: {}, took {} ms in total"
+                            + " (included in the solve time and a time limit)",
+                    liveCensuses, liveCensusNanos / NANOS_PER_MS);
+        }
         if (stoppedByTimeLimit) {
             logger.warn("Pointer analysis stops early as it reaches time limit ({} seconds)," +
                     " and the result may be unsound!", timeLimit);
@@ -652,8 +664,10 @@ public class DefaultSolver implements Solver {
             }
             logger.info("Solver counters: {}", countersLine());
         }
+        plugin.onCensus();
         ++liveCensuses;
         long end = System.nanoTime();
+        liveCensusNanos += end - start;
         liveCensusClock.taken(end);
         logger.info("Census during the solve took {} ms", (end - start) / NANOS_PER_MS);
     }

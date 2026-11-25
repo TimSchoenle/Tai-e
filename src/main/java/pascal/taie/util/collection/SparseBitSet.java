@@ -1552,18 +1552,7 @@ public class SparseBitSet extends AbstractBitSet
             }
             return result;
         }
-        int length = 0;
-        for (long[][] area : table) {
-            if (area != null) {
-                for (long[] block : area) {
-                    int words = block == null ? 0 : nonZeroWords(block);
-                    if (words != 0) {
-                        length += 1 + words;
-                    }
-                }
-            }
-        }
-        long[] packed = new long[length];
+        long[] packed = new long[packedLength()];
         int at = 0;
         for (int w1 = 0; w1 < table.length; ++w1) {
             long[][] area = table[w1];
@@ -1590,6 +1579,29 @@ public class SparseBitSet extends AbstractBitSet
             }
         }
         return packed;
+    }
+
+    /**
+     * @return the length of {@link #toPacked()} for this set, computed
+     * without copying or allocating
+     */
+    public int packedLength() {
+        long[] packedWords = packed;
+        if (packedWords != null) {
+            return packedWords.length;
+        }
+        int length = 0;
+        for (long[][] area : table) {
+            if (area != null) {
+                for (long[] block : area) {
+                    int words = block == null ? 0 : nonZeroWords(block);
+                    if (words != 0) {
+                        length += 1 + words;
+                    }
+                }
+            }
+        }
+        return length;
     }
 
     /**
