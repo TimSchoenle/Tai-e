@@ -922,20 +922,48 @@ public class DefaultSolver implements Solver {
     private void processArrayStore(CSVar arrayVar, PointsToSet pts) {
         Context context = arrayVar.getContext();
         Var var = arrayVar.getVar();
-        for (StoreArray store : var.getStoreArrays()) {
-            Var rvalue = store.getRValue();
-            if (propTypes.isAllowed(rvalue)) {
-                CSVar from = csManager.getCSVar(context, rvalue);
-                pts.forEach(array -> {
-                    if (array.getObject().isFunctional()) {
-                        ArrayIndex arrayIndex = csManager.getArrayIndex(array);
-                        // we need type guard for array stores as Java arrays
-                        // are covariant
-                        addPFGEdge(new PointerFlowEdge(
-                                FlowKind.ARRAY_STORE, from, arrayIndex),
-                                arrayIndex.getType());
+        // consecutive stores of one variable share its lookup
+        @Nullable CSVar lastFrom = null;
+        try {
+            for (StoreArray store : var.getStoreArrays()) {
+                Var rvalue = store.getRValue();
+                if (propTypes.isAllowed(rvalue)) {
+                    if (lastFrom == null || lastFrom.getVar() != rvalue) {
+                        lastFrom = csManager.getCSVar(context, rvalue);
                     }
-                });
+                    CSVar from = lastFrom;
+                    pts.forEach(array -> {
+                        if (array.getObject().isFunctional()) {
+                            addArrayStoreEdge(from, csManager.getArrayIndex(array));
+                        }
+                    });
+                }
+            }
+        } finally {
+            deltaTransfers.clear();
+        }
+    }
+
+    /**
+     * {@link #addPFGEdge(PointerFlowEdge, Type)} for an array store edge,
+     * guarded by the element type of the array as Java arrays are
+     * covariant. The type filter's result on the points-to set of the
+     * source is shared through {@link #deltaTransfers} by the new edges of
+     * one {@link #processArrayStore} call that carry the same filter: that
+     * set does not change during the call (new objects only enter the work
+     * list), and the work list only reads the result (it copies it into a
+     * new entry or adds it to a pending one).
+     */
+    private void addArrayStoreEdge(CSVar from, ArrayIndex arrayIndex) {
+        checkAcceptsWork();
+        TypeFilter filter = typeFilterOf(arrayIndex.getType());
+        PointerFlowEdge edge = pointerFlowGraph.addEdge(
+                new PointerFlowEdge(FlowKind.ARRAY_STORE, from, arrayIndex), filter);
+        if (edge != null) {
+            PointsToSet targetSet = deltaTransfers.apply(
+                    edge, filter, getPointsToSetOf(from));
+            if (!targetSet.isEmpty()) {
+                addPointsTo(edge.target(), targetSet);
             }
         }
     }
@@ -1383,6 +1411,13 @@ public class DefaultSolver implements Solver {
     @Override
     public void addPFGEdge(PointerFlowEdge edge, Type type) {
         checkAcceptsWork();
+        addPFGEdge(edge, typeFilterOf(type));
+    }
+
+    /**
+     * @return the type filter of the guard type, created on first use
+     */
+    private TypeFilter typeFilterOf(Type type) {
         TypeFilter filter = typeFilters.get(type);
         if (filter == null) {
             filter = new TypeFilter(type, this);
@@ -1391,7 +1426,7 @@ public class DefaultSolver implements Solver {
             }
             typeFilters.put(type, filter);
         }
-        addPFGEdge(edge, filter);
+        return filter;
     }
 
     @Override
