@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import pascal.taie.Main;
 import pascal.taie.World;
 import pascal.taie.analysis.graph.callgraph.Edge;
@@ -78,7 +79,7 @@ public class LambdaHeapContextTest {
         for (String main : List.of("Args", "LambdaConstructor", "LambdaInstanceMethod",
                 "LambdaStaticMethod", "ImpreciseLambdas", "DispatchBugDueToLackOfSubclassCheck",
                 "NativeModelWithLambda", "LambdaContexts", "LambdaSelfReceiver",
-                "LambdaSharedReceiver", "LambdaSharedTargets", "Streams")) {
+                "LambdaSharedReceiver", "LambdaSharedTargets", "Streams", "LambdaMix")) {
             for (String cs : List.of("cs:1-obj", "cs:1-call", "cs:1-type")) {
                 programs.add(Arguments.of("lambda", main, cs));
             }
@@ -146,6 +147,21 @@ public class LambdaHeapContextTest {
     void captureFreeLambdaObjectsShareTheEmptyHeapContext() {
         assertEquals(12, analyse("lambda", "LambdaContexts", "cs:1-obj", "method").lambdaObjs());
         assertEquals(6, analyse("lambda", "LambdaContexts", "cs:1-obj", "captured").lambdaObjs());
+    }
+
+    /**
+     * {@code LambdaMix} (compared above) creates capture-free lambdas under
+     * several contexts of the creating method, so the comparison there runs
+     * on fewer lambda CS objects with {@code captured}. Not under
+     * {@code cs:1-type}: both receivers are allocated in the same class, so
+     * the creating method has one context.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"cs:1-obj", "cs:1-call"})
+    void capturedSharesLambdaObjectsOfLambdaMix(String cs) {
+        long method = analyse("lambda", "LambdaMix", cs, "method").lambdaObjs();
+        long captured = analyse("lambda", "LambdaMix", cs, "captured").lambdaObjs();
+        assertTrue(captured < method, "lambda CS objects " + captured + " of " + method);
     }
 
     /**
