@@ -141,22 +141,56 @@ final class ReceiverGroups<K, V> {
      * it returns a state, {@code visitor.accept} for each object of the key
      * in first-seen order.
      */
-    @SuppressWarnings("unchecked")
     <S> void forEachGroup(Visitor<? super K, ? super V, S> visitor) {
         for (int i = 0; i < size; ++i) {
-            S state = visitor.enter((K) keys[i]);
-            if (state == null) {
-                continue;
-            }
-            Object group = groups[i];
-            if (group instanceof Group list) {
-                for (int j = 0; j < list.size; ++j) {
-                    visitor.accept(state, (V) list.elements[j]);
-                }
-            } else {
-                visitor.accept(state, (V) group);
-            }
+            visitGroup(i, visitor);
         }
+    }
+
+    /**
+     * {@link #forEachGroup} restricted to the first {@code count} slots of
+     * {@code slots} (key positions, ascending): visits those keys in that
+     * order, which is their first-seen order. A visitor whose
+     * {@link Visitor#enter} returns null for every key left out sees the
+     * same calls of {@link Visitor#accept} as with {@link #forEachGroup}.
+     */
+    <S> void forEachGroup(int[] slots, int count, Visitor<? super K, ? super V, S> visitor) {
+        for (int i = 0; i < count; ++i) {
+            visitGroup(Objects.checkIndex(slots[i], size), visitor);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private <S> void visitGroup(int slot, Visitor<? super K, ? super V, S> visitor) {
+        S state = visitor.enter((K) keys[slot]);
+        if (state == null) {
+            return;
+        }
+        Object group = groups[slot];
+        if (group instanceof Group list) {
+            for (int j = 0; j < list.size; ++j) {
+                visitor.accept(state, (V) list.elements[j]);
+            }
+        } else {
+            visitor.accept(state, (V) group);
+        }
+    }
+
+    /**
+     * @return the key at position {@code slot} (below {@link #keyCount}).
+     */
+    @SuppressWarnings("unchecked")
+    K keyAt(int slot) {
+        Objects.checkIndex(slot, size);
+        return (K) keys[slot];
+    }
+
+    /**
+     * @return the position of {@code key} in first-seen order, or -1 if it
+     * is absent.
+     */
+    int slotOf(K key) {
+        return indexOf(key);
     }
 
     /**
