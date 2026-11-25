@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.cs.element;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.CallGraphs;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
@@ -80,8 +81,9 @@ public class CSCallSite extends AbstractCSElement {
     /**
      * @return a live, unmodifiable view of the call edges from this call
      * site. A plain edge (of class {@link Edge}, of this call site's own
-     * kind) is held without its object and rebuilt on each read, so the
-     * view returns equal, but not the same, edge objects across reads.
+     * kind) and a {@link SourcedEdge} are held without their objects and
+     * rebuilt on each read, so the view returns equal, but not the same,
+     * edge objects across reads.
      */
     public Set<Edge<CSCallSite, CSMethod>> getEdges() {
         return Collections.unmodifiableSet(edges);
@@ -93,6 +95,16 @@ public class CSCallSite extends AbstractCSElement {
      */
     boolean isPlainEdge(Edge<CSCallSite, CSMethod> edge) {
         return edges.isPlain(edge);
+    }
+
+    /**
+     * @return the source of {@code edge} if it is a sourced edge of this
+     * call site, which {@link CSMethod} holds as the call site and the
+     * source; otherwise null.
+     */
+    @Nullable
+    EdgeSource sourceOf(Edge<CSCallSite, CSMethod> edge) {
+        return edges.sourceOf(edge);
     }
 
     /**

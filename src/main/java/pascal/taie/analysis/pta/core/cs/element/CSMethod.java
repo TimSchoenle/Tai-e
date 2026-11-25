@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.cs.element;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.plugin.exception.CSMethodThrowResult;
@@ -31,6 +32,7 @@ import pascal.taie.util.ResultHolder;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
@@ -49,9 +51,18 @@ public class CSMethod extends AbstractCSElement {
     /**
      * Call edges to this CS method, in the order they were added: a plain
      * edge (see {@link CSCallSite#isPlainEdge}) as its {@link CSCallSite},
-     * any other edge as the {@link Edge} object.
+     * a sourced edge (see {@link CSCallSite#sourceOf}) as its
+     * {@link CSCallSite} with its source at the same index of
+     * {@link #sources}, any other edge as the {@link Edge} object.
      */
     private final ArrayList<Object> edges = new ArrayList<>(4);
+
+    /**
+     * The sources of the sourced edges, at their indices in {@link #edges};
+     * null at the other indices, and may be shorter than {@link #edges}.
+     * Null while no sourced edge was added.
+     */
+    private EdgeSource @Nullable [] sources;
 
     private final ResultHolder resultHolder = new AbstractResultHolder() {};
 
@@ -76,14 +87,45 @@ public class CSMethod extends AbstractCSElement {
     public void addEdge(Edge<CSCallSite, CSMethod> edge) {
         // The caller has ensured that each edge added to CSMethod is unique
         CSCallSite callSite = edge.getCallSite();
-        edges.add(edge.getCallee() == this && callSite.isPlainEdge(edge)
-                ? callSite : edge);
+        EdgeSource source = edge.getCallee() == this ? callSite.sourceOf(edge) : null;
+        if (source != null) {
+            edges.add(callSite);
+            setSource(edges.size() - 1, source);
+        } else {
+            edges.add(edge.getCallee() == this && callSite.isPlainEdge(edge)
+                    ? callSite : edge);
+        }
+    }
+
+    /**
+     * Records {@code source} as the source of the edge at {@code index} of
+     * {@link #edges}, growing {@link #sources} as {@link ArrayList} grows.
+     */
+    private void setSource(int index, EdgeSource source) {
+        if (sources == null) {
+            sources = new EdgeSource[index + 1];
+        } else if (index >= sources.length) {
+            int length = sources.length;
+            sources = Arrays.copyOf(sources, Math.max(index + 1, length + (length >> 1)));
+        }
+        sources[index] = source;
+    }
+
+    /**
+     * @return the source of the edge at {@code index} of {@link #edges}, or
+     * null if it is not a sourced edge.
+     */
+    @Nullable
+    private EdgeSource sourceAt(int index) {
+        EdgeSource[] s = sources;
+        return s != null && index < s.length ? s[index] : null;
     }
 
     /**
      * @return an unmodifiable view of the call edges to this CS method, in
      * the order they were added; the view holds no duplicate edges and
-     * shows the edges added later. A plain edge is rebuilt on each read, so
+     * shows the edges added later. A plain or sourced edge is rebuilt on
+     * each read, so
      * the view returns equal, but not the same, edge objects across reads.
      */
     public List<Edge<CSCallSite, CSMethod>> getEdges() {
@@ -104,14 +146,19 @@ public class CSMethod extends AbstractCSElement {
      *                                   {@link #getEdgeCount()}
      */
     public Edge<CSCallSite, CSMethod> getEdge(int i) {
-        return expand(edges.get(i));
+        return expand(edges.get(i), i);
     }
 
     /**
-     * @return the edge that the element {@code e} of {@link #edges} holds.
+     * @return the edge that the element {@code e} at {@code index} of
+     * {@link #edges} holds.
      */
     @SuppressWarnings("unchecked")
-    private Edge<CSCallSite, CSMethod> expand(Object e) {
+    private Edge<CSCallSite, CSMethod> expand(Object e, int index) {
+        EdgeSource source = sourceAt(index);
+        if (source != null) {
+            return source.edge((CSCallSite) e, this);
+        }
         return e instanceof CSCallSite callSite
                 ? callSite.plainEdgeTo(this)
                 : (Edge<CSCallSite, CSMethod>) e;
@@ -139,6 +186,9 @@ public class CSMethod extends AbstractCSElement {
         public Iterator<Edge<CSCallSite, CSMethod>> iterator() {
             Iterator<Object> it = edges.iterator();
             return new Iterator<>() {
+
+                private int index;
+
                 @Override
                 public boolean hasNext() {
                     return it.hasNext();
@@ -146,49 +196,61 @@ public class CSMethod extends AbstractCSElement {
 
                 @Override
                 public Edge<CSCallSite, CSMethod> next() {
-                    return expand(it.next());
+                    Object e = it.next();
+                    return expand(e, index++);
                 }
             };
         }
 
         @Override
         public void forEach(Consumer<? super Edge<CSCallSite, CSMethod>> action) {
-            edges.forEach(e -> action.accept(expand(e)));
+            int[] index = {0};
+            edges.forEach(e -> action.accept(expand(e, index[0]++)));
         }
 
         @Override
         public Spliterator<Edge<CSCallSite, CSMethod>> spliterator() {
-            return new ExpandingSpliterator(edges.spliterator());
+            return new ExpandingSpliterator(edges.spliterator(), 0);
         }
     }
 
     /**
      * Spliterator over {@link #edges} as edges; late-binding and fail-fast
-     * as the list's own.
+     * as the list's own. It tracks the index of its next element, which
+     * locates the element's source: the list's spliterator is sized and
+     * splits off a prefix of exactly its estimated size.
      */
     private final class ExpandingSpliterator
             implements Spliterator<Edge<CSCallSite, CSMethod>> {
 
         private final Spliterator<Object> source;
 
-        private ExpandingSpliterator(Spliterator<Object> source) {
+        private int index;
+
+        private ExpandingSpliterator(Spliterator<Object> source, int index) {
             this.source = source;
+            this.index = index;
         }
 
         @Override
         public boolean tryAdvance(Consumer<? super Edge<CSCallSite, CSMethod>> action) {
-            return source.tryAdvance(e -> action.accept(expand(e)));
+            return source.tryAdvance(e -> action.accept(expand(e, index++)));
         }
 
         @Override
         public void forEachRemaining(Consumer<? super Edge<CSCallSite, CSMethod>> action) {
-            source.forEachRemaining(e -> action.accept(expand(e)));
+            source.forEachRemaining(e -> action.accept(expand(e, index++)));
         }
 
         @Override
         public Spliterator<Edge<CSCallSite, CSMethod>> trySplit() {
             Spliterator<Object> prefix = source.trySplit();
-            return prefix == null ? null : new ExpandingSpliterator(prefix);
+            if (prefix == null) {
+                return null;
+            }
+            ExpandingSpliterator split = new ExpandingSpliterator(prefix, index);
+            index += (int) prefix.estimateSize();
+            return split;
         }
 
         @Override

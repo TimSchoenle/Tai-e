@@ -128,6 +128,19 @@ public class LambdaAnalysis implements Plugin {
     private final Map<CSVar, ReceiverGroups<Type, CSObj>> recvByType = Maps.newMap();
 
     /**
+     * The interned sources of the lambda call edges of each invokedynamic
+     * without captured variables, whose edges read no context of the lambda
+     * object ({@link #lambdaSource}).
+     */
+    private final Map<InvokeDynamic, LambdaSource> nonCapturingSources = Maps.newMap();
+
+    /**
+     * The interned sources of the lambda call edges of each lambda object
+     * whose invokedynamic captures variables ({@link #lambdaSource}).
+     */
+    private final Map<CSObj, LambdaSource> capturingSources = Maps.newMap();
+
+    /**
      * System property that turns on {@link GroupingVerifier}.
      */
     private static final String VERIFY_PROPERTY = "spd.lambda.verify";
@@ -213,7 +226,7 @@ public class LambdaAnalysis implements Plugin {
             // TODO: use more information to filter out mismatches?
             return;
         }
-        Context indyCtx = capturedArgsContext(indy, recv.getContext());
+        LambdaSource source = lambdaSource(recv, indy);
         CSCallSite csCallSite = csManager.getCSCallSite(context, invoke);
         MethodHandle mh = getMethodHandle(indy);
         final MethodRef targetRef = mh.getMethodRef();
@@ -235,7 +248,7 @@ public class LambdaAnalysis implements Plugin {
                     solver.addVarPointsTo(context, result, csNewObj);
                 }
                 // add call edge to constructor
-                addLambdaCallEdge(csCallSite, csNewObj, targetRef, indy, indyCtx);
+                addLambdaCallEdge(csCallSite, csNewObj, targetRef, source);
             }
             case REF_invokeInterface, REF_invokeVirtual, REF_invokeSpecial -> {
                 // targetRef is instance method
@@ -248,7 +261,7 @@ public class LambdaAnalysis implements Plugin {
                     // if captured arguments are not empty, then the first one
                     // must be the receiver object for targetRef
                     recvVar = capturedArgs.get(0);
-                    recvCtx = indyCtx;
+                    recvCtx = source.getContext();
                 } else {
                     // otherwise, the first actual argument is the receiver
                     recvVar = actualArgs.get(0);
@@ -261,7 +274,7 @@ public class LambdaAnalysis implements Plugin {
                 if (verifier != null) {
                     verifier.setPartial(csRecvVar == baseVarOf(context, invoke));
                 }
-                InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, indy, indyCtx,
+                InstanceInvoInfo info = new InstanceInvoInfo(csCallSite, source,
                         targetRef, argsToStatic(csCallSite, indy),
                         argsToInstance(csCallSite, indy));
                 addLambdaCallEdges(info, recvObjs, recvObjsByType);
@@ -270,7 +283,7 @@ public class LambdaAnalysis implements Plugin {
                 invoInfos.put(csRecvVar, info);
             }
             case REF_invokeStatic -> // targetRef is static method
-                    addLambdaCallEdge(csCallSite, null, targetRef, indy, indyCtx);
+                    addLambdaCallEdge(csCallSite, null, targetRef, source);
             default -> throw new AnalysisException(mh.getKind() + " is not supported");
         }
     }
@@ -287,6 +300,23 @@ public class LambdaAnalysis implements Plugin {
      */
     private Context capturedArgsContext(InvokeDynamic indy, Context lambdaObjCtx) {
         return indy.getArgs().isEmpty() ? selector.getEmptyContext() : lambdaObjCtx;
+    }
+
+    /**
+     * @return the interned source of the lambda call edges on
+     * {@code lambdaObj}, created by {@code indy}: its invokedynamic and
+     * {@link #capturedArgsContext}. Equal sources are the same object, one
+     * per invokedynamic without captured variables and one per lambda
+     * object otherwise (an invokedynamic creates one lambda object per
+     * heap context), so the call edges share them.
+     */
+    private LambdaSource lambdaSource(CSObj lambdaObj, InvokeDynamic indy) {
+        if (indy.getArgs().isEmpty()) {
+            return nonCapturingSources.computeIfAbsent(indy, i -> new LambdaSource(
+                    i, capturedArgsContext(i, lambdaObj.getContext())));
+        }
+        return capturingSources.computeIfAbsent(lambdaObj, o -> new LambdaSource(
+                indy, capturedArgsContext(indy, o.getContext())));
     }
 
     /**
@@ -356,7 +386,7 @@ public class LambdaAnalysis implements Plugin {
 
     private void addLambdaCallEdge(
             CSCallSite csCallSite, @Nullable CSObj recvObj, MethodRef targetRef,
-            InvokeDynamic indy, Context indyCtx) {
+            LambdaSource source) {
         JMethod callee;
         Context calleeCtx;
         if (recvObj != null) {
@@ -377,13 +407,13 @@ public class LambdaAnalysis implements Plugin {
             }
             calleeCtx = selector.selectContext(csCallSite, callee);
         }
-        if (!fitsParameterCount(csCallSite, indy, callee)) {
+        if (!fitsParameterCount(csCallSite, source.getIndy(), callee)) {
             // A lambda object can reach a call site that only shares its method
             // name; such a pairing cannot be called, so drop the edge.
             return;
         }
         LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite,
-                csManager.getCSMethod(calleeCtx, callee), indy, indyCtx);
+                csManager.getCSMethod(calleeCtx, callee), source);
         solver.addCallEdge(callEdge);
     }
 
@@ -481,7 +511,7 @@ public class LambdaAnalysis implements Plugin {
             if (fitsParameterCount(callee, info.getArgsToStatic(),
                     info.getArgsToInstance())) {
                 solver.addCallEdge(new LambdaCallEdge(
-                        csCallSite, csCallee, indy, info.getLambdaContext()));
+                        csCallSite, csCallee, info.getLambdaSource()));
             }
         });
     }
@@ -495,7 +525,8 @@ public class LambdaAnalysis implements Plugin {
 
     /**
      * Drops the caches that only serve the solve ({@link #lambdaObjs},
-     * {@link #invoInfos}, {@link #recvByType}): after the release the solver
+     * {@link #invoInfos}, {@link #recvByType} and the interning maps of the
+     * edge sources; the edges keep their sources): after the release the solver
      * refuses new methods, points-to sets and call edges, so none of them is
      * read again. The verify mode's finish check, which reads the solver
      * state and the size of {@link #recvByType}, runs first.
@@ -506,6 +537,8 @@ public class LambdaAnalysis implements Plugin {
         lambdaObjs.clear();
         invoInfos.clear();
         recvByType.clear();
+        nonCapturingSources.clear();
+        capturingSources.clear();
     }
 
     @Override
