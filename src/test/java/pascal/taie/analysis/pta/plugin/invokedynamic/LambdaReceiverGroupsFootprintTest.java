@@ -25,6 +25,9 @@ package pascal.taie.analysis.pta.plugin.invokedynamic;
 import org.junit.jupiter.api.Test;
 
 import java.lang.ref.Reference;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -58,14 +61,85 @@ class LambdaReceiverGroupsFootprintTest {
         assertTrue(perKey < 120, "bytes per key: " + perKey);
     }
 
+    /**
+     * A group of two objects is held in an exactly sized array without a
+     * list object around it: a 32-byte grouping, two arrays of 32 bytes for
+     * the three keys and a 24-byte array per group, 56 bytes per key (80
+     * with a 24-byte list object per group).
+     */
+    @Test
+    void threeTwoObjectKeysTakeUnder66BytesPerKey() {
+        double perKey = bytesPerKey(3, 2);
+        System.out.println("[spd] receiver groups bytes per key (3 keys of 2 objects): " + perKey);
+        assertTrue(perKey < 66, "bytes per key: " + perKey);
+    }
+
+    /**
+     * A packed grouping of the same objects holds them in one array: a
+     * 32-byte grouping, a 32-byte key array, a 40-byte array of the six
+     * objects and a 32-byte array of group ends, 45 bytes per key.
+     */
+    @Test
+    void packedThreeTwoObjectKeysTakeUnder52BytesPerKey() {
+        double perKey = groupedBytesPerKey(2);
+        System.out.println("[spd] packed receiver groups bytes per key (3 keys of 2 objects): "
+                + perKey);
+        assertTrue(perKey < 52, "bytes per key: " + perKey);
+    }
+
+    /**
+     * Single-object keys are grouped open, as by adding them: 32 bytes per
+     * key (packed, a 32-byte object array and a 32-byte array of group ends
+     * would make it 43).
+     */
+    @Test
+    void groupedThreeSingleObjectKeysTakeUnder38BytesPerKey() {
+        double perKey = groupedBytesPerKey(1);
+        System.out.println("[spd] grouped receiver groups bytes per key (3 keys): " + perKey);
+        assertTrue(perKey < 38, "bytes per key: " + perKey);
+    }
+
+    /**
+     * Groups {@code objsPerKey} rounds of one object per key with
+     * {@link ReceiverGroups#group}.
+     */
+    private static double groupedBytesPerKey(int objsPerKey) {
+        Object[] objs = new Object[KEYS.length * objsPerKey];
+        Map<Object, String> keyOf = new IdentityHashMap<>();
+        for (int i = 0; i < objs.length; ++i) {
+            objs[i] = new Object();
+            keyOf.put(objs[i], KEYS[i % KEYS.length]);
+        }
+        List<Object> objList = List.of(objs);
+        long before = usedAfterGc();
+        Object[] held = new Object[GROUPINGS];
+        long array = usedAfterGc() - before;
+        for (int i = 0; i < GROUPINGS; ++i) {
+            held[i] = ReceiverGroups.group(objList, keyOf::get);
+        }
+        long used = usedAfterGc() - before - array;
+        Reference.reachabilityFence(held);
+        return (double) used / ((long) GROUPINGS * KEYS.length);
+    }
+
     private static double bytesPerKey(int keyCount) {
+        return bytesPerKey(keyCount, 1);
+    }
+
+    /**
+     * Adds {@code objsPerKey} rounds of one object per key, as a receiver
+     * variable's points-to set of interleaved types does.
+     */
+    private static double bytesPerKey(int keyCount, int objsPerKey) {
         long before = usedAfterGc();
         Object[] held = new Object[GROUPINGS];
         long array = usedAfterGc() - before;
         for (int i = 0; i < GROUPINGS; ++i) {
             ReceiverGroups<String, Object> g = new ReceiverGroups<>();
-            for (int k = 0; k < keyCount; ++k) {
-                g.add(KEYS[k], OBJ);
+            for (int round = 0; round < objsPerKey; ++round) {
+                for (int k = 0; k < keyCount; ++k) {
+                    g.add(KEYS[k], OBJ);
+                }
             }
             held[i] = g;
         }
