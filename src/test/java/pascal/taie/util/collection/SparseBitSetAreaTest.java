@@ -142,6 +142,37 @@ class SparseBitSetAreaTest {
     }
 
     /**
+     * {@link SparseBitSet#andCardinality} counts the common bits of a set
+     * with short areas and one with long areas, in both orders, unpacked
+     * and with either side packed, as {@link java.util.BitSet} does.
+     */
+    @Test
+    void andCardinalityWalksAreasOfDifferentLengths() {
+        Random random = new Random(0x7fa6L);
+        for (int trial = 0; trial < 200; ++trial) {
+            BitSet low = randomBits(random, 3);
+            BitSet high = randomBits(random, SparseBitSet.BLOCKS_PER_AREA);
+            if (random.nextBoolean()) {
+                // so that the sets share bits
+                high.or(low);
+            }
+            BitSet common = (BitSet) low.clone();
+            common.and(high);
+            int expected = common.cardinality();
+            String at = "trial " + trial;
+            assertEquals(expected, model(low).andCardinality(model(high)), at + " short, long");
+            assertEquals(expected, model(high).andCardinality(model(low)), at + " long, short");
+            SparseBitSet packedHigh = model(high);
+            packedHigh.pack();
+            assertEquals(expected, model(low).andCardinality(packedHigh), at + " short, packed long");
+            SparseBitSet packedLow = model(low);
+            packedLow.pack();
+            assertEquals(expected, model(high).andCardinality(packedLow), at + " long, packed short");
+            assertEquals(expected, packedLow.andCardinality(model(high)), at + " packed short, long");
+        }
+    }
+
+    /**
      * Random operation sequences over ranges that put blocks at the low and
      * the high end of areas: after every step the set holds the bits of the
      * model, in its order, answers single-bit and neighbour queries as the

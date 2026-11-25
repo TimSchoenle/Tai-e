@@ -237,6 +237,40 @@ class SparseBitSetPackedTest {
     }
 
     /**
+     * {@link IBitSet#andCardinality} of packed and unpacked sparse sets, and
+     * with a regular set as either operand, is the number of bits their
+     * intersection visits, and the packed sets stay packed.
+     */
+    @Test
+    void andCardinalityCountsTheIntersection() {
+        Random random = new Random(0x7e20L);
+        for (int sequence = 0; sequence < SEQUENCES; sequence++) {
+            int range = RANGES[sequence % RANGES.length];
+            long seed = random.nextLong();
+            SparseBitSet model = randomSet(new Random(seed), range);
+            SparseBitSet packed = randomSet(new Random(seed), range);
+            packed.pack();
+            SparseBitSet other = randomSet(random, range);
+            SparseBitSet packedOther = (SparseBitSet) other.copy();
+            packedOther.pack();
+            RegularBitSet regular = new RegularBitSet();
+            bits(other).forEach(regular::set);
+            List<Integer> want = new ArrayList<>();
+            model.forEachAnd(other, want::add);
+            String at = "sequence " + sequence;
+            assertEquals(want.size(), model.andCardinality(other), at);
+            assertEquals(want.size(), packed.andCardinality(other), at);
+            assertEquals(want.size(), packed.andCardinality(packedOther), at);
+            assertEquals(want.size(), other.andCardinality(packed), at);
+            assertEquals(want.size(), packed.andCardinality(regular), at);
+            assertEquals(want.size(), regular.andCardinality(packed), at);
+            assertEquals(bits(model).size(), packed.andCardinality(packed), at);
+            assertTrue(packed.isPacked(), at + ": andCardinality restored the blocks");
+            assertTrue(packedOther.isPacked(), at + ": andCardinality restored the blocks");
+        }
+    }
+
+    /**
      * {@link SparseBitSet#intersection} of packed and unpacked sets, in both
      * orders: the same bits and state as a copy of the set and then
      * {@link SparseBitSet#and} on the copy, also after one more change; the
