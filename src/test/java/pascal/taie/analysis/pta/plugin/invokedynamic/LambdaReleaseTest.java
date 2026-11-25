@@ -62,14 +62,14 @@ class LambdaReleaseTest {
         run("");
         List<String> kept = resultLines();
         LambdaAnalysis lambda = lambdaAnalysis();
-        assertFalse(multiMap(lambda, "invoInfos").isEmpty(),
+        assertFalse(((Map<?, ?>) field(lambda, "invoInfos")).isEmpty(),
                 "the program has no lambda instance invocation");
         assertFalse(multiMap(lambda, "lambdaObjs").isEmpty());
 
         run(RELEASE);
         assertEquals(kept, resultLines());
         lambda = lambdaAnalysis();
-        assertTrue(multiMap(lambda, "invoInfos").isEmpty());
+        assertTrue(((Map<?, ?>) field(lambda, "invoInfos")).isEmpty());
         assertTrue(multiMap(lambda, "lambdaObjs").isEmpty());
         assertTrue(((Map<?, ?>) field(lambda, "recvByType")).isEmpty());
     }
@@ -94,7 +94,7 @@ class LambdaReleaseTest {
                 System.setOut(out);
             }
             assertEquals(kept, resultLines());
-            assertTrue(multiMap(lambdaAnalysis(), "invoInfos").isEmpty());
+            assertTrue(((Map<?, ?>) field(lambdaAnalysis(), "invoInfos")).isEmpty());
             List<String> finishLines = captured.toString(StandardCharsets.UTF_8).lines()
                     .filter(line -> line.contains("[spd] lambda verify finish OK"))
                     .toList();
