@@ -243,6 +243,23 @@ public interface IBitSet extends Copyable<IBitSet>, Serializable {
     IBitSet orDiff(IBitSet set);
 
     /**
+     * Same as {@link #orDiff(IBitSet)}, but may reuse {@code diff} for the
+     * result instead of allocating a new bit set: an implementation that
+     * reuses it clears it first and writes only the words that hold new
+     * bits. Either way {@code diff} must no longer be used except through
+     * the returned set.
+     *
+     * @param set  a bit set
+     * @param diff a bit set that may be overwritten; neither this bit set
+     *             nor {@code set}
+     * @return the bit values that are present in {@code set} and were
+     * absent in this bit set before: {@code diff} or a new bit set
+     */
+    default IBitSet orDiff(IBitSet set, IBitSet diff) {
+        return orDiff(set);
+    }
+
+    /**
      * Performs a logical <b>XOR</b> of this bit set with the bit set
      * argument. This bit set is modified so that a bit in it has the
      * value {@code true} if and only if one of the following

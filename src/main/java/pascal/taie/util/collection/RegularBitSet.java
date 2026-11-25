@@ -472,13 +472,35 @@ public class RegularBitSet extends AbstractBitSet
 
     @Override
     public IBitSet orDiff(IBitSet set) {
-        RegularBitSet diff = new RegularBitSet();
         if (this == set) {
-            return diff;
+            return new RegularBitSet();
         }
         if (!(set instanceof RegularBitSet other)) {
             return super.orDiff(set);
         }
+        return orDiffInto(other, new RegularBitSet());
+    }
+
+    @Override
+    public IBitSet orDiff(IBitSet set, IBitSet diff) {
+        if (!(set instanceof RegularBitSet other)
+                || !(diff instanceof RegularBitSet reused)
+                || reused == this || reused == other) {
+            return orDiff(set);
+        }
+        reused.clear();
+        return this == other ? reused : orDiffInto(other, reused);
+    }
+
+    /**
+     * Ors {@code other} into this bit set and writes the words of the bits
+     * that were new to this bit set into {@code diff}.
+     *
+     * @param other a bit set other than this one
+     * @param diff  an empty bit set, neither this one nor {@code other}
+     * @return {@code diff}
+     */
+    private RegularBitSet orDiffInto(RegularBitSet other, RegularBitSet diff) {
         if (wordsInUse < other.wordsInUse) {
             ensureCapacity(other.wordsInUse);
             wordsInUse = other.wordsInUse;
