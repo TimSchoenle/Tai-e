@@ -42,12 +42,13 @@ import java.util.stream.Stream;
  *     {@link PointerFlowEdge} itself (or stored without an edge object),
  *     of a kind other than {@link FlowKind#OTHER} (plugin edges), with the
  *     transfer {@link Identity}, into a pointer without filters;</li>
- *     <li>the block census of the points-to sets of all pointers.</li>
+ *     <li>the block census of the points-to sets of all pointers;</li>
+ *     <li>the census of the context-sensitive objects ({@link CSObjCensus}).</li>
  * </ul>
- * Mock pointers are included in both. The graph's edges are the
+ * Mock pointers are included in the first two. The graph's edges are the
  * qualifying edge transfers (one per edge and transfer).
  */
-record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts) {
+record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts, CSObjCensus objs) {
 
     private static final Logger logger = LoggerFactory.getLogger(SolverCensus.class);
 
@@ -81,8 +82,9 @@ record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts) {
             }
         }
         pts.finish();
-        SolverCensus census = new SolverCensus(scc, pts);
-        logger.info("{}\n{}", scc, pts);
+        CSObjCensus objs = CSObjCensus.take(csManager);
+        SolverCensus census = new SolverCensus(scc, pts, objs);
+        logger.info("{}\n{}\n{}", scc, pts, objs);
         return census;
     }
 

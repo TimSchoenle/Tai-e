@@ -87,6 +87,7 @@ import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.Sets;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -238,6 +239,41 @@ public class DefaultSolver implements Solver {
      */
     private @Nullable SolverCensus census;
 
+    /**
+     * Whether the measurement counters of the solver, its work list, its
+     * interner and the type filters are kept and logged (with the option
+     * {@code census} or the system property {@value #COUNTERS_PROPERTY});
+     * they change no result and no order.
+     */
+    private final boolean counting;
+
+    static final String COUNTERS_PROPERTY = "taie.pta.counters";
+
+    /**
+     * The origins of new points-to work that the counters tell apart, an
+     * index into {@link #addsByOrigin}: the initial flow of a new pointer
+     * flow edge, the fan-out of a propagation, the receiver objects of
+     * {@link #processCall}, and everything else (statements, plugins).
+     */
+    static final int ORIGIN_OTHER = 0;
+
+    static final int ORIGIN_INITIAL_FLOW = 1;
+
+    static final int ORIGIN_FAN_OUT = 2;
+
+    static final int ORIGIN_PROCESS_CALL = 3;
+
+    private static final String[] ORIGIN_NAMES = {
+            "other", "initial_flow", "fan_out", "process_call"};
+
+    /**
+     * The origin of the points-to work being added; kept only with
+     * {@link #counting}.
+     */
+    private int addOrigin = ORIGIN_OTHER;
+
+    private final long[] addsByOrigin = new long[ORIGIN_NAMES.length];
+
     private CSCallGraph callGraph;
 
     private PointerFlowGraph pointerFlowGraph;
@@ -270,6 +306,10 @@ public class DefaultSolver implements Solver {
         ptsFactory = new PointsToSetFactory(csManager.getObjectIndexer());
         interner = options.getBoolean("share-points-to-sets")
                 ? new PointsToSetInterner(ptsFactory) : null;
+        counting = options.getBoolean("census") || Boolean.getBoolean(COUNTERS_PROPERTY);
+        if (counting && interner != null) {
+            interner.enableFormCounters();
+        }
         propTypes = new PropagateTypes(
                 (List<String>) options.get("propagate-types"),
                 typeSystem);
@@ -420,6 +460,9 @@ public class DefaultSolver implements Solver {
         csCallEdges = 0;
         progressLines = 0;
         progressCounters.reset();
+        addOrigin = ORIGIN_OTHER;
+        Arrays.fill(addsByOrigin, 0);
+        TypeFilter.setStats(counting);
         solveStartNanos = System.nanoTime();
         lastProgressNanos = solveStartNanos;
         if (timeLimit != UNLIMITED) {
@@ -430,7 +473,7 @@ public class DefaultSolver implements Solver {
     }
 
     private WorkList newWorkList() {
-        return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"));
+        return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"), counting);
     }
 
     private class TimeLimiter {
@@ -483,13 +526,26 @@ public class DefaultSolver implements Solver {
                 } else {
                     Pointer p = workList.pollPointer();
                     PointsToSet pts = workList.takePolledDelta();
+                    int polledSize = counting ? pts.size() : 0;
                     PointsToSet diff = propagate(p, pts);
+                    if (counting) {
+                        workList.recordPropagation(polledSize, diff.size());
+                    }
                     if (!diff.isEmpty() && p instanceof CSVar v) {
                         processInstanceStore(v, diff);
                         processInstanceLoad(v, diff);
                         processArrayStore(v, diff);
                         processArrayLoad(v, diff);
-                        processCall(v, diff);
+                        if (counting) {
+                            addOrigin = ORIGIN_PROCESS_CALL;
+                            try {
+                                processCall(v, diff);
+                            } finally {
+                                addOrigin = ORIGIN_OTHER;
+                            }
+                        } else {
+                            processCall(v, diff);
+                        }
                         plugin.onNewPointsToSet(v, diff);
                     }
                 }
@@ -507,6 +563,9 @@ public class DefaultSolver implements Solver {
         if (interner != null) {
             logger.info("Points-to set interner: {} shared sets, {}",
                     interner.size(), interner.counters());
+        }
+        if (counting) {
+            logger.info("Solver counters: {}", countersLine());
         }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager);
@@ -552,6 +611,50 @@ public class DefaultSolver implements Solver {
                     progressCounters.getEdgesVisited(),
                     progressCounters.getEmptyDiffs());
         }
+        if (counting) {
+            // O(1) counters only; the pending walk and the filter sums are
+            // logged at the finish
+            logger.info("PTA progress counters: {} polled_bits={} diff_bits={}"
+                            + " empty_diff_polls={} merges_unchanged={}",
+                    addsLine(), workList.polledBits(), workList.diffBits(),
+                    workList.emptyDiffPolls(), workList.mergesUnchanged());
+        }
+    }
+
+    private String addsLine() {
+        StringBuilder line = new StringBuilder("adds");
+        for (int i = 0; i < ORIGIN_NAMES.length; ++i) {
+            line.append(' ').append(ORIGIN_NAMES[i]).append('=').append(addsByOrigin[i]);
+        }
+        return line.toString();
+    }
+
+    /**
+     * @return the measurement counters of the solver, the type filters and
+     * the interner in one line.
+     */
+    String countersLine() {
+        StringBuilder line = new StringBuilder(addsLine());
+        line.append("; type filters ").append(TypeFilter.statsLine(typeFilters.values()));
+        if (interner != null) {
+            line.append("; interner ").append(interner.formCopiesLine());
+        }
+        return line.toString();
+    }
+
+    /**
+     * @return the points-to work added so far from {@code origin}, one of
+     * the {@code ORIGIN_} indexes; zero unless the counters are kept.
+     */
+    long addsFrom(int origin) {
+        return addsByOrigin[origin];
+    }
+
+    /**
+     * @return the work list, for reading its measurement counters.
+     */
+    WorkList getWorkListForCounters() {
+        return workList;
     }
 
     /**
@@ -1050,7 +1153,28 @@ public class DefaultSolver implements Solver {
     @Override
     public void addPointsTo(Pointer pointer, PointsToSet pts) {
         checkAcceptsWork();
+        if (counting) {
+            ++addsByOrigin[addOrigin];
+        }
         workList.addEntry(pointer, pts);
+    }
+
+    /**
+     * {@link #addPointsTo(Pointer, PointsToSet)} counted under
+     * {@code origin} when the counters are kept.
+     */
+    private void addPointsToFrom(int origin, Pointer pointer, PointsToSet pts) {
+        if (!counting) {
+            addPointsTo(pointer, pts);
+            return;
+        }
+        int saved = addOrigin;
+        addOrigin = origin;
+        try {
+            addPointsTo(pointer, pts);
+        } finally {
+            addOrigin = saved;
+        }
     }
 
     /**
@@ -1063,9 +1187,12 @@ public class DefaultSolver implements Solver {
     private void addFanOutPointsTo(Pointer target, Transfer transfer, PointsToSet pts) {
         if (transfer == Identity.INSTANCE || transfer.getClass() == TypeFilter.class) {
             checkAcceptsWork();
+            if (counting) {
+                ++addsByOrigin[ORIGIN_FAN_OUT];
+            }
             workList.addFanOutEntry(target, pts);
         } else {
-            addPointsTo(target, pts);
+            addPointsToFrom(ORIGIN_FAN_OUT, target, pts);
         }
     }
 
@@ -1136,7 +1263,7 @@ public class DefaultSolver implements Solver {
             PointsToSet targetSet = transfer.apply(
                     edge, getPointsToSetOf(edge.source()));
             if (!targetSet.isEmpty()) {
-                addPointsTo(edge.target(), targetSet);
+                addPointsToFrom(ORIGIN_INITIAL_FLOW, edge.target(), targetSet);
             }
         }
     }
