@@ -31,6 +31,7 @@ import pascal.taie.analysis.pta.core.cs.selector.KCountingSelector;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 import pascal.taie.analysis.pta.plugin.invokedynamic.LambdaAnalysis;
+import pascal.taie.util.collection.Maps;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -38,7 +39,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -100,7 +100,7 @@ class LambdaEnterInversionTest {
     void inversionKeepsSolverOrder(String main) throws Exception {
         List<String> expected = new ArrayList<>();
         List<String> actual = new ArrayList<>();
-        Map<String, Run> runs = new LinkedHashMap<>();
+        Map<String, Run> runs = Maps.newOrderedMap();
         for (boolean callSiteFree : new boolean[]{false, true}) {
             for (boolean verify : new boolean[]{false, true}) {
                 String key = main + "/free=" + callSiteFree + "/verify=" + verify;
