@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.plugin.reflection;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.CastExp;
 import pascal.taie.ir.exp.IntLiteral;
@@ -33,25 +34,36 @@ import pascal.taie.ir.stmt.DefinitionStmt;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.language.type.TypeSystem;
 import pascal.taie.util.collection.Maps;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
- * Rules out reflective targets by the number of arguments a reflective
- * call passes, when an intra-procedural look at the call's argument array
- * finds it. This class supports the following reflection APIs:
+ * Rules out reflective targets that a reflective call can never run. This
+ * class supports the following reflection APIs:
  * <ul>
  *     <li>Class.newInstance()</li>
  *     <li>Constructor.newInstance(Object[])</li>
  *     <li>Method.invoke(Object,Object[])</li>
  * </ul>
- * The count is the only sound filter: {@code Method.invoke} and
- * {@code Constructor.newInstance} refuse an argument array of another
- * length before they call the target. A cast of the result runs only after
- * the target has returned, and {@code invoke} converts every argument by its
- * runtime object (unboxing, widening), so neither the cast type nor the
- * declared type of a stored argument can rule out a target that runs. The
+ * Each rule is a check the JVM makes before it calls the target:
+ * <ul>
+ *     <li>the number of arguments, when an intra-procedural look at the
+ *     call's argument array finds it: {@code Method.invoke} and
+ *     {@code Constructor.newInstance} refuse an argument array of another
+ *     length;</li>
+ *     <li>the type of each argument, when {@link ArgumentSlots} finds what
+ *     each element holds: both refuse an argument the parameter type does
+ *     not admit after unboxing, and {@code null} for a primitive
+ *     parameter;</li>
+ *     <li>a constructor of an abstract class: {@code newInstance} throws
+ *     {@code InstantiationException}.</li>
+ * </ul>
+ * A cast of the result runs only after the target has returned, so it
+ * cannot rule out a target that runs; nor can the declared type of a
+ * stored argument whose value may be {@code null} or of a subtype. The
  * upstream matcher used both and dropped such targets (px/s115-rmp).
  */
 class TypeMatcher {
@@ -64,16 +76,53 @@ class TypeMatcher {
             "newInstance", 0 // Constructor.newInstance(Object[])
     );
 
+    private final TypeSystem typeSystem;
+
     private final Map<Invoke, Integer> argCounts = Maps.newMap();
+
+    private final Map<Invoke, Optional<ArgumentSlots>> argSlots = Maps.newMap();
+
+    TypeMatcher(TypeSystem typeSystem) {
+        this.typeSystem = typeSystem;
+    }
 
     /**
      * @return whether {@code target} cannot be the target of reflective
      * call {@code invoke}: the call passes a known number of arguments that
-     * differs from the target's parameter count.
+     * differs from the target's parameter count, an argument the target's
+     * parameter does not admit, or {@code target} constructs an abstract
+     * class.
      */
     boolean isUnmatched(Invoke invoke, JMethod target) {
+        if (target.isConstructor() && target.getDeclaringClass().isAbstract()) {
+            return true;
+        }
         int count = getArgCount(invoke);
-        return count != UNKNOWN && count != target.getParamCount();
+        if (count == UNKNOWN) {
+            return false;
+        }
+        if (count != target.getParamCount()) {
+            return true;
+        }
+        ArgumentSlots slots = getArgSlots(invoke);
+        if (slots != null && slots.size() == count) {
+            for (int i = 0; i < count; ++i) {
+                if (!slots.admits(i, target.getParamType(i), typeSystem)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private @Nullable ArgumentSlots getArgSlots(Invoke invoke) {
+        return argSlots.computeIfAbsent(invoke, call -> call.getInvokeExp().getArgCount() == 0
+                ? Optional.empty()
+                : Optional.ofNullable(ArgumentSlots.of(call, getArgsVar(call)))).orElse(null);
+    }
+
+    private static Var getArgsVar(Invoke invoke) {
+        return invoke.getInvokeExp().getArg(argIndexes.get(invoke.getMethodRef().getName()));
     }
 
     /**
@@ -104,8 +153,7 @@ class TypeMatcher {
             // no argument, it means that invoke calls Class.newInstance()
             return 0;
         }
-        int argIndex = argIndexes.get(invoke.getMethodRef().getName());
-        Var args = invoke.getInvokeExp().getArg(argIndex);
+        Var args = getArgsVar(invoke);
         if (args.isConst() && args.getConstValue() instanceof NullLiteral) {
             // a null argument array: no argument is given
             return 0;
