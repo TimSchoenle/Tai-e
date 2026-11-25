@@ -138,12 +138,24 @@ final class DeltaTransfers {
         if (VERIFY) {
             record(pointer, delta);
         }
+        clear();
+    }
+
+    /**
+     * Forgets the results kept since the last {@link #finish} or
+     * {@code clear}, without counting a propagation in the statistics of
+     * verify mode. For a caller outside a propagation that applies type
+     * filters to points-to sets which do not change between its calls of
+     * {@link #apply}.
+     */
+    void clear() {
         for (int i = 0; i < size; i++) {
             applied[i].deltaInput = null;
             applied[i].deltaResult = null;
             applied[i] = null;
         }
         size = 0;
+        transfers = 0;
     }
 
     private void record(Pointer pointer, PointsToSet delta) {
