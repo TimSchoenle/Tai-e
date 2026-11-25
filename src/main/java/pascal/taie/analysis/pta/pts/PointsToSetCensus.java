@@ -155,7 +155,7 @@ public final class PointsToSetCensus {
                 long tableLength = shape.areaSpan() <= 1 ? 1
                         : (long) Integer.highestOneBit(shape.areaSpan() - 1) << 1;
                 today += SPARSE_OBJECTS + align(ARRAY_HEADER + REF * tableLength)
-                        + shape.areas() * align(ARRAY_HEADER + REF * (long) BLOCKS_PER_AREA)
+                        + shape.areaBytes()
                         + shape.blocks() * align(ARRAY_HEADER + 8L * WORDS_PER_BLOCK);
                 packed = WRAPPER + align(ARRAY_HEADER + 8L * shape.packedLength());
                 largeDistinct++;
@@ -299,8 +299,11 @@ public final class PointsToSetCensus {
          * @param areas    level2 areas holding a nonzero block
          * @param areaSpan index of the last such area plus one (the
          *                 level1 table length it needs)
+         * @param areaBytes bytes of the area arrays, each as long as its
+         *                  highest nonzero block needs
+         *                  ({@link SparseBitSet#areaLength(int)})
          */
-        record Shape(int blocks, int words, int areas, int areaSpan) {
+        record Shape(int blocks, int words, int areas, int areaSpan, long areaBytes) {
 
             /**
              * @return the length of {@link SparseBitSet#toPacked()} for
@@ -343,6 +346,8 @@ public final class PointsToSetCensus {
             int setWords = 0;
             int areas = 0;
             int lastArea = -1;
+            int lastBlock = -1;
+            long areaBytes = 0;
             int i = 0;
             while (i < n) {
                 int block = sorted[i] / BITS_PER_BLOCK;
@@ -361,14 +366,30 @@ public final class PointsToSetCensus {
                 setWords += blockWords;
                 int area = block / BLOCKS_PER_AREA;
                 if (area != lastArea) {
+                    if (lastBlock >= 0) {
+                        areaBytes += areaBytes(lastBlock);
+                    }
                     areas++;
                     lastArea = area;
                 }
+                lastBlock = block;
+            }
+            if (lastBlock >= 0) {
+                areaBytes += areaBytes(lastBlock);
             }
             blocksPerSet[bucket(setBlocks)]++;
             blocks += setBlocks;
             words += setWords;
-            return new Shape(setBlocks, setWords, areas, lastArea + 1);
+            return new Shape(setBlocks, setWords, areas, lastArea + 1, areaBytes);
+        }
+
+        /**
+         * @return the bytes of the area array whose highest block is
+         * {@code block} (an index over the whole set)
+         */
+        private static long areaBytes(int block) {
+            return align(ARRAY_HEADER
+                    + REF * (long) SparseBitSet.areaLength(block % BLOCKS_PER_AREA));
         }
 
         public long sets() {
