@@ -231,6 +231,7 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             JField field = CSObjs.toField(fldObj);
             if (field != null) {
                 if (field.isStatic()) {
+                    initializeDeclaringClass(field);
                     StaticField sField = csManager.getStaticField(field);
                     solver.addPFGEdge(sField, to, FlowKind.STATIC_LOAD);
                 } else {
@@ -259,6 +260,7 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             JField field = CSObjs.toField(fldObj);
             if (field != null) {
                 if (field.isStatic()) {
+                    initializeDeclaringClass(field);
                     StaticField sfield = csManager.getStaticField(field);
                     solver.addPFGEdge(new PointerFlowEdge(
                             STATIC_STORE, from, sfield),
@@ -361,6 +363,20 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
                 nestedType = arrayType.elementType();
             }
         }
+    }
+
+    /**
+     * Initializes the class that declares static field {@code field}, as
+     * {@code Field.get} and {@code Field.set} of a static field do before
+     * the access, like a direct static field access
+     * ({@link pascal.taie.analysis.pta.plugin.ClassInitializer}). Without
+     * it, a value only the static initializer stores never reaches the
+     * reader (px/s115). A reflective static method or constructor target
+     * needs no call here: {@code ClassInitializer.onNewMethod} initializes
+     * its class when the target becomes reachable.
+     */
+    private void initializeDeclaringClass(JField field) {
+        solver.initializeClass(field.getDeclaringClass());
     }
 
     /**

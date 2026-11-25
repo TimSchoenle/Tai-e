@@ -130,7 +130,7 @@ public class StringBasedModel extends InferenceModel {
 
     private static Stream<? extends ClassMember> members(JClass clazz, String api) {
         return switch (api) {
-            case "getMethods" -> Stream.concat(Reflections.getMethods(clazz), interfaceMethods(clazz));
+            case "getMethods" -> Reflections.getMethods(clazz);
             case "getDeclaredMethods" -> Reflections.getDeclaredMethods(clazz);
             case "getConstructors" -> Reflections.getConstructors(clazz);
             case "getDeclaredConstructors" -> Reflections.getDeclaredConstructors(clazz);
@@ -151,21 +151,6 @@ public class StringBasedModel extends InferenceModel {
         return supertypes(clazz).stream()
                 .flatMap(type -> type.getDeclaredFields().stream())
                 .filter(JField::isPublic);
-    }
-
-    /**
-     * The public instance methods declared in every interface among the
-     * supertypes of {@code clazz} (itself included), which
-     * {@code Class.getMethods()} returns too but
-     * {@link Reflections#getMethods(JClass)} leaves out, as it walks only the
-     * superclasses. Overridden ones are kept, a superset.
-     */
-    private static Stream<JMethod> interfaceMethods(JClass clazz) {
-        return supertypes(clazz).stream()
-                .filter(JClass::isInterface)
-                .flatMap(type -> type.getDeclaredMethods().stream())
-                .filter(method -> method.isPublic() && !method.isStatic()
-                        && !method.isConstructor() && !method.isStaticInitializer());
     }
 
     /** {@code clazz} and all its superclasses and superinterfaces, transitively. */
