@@ -39,6 +39,7 @@ import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
 import pascal.taie.language.classes.Reflections;
+import pascal.taie.language.type.ClassType;
 import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.Sets;
@@ -49,6 +50,7 @@ import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -70,9 +72,27 @@ public class StringBasedModel extends InferenceModel {
 
     private final Map<CSCallSite, FieldLookupSite> fieldLookupSites = Maps.newMap();
 
-    StringBasedModel(Solver solver, MetaObjHelper helper, Set<Invoke> invokesWithLog) {
+    /**
+     * The lazy members (option {@code reflection-members-lazy}), or
+     * {@code null} when every member object is concrete.
+     */
+    private final @Nullable LazyMembers lazy;
+
+    StringBasedModel(Solver solver, MetaObjHelper helper, Set<Invoke> invokesWithLog,
+                     @Nullable LazyMembers lazy) {
         super(solver, helper, invokesWithLog);
         members = solver.getOptions().getBoolean("reflection-members");
+        this.lazy = lazy;
+    }
+
+    /**
+     * Hands out the placeholder of {@code summary} in {@code result} the
+     * first time it has a member.
+     */
+    private void publish(Context context, Var result, MemberSummary summary) {
+        if (summary.publish()) {
+            solver.addVarPointsTo(context, result, summary.getObj());
+        }
     }
 
     /**
@@ -99,6 +119,9 @@ public class StringBasedModel extends InferenceModel {
                 k -> new FieldLookupSite(new SeenObjs(solver.makePointsToSet()),
                         new SeenObjs(solver.makePointsToSet()),
                         Sets.newLinkedSet(), Sets.newLinkedSet()));
+        MemberSummary summary = lazy == null ? null
+                : lazy.summary(invoke, context, helper.field, (clazz, name) ->
+                        fields(clazz, declared).filter(field -> field.getName().equals(name)), true);
         // new names first, so that the new classes below meet them
         Set<String> newNames = Sets.newLinkedSet();
         for (CSObj nameObj : site.nameObjs().unseen(nameObjs,
@@ -116,6 +139,12 @@ public class StringBasedModel extends InferenceModel {
                 newClasses.add(clazz);
             }
         }
+        // the lazy classes meet every name in the summary
+        if (summary != null) {
+            for (String name : newNames) {
+                summary.addName(name);
+            }
+        }
         // old classes x new names, then new classes x all names
         if (!newNames.isEmpty()) {
             for (JClass clazz : site.classes()) {
@@ -123,15 +152,23 @@ public class StringBasedModel extends InferenceModel {
             }
         }
         for (JClass clazz : newClasses) {
-            site.classes().add(clazz);
-            lookUpFields(context, result, fieldObjsByName(clazz, declared), site.names());
+            if (summary != null && summary.isLazy(clazz)) {
+                summary.addClass(clazz);
+            } else {
+                site.classes().add(clazz);
+                lookUpFields(context, result, fieldObjsByName(clazz, declared), site.names());
+            }
+        }
+        if (summary != null) {
+            publish(context, result, summary);
         }
     }
 
     /**
      * The state of one getField or getDeclaredField call site in one
      * context: the class and name objects taken, and the distinct classes
-     * and names among them.
+     * and names among them; with lazy members, {@code classes} holds only the
+     * classes taken eagerly.
      */
     private record FieldLookupSite(SeenObjs classObjs, SeenObjs nameObjs,
                                    Set<JClass> classes, Set<String> names) {
@@ -204,15 +241,37 @@ public class StringBasedModel extends InferenceModel {
         CSObj array = csManager.getCSObj(context, helper.getMetaObjArray(invoke));
         ArrayIndex elements = csManager.getArrayIndex(array);
         String api = invoke.getMethodRef().getName();
+        MemberSummary summary = lazy == null ? null
+                : lazy.summary(invoke, context, memberType(api),
+                        (clazz, name) -> members(clazz, api), false);
         classObjs.forEach(classObj -> {
             JClass clazz = CSObjs.toClass(classObj);
             if (clazz != null) {
-                for (Obj member : memberObjs(clazz, api)) {
-                    solver.addPointsTo(elements, member);
+                if (summary != null && summary.isLazy(clazz)) {
+                    summary.addClass(clazz);
+                    if (summary.publish()) {
+                        solver.addPointsTo(elements, summary.getObj());
+                    }
+                } else {
+                    for (Obj member : memberObjs(clazz, api)) {
+                        solver.addPointsTo(elements, member);
+                    }
                 }
                 solver.addVarPointsTo(context, result, array);
             }
         });
+    }
+
+    /**
+     * @return the type of the member objects of member array API {@code api}
+     */
+    private ClassType memberType(String api) {
+        return switch (api) {
+            case "getMethods", "getDeclaredMethods" -> helper.method;
+            case "getConstructors", "getDeclaredConstructors" -> helper.constructor;
+            case "getFields", "getDeclaredFields" -> helper.field;
+            default -> throw new AnalysisException("Unexpected member API " + api);
+        };
     }
 
     /**
@@ -303,8 +362,21 @@ public class StringBasedModel extends InferenceModel {
         if (invokesWithLog.contains(invoke)) {
             return;
         }
-        classObjs.forEach(obj ->
-                classGetConstructorKnown(context, invoke, CSObjs.toClass(obj)));
+        Var result = invoke.getResult();
+        MemberSummary summary = lazy == null || result == null ? null
+                : lazy.summary(invoke, context, helper.constructor,
+                        (clazz, name) -> constructors(invoke, clazz), false);
+        classObjs.forEach(obj -> {
+            JClass clazz = CSObjs.toClass(obj);
+            if (summary != null && clazz != null && summary.isLazy(clazz)) {
+                summary.addClass(clazz);
+            } else {
+                classGetConstructorKnown(context, invoke, clazz);
+            }
+        });
+        if (summary != null) {
+            publish(context, result, summary);
+        }
     }
 
     @InvokeHandler(signature = {
@@ -316,13 +388,33 @@ public class StringBasedModel extends InferenceModel {
         if (invokesWithLog.contains(invoke)) {
             return;
         }
+        Var result = invoke.getResult();
+        MemberSummary summary = lazy == null || result == null ? null
+                : lazy.summary(invoke, context, helper.method, (clazz, name) ->
+                        methods(invoke, clazz, Objects.requireNonNull(name)), true);
+        if (summary != null) {
+            // the lazy classes meet every name in the summary
+            nameObjs.forEach(nameObj -> {
+                String name = CSObjs.toString(nameObj);
+                if (name != null) {
+                    summary.addName(name);
+                }
+            });
+        }
         classObjs.forEach(classObj -> {
             JClass clazz = CSObjs.toClass(classObj);
+            if (summary != null && clazz != null && summary.isLazy(clazz)) {
+                summary.addClass(clazz);
+                return;
+            }
             nameObjs.forEach(nameObj -> {
                 String name = CSObjs.toString(nameObj);
                 classGetMethodKnown(context, invoke, clazz, name);
             });
         });
+        if (summary != null) {
+            publish(context, result, summary);
+        }
     }
 
     @InvokeHandler(signature = {
@@ -332,11 +424,10 @@ public class StringBasedModel extends InferenceModel {
         if (invokesWithLog.contains(invoke)) {
             return;
         }
-        methodObjs.forEach(methodObj -> {
-            JMethod jMethod = CSObjs.toMethod(methodObj);
-            if (jMethod != null) {
+        methodObjs.forEach(methodObj -> MemberObjs.forEachMember(methodObj, member -> {
+            if (member instanceof JMethod jMethod && !jMethod.isConstructor()) {
                 classForNameKnown(context, invoke, jMethod.getDeclaringClass().getName());
             }
-        });
+        }));
     }
 }

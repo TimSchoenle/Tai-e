@@ -184,13 +184,15 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, obj)) {
                 return;
             }
-            JMethod constructor = CSObjs.toConstructor(obj);
-            if (constructor != null && !typeMatcher.isUnmatched(invoke, constructor)) {
-                ClassType type = constructor.getDeclaringClass().getType();
-                CSObj csNewObj = newReflectiveObj(context, invoke, type);
-                addReflectiveCallEdge(context, invoke, csNewObj,
-                        constructor, invoke.getInvokeExp().getArg(0));
-            }
+            MemberObjs.forEachMember(obj, member -> {
+                if (member instanceof JMethod constructor && constructor.isConstructor()
+                        && !typeMatcher.isUnmatched(invoke, constructor)) {
+                    ClassType type = constructor.getDeclaringClass().getType();
+                    CSObj csNewObj = newReflectiveObj(context, invoke, type);
+                    addReflectiveCallEdge(context, invoke, csNewObj,
+                            constructor, invoke.getInvokeExp().getArg(0));
+                }
+            });
         });
     }
 
@@ -227,14 +229,16 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, mtdObj)) {
                 continue;
             }
-            JMethod target = CSObjs.toMethod(mtdObj);
-            if (target != null && !typeMatcher.isUnmatched(invoke, target)) {
-                if (target.isStatic()) {
-                    addReflectiveCallEdge(context, invoke, null, target, argsVar);
-                } else {
-                    site.index().addMember(target, call);
+            MemberObjs.forEachMember(mtdObj, member -> {
+                if (member instanceof JMethod target && !target.isConstructor()
+                        && !typeMatcher.isUnmatched(invoke, target)) {
+                    if (target.isStatic()) {
+                        addReflectiveCallEdge(context, invoke, null, target, argsVar);
+                    } else {
+                        site.index().addMember(target, call);
+                    }
                 }
-            }
+            });
         }
     }
 
@@ -307,15 +311,16 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, fldObj)) {
                 continue;
             }
-            JField field = CSObjs.toField(fldObj);
-            if (field != null) {
-                if (field.isStatic()) {
-                    initializeDeclaringClass(field);
-                    staticAccess.accept(field);
-                } else {
-                    site.index().addMember(field, instanceAccess);
+            MemberObjs.forEachMember(fldObj, member -> {
+                if (member instanceof JField field) {
+                    if (field.isStatic()) {
+                        initializeDeclaringClass(field);
+                        staticAccess.accept(field);
+                    } else {
+                        site.index().addMember(field, instanceAccess);
+                    }
                 }
-            }
+            });
         }
     }
 

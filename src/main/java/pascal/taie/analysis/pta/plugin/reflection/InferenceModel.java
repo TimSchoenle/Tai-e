@@ -94,17 +94,24 @@ abstract class InferenceModel extends AnalysisModelPlugin {
         if (clazz != null) {
             Var result = invoke.getResult();
             if (result != null) {
-                Stream<JMethod> constructors = switch (invoke.getMethodRef().getName()) {
-                    case "getConstructor" -> Reflections.getConstructors(clazz);
-                    case "getDeclaredConstructor" -> Reflections.getDeclaredConstructors(clazz);
-                    default -> throw new AnalysisException(
-                            "Expected [getConstructor, getDeclaredConstructor], given " +
-                                    invoke.getMethodRef());
-                };
-                constructors.map(helper::getMetaObj)
+                constructors(invoke, clazz).map(helper::getMetaObj)
                         .forEach(ctorObj -> solver.addVarPointsTo(context, result, ctorObj));
             }
         }
+    }
+
+    /**
+     * @return the constructors of {@code clazz} that the getConstructor or
+     * getDeclaredConstructor call {@code invoke} may return
+     */
+    static Stream<JMethod> constructors(Invoke invoke, JClass clazz) {
+        return switch (invoke.getMethodRef().getName()) {
+            case "getConstructor" -> Reflections.getConstructors(clazz);
+            case "getDeclaredConstructor" -> Reflections.getDeclaredConstructors(clazz);
+            default -> throw new AnalysisException(
+                    "Expected [getConstructor, getDeclaredConstructor], given " +
+                            invoke.getMethodRef());
+        };
     }
 
     protected void classGetMethodKnown(Context context, Invoke invoke,
@@ -112,16 +119,23 @@ abstract class InferenceModel extends AnalysisModelPlugin {
         if (clazz != null && name != null) {
             Var result = invoke.getResult();
             if (result != null) {
-                Stream<JMethod> methods = switch (invoke.getMethodRef().getName()) {
-                    case "getMethod" -> Reflections.getMethods(clazz, name);
-                    case "getDeclaredMethod" -> Reflections.getDeclaredMethods(clazz, name);
-                    default -> throw new AnalysisException(
-                            "Expected [getMethod, getDeclaredMethod], given " +
-                                    invoke.getMethodRef());
-                };
-                methods.map(helper::getMetaObj)
+                methods(invoke, clazz, name).map(helper::getMetaObj)
                         .forEach(mtdObj -> solver.addVarPointsTo(context, result, mtdObj));
             }
         }
+    }
+
+    /**
+     * @return the methods of {@code clazz} named {@code name} that the
+     * getMethod or getDeclaredMethod call {@code invoke} may return
+     */
+    static Stream<JMethod> methods(Invoke invoke, JClass clazz, String name) {
+        return switch (invoke.getMethodRef().getName()) {
+            case "getMethod" -> Reflections.getMethods(clazz, name);
+            case "getDeclaredMethod" -> Reflections.getDeclaredMethods(clazz, name);
+            default -> throw new AnalysisException(
+                    "Expected [getMethod, getDeclaredMethod], given " +
+                            invoke.getMethodRef());
+        };
     }
 }

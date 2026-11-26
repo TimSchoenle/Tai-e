@@ -26,6 +26,7 @@ import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
+import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.util.CSObjs;
@@ -111,6 +112,16 @@ class MetaObjHelper {
 
     boolean isLogMetaObj(CSObj obj) {
         return CSObjs.hasDescriptor(obj, REFLECTION_LOG_DESC);
+    }
+
+    /**
+     * @return whether {@code obj} is a member object of reflection inference
+     * ({@link #getMetaObj} of a {@link ClassMember})
+     */
+    boolean isInferredMemberObj(Obj obj) {
+        return obj instanceof MockObj mockObj
+                && mockObj.getDescriptor().equals(REFLECTION_DESC)
+                && obj.getAllocation() instanceof ClassMember;
     }
 
     private Obj getMetaObj(Object classOrTypeOrMember, Descriptor desc) {

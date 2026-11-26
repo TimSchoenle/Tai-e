@@ -69,6 +69,7 @@
     expected-file: null # path of expected file for comparing results
     reflection-inference: string-constant # | solar | null
     reflection-members: false # with string-constant inference, model Class.get[Declared]Field and the member arrays of Class.get[Declared][Methods|Constructors|Fields]() (px/s115-rmp)
+    reflection-members-lazy: -1 # -1 = off; N >= 0: a member-retrieving call site takes the receiver classes after its first N (per call context) into one lazy member placeholder, and all member objects of one kind share their instance fields; needs reflection-members, refused in Android mode (px/s115-P52)
     reflection-log: null # path to reflection log, required when reflection option is log
     taint-config: null # path (of dir/file) to config file of taint analysis,
     taint-config-providers: [ ] # class names of taint config provider classes

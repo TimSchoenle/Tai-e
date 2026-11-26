@@ -22,11 +22,13 @@
 
 package pascal.taie.analysis.pta.plugin.reflection;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pascal.taie.World;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.CompositePlugin;
+import pascal.taie.config.ConfigException;
 import pascal.taie.ir.proginfo.MethodRef;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.ir.stmt.Stmt;
@@ -72,8 +74,9 @@ public class ReflectionAnalysis extends CompositePlugin {
         logBasedModel = new LogBasedModel(solver, helper, logPath);
         Set<Invoke> invokesWithLog = logBasedModel.getInvokesWithLog();
         String reflection = solver.getOptions().getString("reflection-inference");
+        LazyMembers lazyMembers = lazyMembers(solver, helper, reflection);
         if ("string-constant".equals(reflection)) {
-            inferenceModel = new StringBasedModel(solver, helper, invokesWithLog);
+            inferenceModel = new StringBasedModel(solver, helper, invokesWithLog, lazyMembers);
         } else if ("solar".equals(reflection)) {
             inferenceModel = new SolarModel(solver, helper, typeMatcher, invokesWithLog);
         } else if (reflection == null) {
@@ -96,6 +99,41 @@ public class ReflectionAnalysis extends CompositePlugin {
         if (World.get().getOptions().getJavaVersion() >= 5) {
             addPlugin(new AnnotationModel(solver, helper));
         }
+    }
+
+    /**
+     * Option {@code reflection-members-lazy: N} (px/s115-P52): -1 (default)
+     * makes every member object concrete; N >= 0 makes each member-retrieving
+     * call site take its receiver classes after the first N in each call
+     * context into one placeholder ({@link LazyMembers}), and makes all
+     * member objects of one kind share their instance fields. It needs
+     * string-constant inference with {@code reflection-members} and is
+     * refused in Android mode, whose imprecise-target cut-off counts targets
+     * in their order of arrival.
+     *
+     * @return the lazy members, or {@code null} when the option is off
+     */
+    private static @Nullable LazyMembers lazyMembers(
+            Solver solver, MetaObjHelper helper, @Nullable String reflection) {
+        int threshold = solver.getOptions().getInt("reflection-members-lazy");
+        if (threshold == -1) {
+            return null;
+        }
+        if (threshold < -1) {
+            throw new ConfigException("reflection-members-lazy must be -1 or at least 0, given "
+                    + threshold);
+        }
+        if (!"string-constant".equals(reflection)
+                || !solver.getOptions().getBoolean("reflection-members")) {
+            throw new ConfigException("reflection-members-lazy needs"
+                    + " reflection-inference:string-constant and reflection-members:true");
+        }
+        if (isAndroidMode()) {
+            throw new ConfigException("reflection-members-lazy is refused in Android mode");
+        }
+        LazyMembers lazyMembers = new LazyMembers(solver, helper, threshold);
+        solver.getCSManager().unifyInstanceFieldBases(lazyMembers::unifiedBase);
+        return lazyMembers;
     }
 
     @Override

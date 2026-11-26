@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.cs.element;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.World;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.heap.Obj;
@@ -42,6 +43,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 /**
@@ -68,9 +70,27 @@ public class MapBasedCSManager implements CSManager {
         return ptrManager.getStaticField(field);
     }
 
+    /**
+     * The base mapping of {@link #unifyInstanceFieldBases}, or {@code null}
+     * when every object has its own instance fields.
+     */
+    private @Nullable UnaryOperator<CSObj> unifiedBase;
+
     @Override
     public InstanceField getInstanceField(CSObj base, JField field) {
-        return ptrManager.getInstanceField(base, field);
+        UnaryOperator<CSObj> unify = unifiedBase;
+        return ptrManager.getInstanceField(unify == null ? base : unify.apply(base), field);
+    }
+
+    @Override
+    public void unifyInstanceFieldBases(UnaryOperator<CSObj> unifiedBase) {
+        if (this.unifiedBase != null) {
+            throw new IllegalStateException("instance field bases already unified");
+        }
+        if (!ptrManager.getInstanceFields().isEmpty()) {
+            throw new IllegalStateException("instance fields exist before the unification");
+        }
+        this.unifiedBase = unifiedBase;
     }
 
     @Override

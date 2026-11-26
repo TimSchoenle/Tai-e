@@ -32,6 +32,7 @@ import pascal.taie.language.type.Type;
 import pascal.taie.util.Indexer;
 
 import java.util.Collection;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 /**
@@ -69,6 +70,20 @@ public interface CSManager {
      * and instance field.
      */
     InstanceField getInstanceField(CSObj base, JField field);
+
+    /**
+     * From now on, {@link #getInstanceField} answers the field of
+     * {@code unifiedBase.apply(base)} for {@code base}: the objects mapped to
+     * one base share their instance fields (px/s115-P52, the member objects
+     * of lazy reflection members). Set at most once, before the solver
+     * creates any instance field.
+     *
+     * @throws UnsupportedOperationException if this manager cannot unify
+     */
+    default void unifyInstanceFieldBases(UnaryOperator<CSObj> unifiedBase) {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " cannot unify instance field bases");
+    }
 
     /**
      * @return the corresponding ArrayIndex pointer for given array object.
