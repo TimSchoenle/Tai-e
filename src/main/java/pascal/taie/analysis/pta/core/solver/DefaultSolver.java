@@ -55,6 +55,7 @@ import pascal.taie.analysis.pta.pts.PointsToSet;
 import pascal.taie.analysis.pta.pts.PointsToSetFactory;
 import pascal.taie.analysis.pta.pts.PointsToSetInterner;
 import pascal.taie.config.AnalysisOptions;
+import pascal.taie.config.ConfigException;
 import pascal.taie.ir.IR;
 import pascal.taie.ir.exp.CastExp;
 import pascal.taie.ir.exp.InvokeExp;
@@ -190,6 +191,17 @@ public class DefaultSolver implements Solver {
      * Whether only analyzes application code.
      */
     private final boolean onlyApp;
+
+    /**
+     * Whether a call to a trivial getter is taken as a load at the call site
+     * (option {@code trivial-getters}, px/s115-P57), see {@link #inlinesGetter}.
+     */
+    private final boolean trivialGetters;
+
+    /**
+     * The trivial getter shape of each resolved callee, made on first use.
+     */
+    private final Map<JMethod, TrivialGetter> getterShapes = Maps.newMap();
 
     /**
      * Time limit for pointer analysis (in seconds).
@@ -386,6 +398,26 @@ public class DefaultSolver implements Solver {
                 (List<String>) options.get("propagate-types"),
                 typeSystem);
         onlyApp = options.getBoolean("only-app");
+        trivialGetters = options.getBoolean("trivial-getters");
+        if (trivialGetters && World.get().getOptions().isAndroidMode()) {
+            // the Android models read loads in a callee's body against its
+            // own this variable (OtherMiscModel), which a getter taken as a
+            // load leaves empty
+            throw new ConfigException("trivial-getters is refused in Android mode");
+        }
+        String advanced = options.getString("advanced");
+        if (trivialGetters && advanced != null && !advanced.equals("collection")) {
+            // the pre-analyses of Zipper, Scaler and Mahjong read the methods
+            // invoked on a type and their flows from the callees' this
+            // variables, which a getter taken as a load leaves empty
+            throw new ConfigException("trivial-getters is refused with advanced: " + advanced);
+        }
+        if (trivialGetters && (options.getString("taint-config") != null
+                || !((List<?>) options.get("taint-config-providers")).isEmpty())) {
+            // a taint sanitizer of a getter's base filters its this variable,
+            // which the load at the call site does not pass through
+            throw new ConfigException("trivial-getters is refused with taint analysis");
+        }
         timeLimit = options.getInt("time-limit");
         int progressInterval = options.getInt("progress-interval");
         if (progressInterval < 0) {
@@ -1082,6 +1114,9 @@ public class DefaultSolver implements Solver {
                         csCallSite = csManager.getCSCallSite(context, callSite);
                         csCallSiteOnce[0] = csCallSite;
                     }
+                    if (trivialGetters && inlinesGetter(csCallSite, callee, recvObj)) {
+                        return;
+                    }
                     Context calleeContext = contextSelector.selectContext(
                             csCallSite, recvObj, callee);
                     // build call edge
@@ -1102,6 +1137,58 @@ public class DefaultSolver implements Solver {
                 }
             });
         }
+    }
+
+    /**
+     * Takes a call to a trivial getter ({@link TrivialGetter}) as a load at
+     * the call site (option {@code trivial-getters}): the call site gets one
+     * plain call edge to the callee in the empty context, and the callee's
+     * {@code this} variable gets no receiver object, so the callee has no
+     * context of a receiver. For a getter of an instance field {@code f},
+     * the receiver object {@code o} adds the load {@code o.f -> lhs} with
+     * the checks of the getter's own load and return. The return passing of
+     * the edge is kept: a static field or {@code null} reaches the result
+     * through the callee's statements in the empty context. With object
+     * sensitivity whose callee context fixes the receiver object (k-obj with
+     * heap contexts of length k - 1) the result is the same as the call's;
+     * otherwise it is a subset of it, as the call merges the receivers of
+     * one callee context.
+     *
+     * @param recvObj the receiver object, null for a static call
+     * @return whether the call was taken as a load; false when the callee is
+     * not a trivial getter or is ignored
+     */
+    private boolean inlinesGetter(CSCallSite csCallSite, JMethod callee,
+                                  @Nullable CSObj recvObj) {
+        if (isIgnored(callee)) {
+            return false;
+        }
+        TrivialGetter getter = getterShapes.computeIfAbsent(callee, TrivialGetter::of);
+        if (getter.form() == TrivialGetter.Form.NONE) {
+            return false;
+        }
+        Invoke callSite = csCallSite.getCallSite();
+        CSMethod csCallee = csManager.getCSMethod(contextSelector.getEmptyContext(), callee);
+        CallKind kind = CallGraphs.getCallKind(callSite);
+        if (!csCallSite.hasPlainEdge(kind, csCallee)) {
+            addCallEdge(new Edge<>(kind, csCallSite, csCallee));
+        }
+        if (getter.form() == TrivialGetter.Form.INSTANCE_FIELD) {
+            LoadField load = Objects.requireNonNull(getter.load());
+            CSObj receiver = Objects.requireNonNull(recvObj,
+                    "an instance field getter is called without a receiver");
+            Var lhs = callSite.getResult();
+            if (lhs != null && receiver.getObject().isFunctional()
+                    && propTypes.isAllowed(lhs) && propTypes.isAllowed(load.getLValue())) {
+                JField field = load.getFieldRef().resolveNullable();
+                if (field != null) {
+                    addPFGEdge(csManager.getInstanceField(receiver, field),
+                            csManager.getCSVar(csCallSite.getContext(), lhs),
+                            FlowKind.INSTANCE_LOAD);
+                }
+            }
+        }
+        return true;
     }
 
     private void processCallEdge(Edge<CSCallSite, CSMethod> edge) {
@@ -1277,6 +1364,9 @@ public class DefaultSolver implements Solver {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
                 if (callee != null) {
                     CSCallSite csCallSite = csManager.getCSCallSite(context, callSite);
+                    if (trivialGetters && inlinesGetter(csCallSite, callee, null)) {
+                        return;
+                    }
                     Context calleeCtx = contextSelector.selectContext(csCallSite, callee);
                     CSMethod csCallee = csManager.getCSMethod(calleeCtx, callee);
                     addCallEdge(new Edge<>(CallKind.STATIC, csCallSite, csCallee));
