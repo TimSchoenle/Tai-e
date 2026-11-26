@@ -184,7 +184,7 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, obj)) {
                 return;
             }
-            MemberObjs.forEachMember(obj, member -> {
+            MemberObjs.forEachMember(context, invoke, obj, member -> {
                 if (member instanceof JMethod constructor && constructor.isConstructor()
                         && !typeMatcher.isUnmatched(invoke, constructor)) {
                     ClassType type = constructor.getDeclaringClass().getType();
@@ -229,7 +229,7 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, mtdObj)) {
                 continue;
             }
-            MemberObjs.forEachMember(mtdObj, member -> {
+            MemberObjs.forEachMember(context, invoke, mtdObj, member -> {
                 if (member instanceof JMethod target && !target.isConstructor()
                         && !typeMatcher.isUnmatched(invoke, target)) {
                     if (target.isStatic()) {
@@ -311,7 +311,7 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
             if (isInvalidTarget(invoke, fldObj)) {
                 continue;
             }
-            MemberObjs.forEachMember(fldObj, member -> {
+            MemberObjs.forEachMember(context, invoke, fldObj, member -> {
                 if (member instanceof JField field) {
                     if (field.isStatic()) {
                         initializeDeclaringClass(field);

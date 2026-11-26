@@ -24,21 +24,18 @@ package pascal.taie.analysis.pta.plugin.reflection;
 
 import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.context.Context;
-import pascal.taie.analysis.pta.core.cs.element.CSManager;
-import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
-import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.language.classes.ClassMember;
 import pascal.taie.language.type.ClassType;
-import pascal.taie.language.type.Type;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.TwoKeyMap;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * Lazy reflection members (option {@code reflection-members-lazy: N},
@@ -57,8 +54,12 @@ import java.util.List;
  * from. A placeholder and a concrete member object (or two placeholders)
  * holding the same member are different heap objects, so with lazy members
  * all member objects of one kind share their instance fields
- * ({@link #unifiedBase}): a superset of the eager field contents, so no
- * flow is lost.
+ * ({@link MemberFieldUnification}): a superset of the eager field contents,
+ * so no flow is lost.
+ * <p>
+ * With {@code -Dpx.lazymembers.verify=true}, {@link #verify} checks every
+ * placeholder and its consumers at the end of the analysis
+ * ({@link LazyMembersVerifier}).
  */
 public final class LazyMembers {
 
@@ -67,43 +68,29 @@ public final class LazyMembers {
      */
     static final Descriptor LAZY_DESC = () -> "LazyReflectionMetaObj";
 
-    /**
-     * Descriptor of the objects whose instance fields stand for those of all
-     * member objects of one kind.
-     */
-    private static final Descriptor MEMBER_FIELDS_DESC = () -> "ReflectionMemberFields";
-
     private final int threshold;
 
     private final HeapModel heapModel;
 
-    private final CSManager csManager;
-
-    private final Context emptyContext;
-
-    private final MetaObjHelper helper;
-
     private final TwoKeyMap<Invoke, Context, MemberSummary> summaries = Maps.newTwoKeyMap();
 
-    private @Nullable CSObj methodFields;
-
-    private @Nullable CSObj constructorFields;
-
-    private @Nullable CSObj fieldFields;
+    private final @Nullable LazyMembersVerifier verifier;
 
     /**
-     * @param threshold the number of receiver classes a call site takes
-     *                  eagerly in one call context, at least 0
+     * @param threshold      the number of receiver classes a call site takes
+     *                       eagerly in one call context, at least 0
+     * @param invokesWithLog the calls resolved by the reflection log, whose
+     *                       consumers take no inferred member object
      */
-    LazyMembers(Solver solver, MetaObjHelper helper, int threshold) {
+    LazyMembers(Solver solver, int threshold, Set<Invoke> invokesWithLog) {
         if (threshold < 0) {
             throw new IllegalArgumentException("lazy member threshold " + threshold);
         }
         this.threshold = threshold;
         this.heapModel = solver.getHeapModel();
-        this.csManager = solver.getCSManager();
-        this.emptyContext = solver.getContextSelector().getEmptyContext();
-        this.helper = helper;
+        this.verifier = LazyMembersVerifier.isEnabled()
+                ? new LazyMembersVerifier(solver, invokesWithLog)
+                : null;
     }
 
     /**
@@ -115,46 +102,22 @@ public final class LazyMembers {
         MemberSummary summary = summaries.get(invoke, context);
         if (summary == null) {
             summary = new MemberSummary(invoke, context, source, named, threshold,
-                    s -> heapModel.getMockObj(LAZY_DESC, s, type));
+                    s -> heapModel.getMockObj(LAZY_DESC, s, type), verifier);
             summaries.put(invoke, context, summary);
         }
         return summary;
     }
 
     /**
-     * The base whose instance fields stand for those of {@code base}: for a
-     * member object (concrete or placeholder) one object per member kind,
-     * for any other object {@code base} itself.
+     * Runs the in-run check when it is enabled.
+     *
+     * @throws IllegalStateException if a placeholder or a consumer missed a
+     *                               member
      */
-    CSObj unifiedBase(CSObj base) {
-        Obj obj = base.getObject();
-        if (!(obj instanceof MockObj mock)
-                || !(mock.getDescriptor().equals(LAZY_DESC) || helper.isInferredMemberObj(obj))) {
-            return base;
+    void verify() {
+        if (verifier != null) {
+            verifier.verify(summaries.values());
         }
-        Type type = obj.getType();
-        if (type.equals(helper.method)) {
-            if (methodFields == null) {
-                methodFields = memberFields(helper.method);
-            }
-            return methodFields;
-        } else if (type.equals(helper.constructor)) {
-            if (constructorFields == null) {
-                constructorFields = memberFields(helper.constructor);
-            }
-            return constructorFields;
-        } else if (type.equals(helper.field)) {
-            if (fieldFields == null) {
-                fieldFields = memberFields(helper.field);
-            }
-            return fieldFields;
-        }
-        throw new IllegalStateException("member object of type " + type + ": " + obj);
-    }
-
-    private CSObj memberFields(ClassType type) {
-        return csManager.getCSObj(emptyContext,
-                heapModel.getMockObj(MEMBER_FIELDS_DESC, type, type));
     }
 
     /**

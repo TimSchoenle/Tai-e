@@ -424,7 +424,7 @@ public class StringBasedModel extends InferenceModel {
         if (invokesWithLog.contains(invoke)) {
             return;
         }
-        methodObjs.forEach(methodObj -> MemberObjs.forEachMember(methodObj, member -> {
+        methodObjs.forEach(methodObj -> MemberObjs.forEachMember(context, invoke, methodObj, member -> {
             if (member instanceof JMethod jMethod && !jMethod.isConstructor()) {
                 classForNameKnown(context, invoke, jMethod.getDeclaringClass().getName());
             }

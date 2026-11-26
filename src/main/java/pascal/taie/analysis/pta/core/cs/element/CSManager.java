@@ -77,6 +77,12 @@ public interface CSManager {
      * one base share their instance fields (px/s115-P52, the member objects
      * of lazy reflection members). Set at most once, before the solver
      * creates any instance field.
+     * <p>
+     * Only {@link MapBasedCSManager} implements it: it is the one manager in
+     * Tai-e, the one {@code PointerAnalysis} gives its solver. Another
+     * manager handed to the public {@code DefaultSolver} constructor keeps
+     * this default, so a run that needs the unification fails when it starts
+     * instead of running without it, which would lose field flow.
      *
      * @throws UnsupportedOperationException if this manager cannot unify
      */

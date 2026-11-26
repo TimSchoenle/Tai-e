@@ -22,7 +22,10 @@
 
 package pascal.taie.analysis.pta;
 
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import pascal.taie.Main;
@@ -39,6 +42,9 @@ import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.language.classes.ClassMember;
 import pascal.taie.language.classes.JMethod;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -77,20 +83,119 @@ public class LazyMembersEquivalenceTest {
     /** Descriptor text of the concrete member objects of reflection inference. */
     private static final String MEMBER_DESC = "ReflectionMetaObj";
 
+    /** Descriptor text of the objects that hold the unified member fields. */
+    private static final String MEMBER_FIELDS_DESC = "ReflectionMemberFields";
+
+    private static final String UNIFY = "reflection-members-unify:true";
+
+    private static final String VERIFY = "px.lazymembers.verify";
+
+    /** Every lazy run of this class ends with the in-run check. */
+    @BeforeAll
+    static void enableTheInRunCheck() {
+        System.setProperty(VERIFY, "true");
+    }
+
+    @AfterAll
+    static void disableTheInRunCheck() {
+        System.clearProperty(VERIFY);
+    }
+
     @ParameterizedTest
     @CsvSource({
             "reflsound, TypeMatch, 0", "reflsound, ArgTypes, 0",
             "reflsound, GetMethodIface, 0", "reflsound, MemberArrays, 0",
             "reflsound, ClassInit, 0", "reflsound, LazyGrowth, 0",
             "reflsound, LazyGrowth, 1", "reflsound, MemberArrays, 1",
+            "reflsound, LazyNamed, 0", "reflsound, LazyNamed, 1",
     })
     void reflectionSoundnessFixtures(String dir, String main, int threshold) {
         Comparison comparison = compare(dir, main, threshold);
         // at N=1 a call site with one receiver class keeps it eager
-        if (threshold == 0 || main.equals("LazyGrowth")) {
+        if (threshold == 0 || main.startsWith("Lazy")) {
             assertTrue(comparison.lazy().placeholders() > 0,
                     main + " holds no placeholder at N=" + threshold);
         }
+    }
+
+    /**
+     * Context-sensitive runs at N=1: the eager classes and the placeholder
+     * are per call context.
+     */
+    @ParameterizedTest
+    @CsvSource({"LazyNamed", "LazyGrowth"})
+    void contextSensitiveAtThresholdOne(String main) {
+        Comparison comparison = compare("reflsound", main, 1, "cs:1-call");
+        assertTrue(comparison.lazy().placeholders() > 0);
+    }
+
+    /**
+     * Two runs give the same raw output: every points-to set in its own
+     * order (the order in which the objects were made), placeholder texts
+     * included, so neither the objects' order nor the split of each call
+     * site's classes into eager and lazy depends on identity hashes. The
+     * lines are sorted, as the order of the call graph's edges and of the
+     * pointers is a hash order of the solver's maps with the option off too.
+     */
+    @Test
+    void lazyRunsAreDeterministic() {
+        List<String> first = rawOutput("LazyNamed");
+        List<String> second = rawOutput("LazyNamed");
+        assertTrue(first.stream().anyMatch(line -> line.contains("LazyMembers{")),
+                "no placeholder in the raw output");
+        assertEquals(first, second);
+    }
+
+    /**
+     * The in-run check runs at the end of every lazy run of this class; here
+     * it is seen to check placeholders, subscriptions and consumer sites.
+     */
+    @Test
+    void verifierChecksThePlaceholdersAndTheirConsumers() {
+        PrintStream original = System.err;
+        ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        System.setErr(new PrintStream(captured, true, StandardCharsets.UTF_8));
+        try {
+            run("reflsound", "LazyGrowth", LAZY + 0);
+        } finally {
+            System.setErr(original);
+        }
+        String report = captured.toString(StandardCharsets.UTF_8).lines()
+                .filter(line -> line.startsWith("[refl] lazy members verified"))
+                .findFirst().orElseThrow(() -> new AssertionError("the check did not run"));
+        assertTrue(!report.contains("placeholders=0") && !report.contains("subscriptions=0")
+                && !report.contains("consumer_receivers=0"), report);
+    }
+
+    /**
+     * Option reflection-members-unify turns the member-field unification on
+     * with lazy members off: the instance fields of member objects then hang
+     * on the shared objects, and on these fixtures the call graph is that of
+     * the plain eager run.
+     */
+    @ParameterizedTest
+    @CsvSource({"LazyFields", "LazyGrowth", "LazyNamed"})
+    void unificationAlone(String main) {
+        String[] opts = main.equals("LazyFields")
+                ? new String[]{"plugins:[" + LazyFieldsPlugin.class.getName() + "]"}
+                : new String[0];
+        Snapshot eager = run("reflsound", main, OFF, opts);
+        assertTrue(!unifiedFieldsSeen(), main + ": unified fields without the option");
+        List<String> unifyOpts = new ArrayList<>(List.of(opts));
+        unifyOpts.add(UNIFY);
+        Snapshot unified = run("reflsound", main, OFF, unifyOpts.toArray(new String[0]));
+        if (main.equals("LazyFields")) {
+            assertTrue(unifiedFieldsSeen(), main + ": no unified field with the option");
+        }
+        assertEquals(0, unified.placeholders());
+        assertEquals(eager.edges(), unified.edges(), main + ": call edges");
+        assertEquals(eager.reached(), unified.reached(), main + ": reachable methods");
+    }
+
+    @Test
+    void thresholdBelowMinusOneIsRefused() {
+        assertRefused(() -> Tests.testPTA(false, "reflsound", "TypeMatch", MEMBERS, LAZY + -2),
+                "reflection-members-lazy must be -1 or at least 0");
     }
 
     /**
@@ -129,12 +234,48 @@ public class LazyMembersEquivalenceTest {
 
     @Test
     void lazyMembersNeedTheMembersOption() {
-        Throwable thrown = assertThrows(Throwable.class,
-                () -> Tests.testPTA(false, "reflsound", "TypeMatch", LAZY + 0));
+        assertRefused(() -> Tests.testPTA(false, "reflsound", "TypeMatch", LAZY + 0),
+                "reflection-members-lazy needs");
+    }
+
+    private static void assertRefused(Executable run, String message) {
+        Throwable thrown = assertThrows(Throwable.class, run);
         assertTrue(Stream.iterate(thrown, t -> t != null, Throwable::getCause)
-                        .anyMatch(t -> String.valueOf(t.getMessage())
-                                .contains("reflection-members-lazy needs")),
+                        .anyMatch(t -> String.valueOf(t.getMessage()).contains(message)),
                 thrown::toString);
+    }
+
+    /**
+     * @return whether an instance field of the last run hangs on an object
+     * standing for the fields of all member objects of one kind
+     */
+    private static boolean unifiedFieldsSeen() {
+        PointerAnalysisResult pta = World.get().getResult(PointerAnalysis.ID);
+        return pta.getInstanceFields().stream()
+                .map(field -> field.getBase().getObject())
+                .anyMatch(obj -> obj instanceof MockObj mock
+                        && mock.getDescriptor().string().equals(MEMBER_FIELDS_DESC));
+    }
+
+    /**
+     * Runs {@code main} at N=0 and lists the call edges and the points-to
+     * sets, each set in its own order, the lines sorted.
+     */
+    private static List<String> rawOutput(String main) {
+        Tests.testPTA(false, "reflsound", main, MEMBERS, LAZY + 0);
+        PointerAnalysisResult pta = World.get().getResult(PointerAnalysis.ID);
+        List<String> lines = new ArrayList<>();
+        pta.getCallGraph().edges().forEach(e -> lines.add(e.getKind() + " "
+                + e.getCallSite().getContainer() + "[" + e.getCallSite().getIndex() + "] -> "
+                + e.getCallee()));
+        for (Var var : pta.getVars()) {
+            lines.add(var.getMethod() + "/" + var.getName() + " = " + pta.getPointsToSet(var));
+        }
+        pta.getCSVars().forEach(csVar -> lines.add(csVar + " = " + csVar.getObjects()));
+        pta.getInstanceFields().forEach(field -> lines.add(field + " = " + field.getObjects()));
+        pta.getArrayIndexes().forEach(index -> lines.add(index + " = " + index.getObjects()));
+        lines.sort(null);
+        return lines;
     }
 
     private record Comparison(Snapshot off, Snapshot lazy) {

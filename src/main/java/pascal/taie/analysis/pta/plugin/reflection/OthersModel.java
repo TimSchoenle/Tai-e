@@ -142,7 +142,7 @@ public class OthersModel extends AnalysisModelPlugin {
     public void getParameterAnnotations(Context context, Invoke invoke, PointsToSet mtdObjs) {
         Var result = invoke.getResult();
         if (result != null) {
-            mtdObjs.forEach(mtdObj -> MemberObjs.forEachMember(mtdObj, member -> {
+            mtdObjs.forEach(mtdObj -> MemberObjs.forEachMember(context, invoke, mtdObj, member -> {
                 if (member instanceof JMethod method && !method.isConstructor()) {
                     List<Annotation> paramAnnos = new ArrayList<>();
                     for (int i = 0; i < method.getParamCount(); ++i) {

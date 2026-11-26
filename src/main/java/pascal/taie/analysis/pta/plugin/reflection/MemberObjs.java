@@ -22,7 +22,9 @@
 
 package pascal.taie.analysis.pta.plugin.reflection;
 
+import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
+import pascal.taie.ir.stmt.Invoke;
 import pascal.taie.language.classes.ClassMember;
 
 import java.util.function.Consumer;
@@ -43,14 +45,17 @@ public final class MemberObjs {
      * a concrete member object its member, now; for a placeholder its
      * members so far, now, and every later member when it is added. Any
      * other object stands for no member. A consumer calls this once per
-     * (consumer call site, object), as it takes each object once.
+     * (consumer call site, context, object), as it takes each object once;
+     * {@code consumer} and {@code context} name that call site for the
+     * in-run check ({@link LazyMembersVerifier}).
      */
-    public static void forEachMember(CSObj obj, Consumer<? super ClassMember> action) {
+    public static void forEachMember(Context context, Invoke consumer, CSObj obj,
+                                     Consumer<? super ClassMember> action) {
         Object alloc = obj.getObject().getAllocation();
         if (alloc instanceof ClassMember member) {
             action.accept(member);
         } else if (alloc instanceof MemberSummary summary) {
-            summary.subscribe(action);
+            summary.subscribe(context, consumer, action);
         }
     }
 }

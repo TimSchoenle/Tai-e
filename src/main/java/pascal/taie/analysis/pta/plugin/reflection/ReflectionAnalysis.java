@@ -57,6 +57,12 @@ public class ReflectionAnalysis extends CompositePlugin {
     private ReflectiveActionModel reflectiveActionModel;
 
     /**
+     * The lazy members (option {@code reflection-members-lazy}), or
+     * {@code null} when every member object is concrete.
+     */
+    private @Nullable LazyMembers lazyMembers;
+
+    /**
      * @return short name of reflection API in given {@link Invoke}.
      */
     public static String getShortName(Invoke invoke) {
@@ -74,7 +80,14 @@ public class ReflectionAnalysis extends CompositePlugin {
         logBasedModel = new LogBasedModel(solver, helper, logPath);
         Set<Invoke> invokesWithLog = logBasedModel.getInvokesWithLog();
         String reflection = solver.getOptions().getString("reflection-inference");
-        LazyMembers lazyMembers = lazyMembers(solver, helper, reflection);
+        int lazyThreshold = lazyThreshold(solver.getOptions().getInt("reflection-members-lazy"),
+                reflection, solver.getOptions().getBoolean("reflection-members"),
+                isAndroidMode());
+        if (lazyThreshold >= 0 || solver.getOptions().getBoolean("reflection-members-unify")) {
+            MemberFieldUnification.install(solver, helper);
+        }
+        lazyMembers = lazyThreshold < 0 ? null
+                : new LazyMembers(solver, lazyThreshold, invokesWithLog);
         if ("string-constant".equals(reflection)) {
             inferenceModel = new StringBasedModel(solver, helper, invokesWithLog, lazyMembers);
         } else if ("solar".equals(reflection)) {
@@ -106,34 +119,37 @@ public class ReflectionAnalysis extends CompositePlugin {
      * makes every member object concrete; N >= 0 makes each member-retrieving
      * call site take its receiver classes after the first N in each call
      * context into one placeholder ({@link LazyMembers}), and makes all
-     * member objects of one kind share their instance fields. It needs
-     * string-constant inference with {@code reflection-members} and is
-     * refused in Android mode, whose imprecise-target cut-off counts targets
-     * in their order of arrival.
+     * member objects of one kind share their instance fields
+     * ({@link MemberFieldUnification}). It needs string-constant inference
+     * with {@code reflection-members} and is refused in Android mode, whose
+     * imprecise-target cut-off counts targets in their order of arrival.
+     * Option {@code reflection-members-unify: true} turns the field
+     * unification on with the option off too, to measure it alone.
      *
-     * @return the lazy members, or {@code null} when the option is off
+     * @param threshold   the value of the option
+     * @param reflection  the value of {@code reflection-inference}
+     * @param members     the value of {@code reflection-members}
+     * @param androidMode whether the analysis runs in Android mode
+     * @return {@code threshold}: -1 when the option is off
+     * @throws ConfigException if the option is out of range or refused
      */
-    private static @Nullable LazyMembers lazyMembers(
-            Solver solver, MetaObjHelper helper, @Nullable String reflection) {
-        int threshold = solver.getOptions().getInt("reflection-members-lazy");
+    static int lazyThreshold(int threshold, @Nullable String reflection,
+                             boolean members, boolean androidMode) {
         if (threshold == -1) {
-            return null;
+            return threshold;
         }
         if (threshold < -1) {
             throw new ConfigException("reflection-members-lazy must be -1 or at least 0, given "
                     + threshold);
         }
-        if (!"string-constant".equals(reflection)
-                || !solver.getOptions().getBoolean("reflection-members")) {
+        if (!"string-constant".equals(reflection) || !members) {
             throw new ConfigException("reflection-members-lazy needs"
                     + " reflection-inference:string-constant and reflection-members:true");
         }
-        if (isAndroidMode()) {
+        if (androidMode) {
             throw new ConfigException("reflection-members-lazy is refused in Android mode");
         }
-        LazyMembers lazyMembers = new LazyMembers(solver, helper, threshold);
-        solver.getCSManager().unifyInstanceFieldBases(lazyMembers::unifiedBase);
-        return lazyMembers;
+        return threshold;
     }
 
     @Override
@@ -153,6 +169,9 @@ public class ReflectionAnalysis extends CompositePlugin {
     @Override
     public void onFinish() {
         super.onFinish();
+        if (lazyMembers != null) {
+            lazyMembers.verify();
+        }
         reportImpreciseCalls();
     }
 

@@ -54,9 +54,12 @@ import java.util.stream.Stream;
  * consumers only through their listeners.
  * <p>
  * Equality is identity: {@link LazyMembers} makes one summary per
- * (call site, call context). The hash code is that of the call site and
- * the context, so hash orders do not depend on identity hashes more than
- * the call site's own.
+ * (call site, call context). The hash code is computed from texts (the
+ * signature of the call site's container, its index and the context's text),
+ * not from the identity hashes of the call site and the context, so a hash
+ * order over summaries is the same in every run as far as the context's text
+ * is. The placeholder object's own hash still includes the identity hash of
+ * its descriptor, as every mock object's does.
  */
 final class MemberSummary {
 
@@ -105,18 +108,29 @@ final class MemberSummary {
      */
     private final Function<MemberSummary, Obj> objMaker;
 
+    /**
+     * The in-run check that records every subscription, or {@code null}.
+     */
+    private final @Nullable LazyMembersVerifier verifier;
+
+    private final int hashCode;
+
     private @Nullable Obj obj;
 
     private boolean published;
 
     MemberSummary(Invoke invoke, Context context, Source source,
-                  boolean named, int threshold, Function<MemberSummary, Obj> objMaker) {
+                  boolean named, int threshold, Function<MemberSummary, Obj> objMaker,
+                  @Nullable LazyMembersVerifier verifier) {
         this.invoke = invoke;
         this.context = context;
         this.source = source;
         this.named = named;
         this.threshold = threshold;
         this.objMaker = objMaker;
+        this.verifier = verifier;
+        this.hashCode = 31 * (31 * invoke.getContainer().getSignature().hashCode()
+                + invoke.getIndex()) + context.toString().hashCode();
     }
 
     /**
@@ -198,8 +212,17 @@ final class MemberSummary {
     /**
      * Hands every member delivered so far to {@code listener}, and every
      * later member when it is delivered.
+     *
+     * @param context  the context of the consumer call site
+     * @param consumer the consumer call site
      */
-    void subscribe(Consumer<? super ClassMember> listener) {
+    void subscribe(Context context, Invoke consumer, Consumer<? super ClassMember> listener) {
+        Consumer<? super ClassMember> registered = verifier == null ? listener
+                : verifier.track(this, context, consumer, listener);
+        subscribe(registered);
+    }
+
+    private void subscribe(Consumer<? super ClassMember> listener) {
         int count = delivered.size();
         listeners.add(listener);
         for (int i = 0; i < count; ++i) {
@@ -229,9 +252,57 @@ final class MemberSummary {
         return Collections.unmodifiableList(delivered);
     }
 
+    Invoke invoke() {
+        return invoke;
+    }
+
+    Context context() {
+        return context;
+    }
+
+    Source source() {
+        return source;
+    }
+
+    boolean isNamed() {
+        return named;
+    }
+
+    int threshold() {
+        return threshold;
+    }
+
+    /**
+     * @return the receiver classes taken eagerly (a view)
+     */
+    Set<JClass> eagerClasses() {
+        return Collections.unmodifiableSet(eagerClasses);
+    }
+
+    /**
+     * @return the receiver classes taken lazily (a view)
+     */
+    Set<JClass> classes() {
+        return Collections.unmodifiableSet(classes);
+    }
+
+    /**
+     * @return the names taken (a view)
+     */
+    Set<String> names() {
+        return Collections.unmodifiableSet(names);
+    }
+
+    /**
+     * @return whether the placeholder was handed out
+     */
+    boolean isPublished() {
+        return published;
+    }
+
     @Override
     public int hashCode() {
-        return 31 * invoke.hashCode() + context.hashCode();
+        return hashCode;
     }
 
     @Override
