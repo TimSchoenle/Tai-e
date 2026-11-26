@@ -50,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -89,8 +90,8 @@ import java.util.Set;
  * would be dispatched to that default method, which the run time never runs.
  * Otherwise the functional interface types it exactly.
  * <p>
- * An added interface missing from the analysed classes (phantom) is left out
- * of the class. A call whose static arguments are not of the documented
+ * An added interface missing from the analysed classes (phantom) is kept,
+ * after the other interfaces. A call whose static arguments are not of the documented
  * kinds, whose functional interface is missing or not an interface, or whose
  * added class is not an interface (its linkage fails at run time) keeps the
  * return type of the invokedynamic as the type of its lambda object.
@@ -235,15 +236,20 @@ final class LambdaClasses {
                                           List<MethodType> methods) {
         for (MethodType m : methods) {
             if (declaresDefault(functional, Subsignature.get(
-                    name, m.getParamTypes(), m.getReturnType()))) {
+                    name, m.getParamTypes(), m.getReturnType()), new HashSet<>())) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean declaresDefault(JClass iface, Subsignature subsignature) {
-        if (iface.isPhantom()) {
+    /**
+     * @param visited the interfaces already looked at, so that a diamond of
+     *                superinterfaces is walked once, not once per path
+     */
+    private static boolean declaresDefault(JClass iface, Subsignature subsignature,
+                                           Set<JClass> visited) {
+        if (iface.isPhantom() || !visited.add(iface)) {
             return false;
         }
         JMethod method = iface.getDeclaredMethod(subsignature);
@@ -251,7 +257,7 @@ final class LambdaClasses {
             return true;
         }
         for (JClass sup : iface.getInterfaces()) {
-            if (declaresDefault(sup, subsignature)) {
+            if (declaresDefault(sup, subsignature, visited)) {
                 return true;
             }
         }
@@ -260,8 +266,11 @@ final class LambdaClasses {
 
     /**
      * Adds the interfaces and bridges of the flags of an altMetafactory call.
-     * An added interface missing from the analysed classes (phantom) is left
-     * out: a filter of it drops the lambda object as any other object.
+     * An added interface missing from the analysed classes (phantom) is
+     * kept, as a class that implements a phantom interface keeps it, so a
+     * filter of it treats the lambda object as such an object; it comes
+     * after every other interface, since a phantom interface answers any
+     * method lookup and would hide a default method of a later one.
      *
      * @return false if the static arguments are not of the documented kinds
      * or an added class is not an interface (the call cannot link).
@@ -273,8 +282,10 @@ final class LambdaClasses {
             return false;
         }
         int flags = flagsLiteral.getValue();
+        Set<ClassType> phantoms = new LinkedHashSet<>();
         if ((flags & LambdaMetafactory.FLAG_SERIALIZABLE) != 0
-                && !addInterface(interfaces, typeSystem.getClassType(ClassNames.SERIALIZABLE))) {
+                && !addInterface(interfaces, phantoms,
+                typeSystem.getClassType(ClassNames.SERIALIZABLE))) {
             return false;
         }
         int next = FLAGS_INDEX + 1;
@@ -286,7 +297,7 @@ final class LambdaClasses {
             for (int i = next + 1; i <= next + count; ++i) {
                 if (!(args.get(i) instanceof ClassLiteral marker
                         && marker.getTypeValue() instanceof ClassType markerType)
-                        || !addInterface(interfaces, markerType)) {
+                        || !addInterface(interfaces, phantoms, markerType)) {
                     return false;
                 }
             }
@@ -304,18 +315,24 @@ final class LambdaClasses {
                 methods.add(bridge);
             }
         }
+        interfaces.addAll(phantoms);
         return true;
     }
 
     /**
-     * Adds {@code type} to {@code interfaces} unless its class is missing
-     * from the analysed classes.
+     * Adds {@code type} to {@code interfaces}, or to {@code phantoms} if its
+     * class is phantom; a type without a class is left out.
      *
      * @return false if its class is present and not an interface.
      */
-    private static boolean addInterface(Set<ClassType> interfaces, ClassType type) {
+    private static boolean addInterface(Set<ClassType> interfaces, Set<ClassType> phantoms,
+                                        ClassType type) {
         JClass jclass = type.getJClass();
-        if (jclass == null || jclass.isPhantom()) {
+        if (jclass == null) {
+            return true;
+        }
+        if (jclass.isPhantom()) {
+            phantoms.add(type);
             return true;
         }
         if (!jclass.isInterface()) {

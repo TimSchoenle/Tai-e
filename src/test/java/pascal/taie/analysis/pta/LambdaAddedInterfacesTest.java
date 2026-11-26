@@ -153,6 +153,52 @@ public class LambdaAddedInterfacesTest {
         });
     }
 
+    /**
+     * Fixture {@code pta/lambdaphantom/LambdaPhantomMarker.class}, compiled
+     * with {@code javac --release 17} from the source below, then
+     * {@code PhantomMarker.class} deleted, so the marker altMetafactory adds
+     * is phantom. The class of the lambda object keeps the phantom marker
+     * among its interfaces, as a class implementing a phantom interface
+     * does, after the functional interface. (The cast to the marker still
+     * filters both out: the hierarchy walks only the subclasses of a phantom
+     * class, which it does not know to be an interface; that gap is the
+     * hierarchy's, not the lambda's.)
+     * <pre>{@code
+     * public class LambdaPhantomMarker {
+     *     public static void main(String[] args) {
+     *         Object o = (Runnable & PhantomMarker) () -> body();
+     *         PhantomMarker marker = (PhantomMarker) o;
+     *         Runnable r = (Runnable) marker;
+     *         r.run();
+     *     }
+     *     static void body() {
+     *     }
+     * }
+     * interface PhantomMarker {
+     * }
+     * }</pre>
+     */
+    @Test
+    void phantomMarkerIsKeptAmongTheInterfaces() {
+        Main.main("-cp", "src/test/resources/pta/lambdaphantom", "-m", "LambdaPhantomMarker",
+                "-a", "pta=cs:ci;handle-invokedynamic:true;");
+        PointerAnalysisResult result = World.get().getResult(PointerAnalysis.ID);
+        ClassHierarchy hierarchy = World.get().getClassHierarchy();
+        JClass marker = hierarchy.getClass("PhantomMarker");
+        JClass runnable = hierarchy.getClass("java.lang.Runnable");
+        assertNotNull(marker);
+        assertNotNull(runnable);
+        assertTrue(marker.isPhantom());
+        List<Obj> lambdas = result.getObjects().stream()
+                .filter(LambdaAnalysis::isLambdaObj)
+                .filter(o -> o.getContainerMethod()
+                        .map(m -> m.getDeclaringClass().getName().equals("LambdaPhantomMarker"))
+                        .orElse(false))
+                .toList();
+        assertEquals(1, lambdas.size());
+        assertEquals(List.of(runnable, marker), List.copyOf(jclassOf(lambdas.get(0)).getInterfaces()));
+    }
+
     private static JClass jclassOf(Obj o) {
         return ((ClassType) o.getType()).getJClass();
     }

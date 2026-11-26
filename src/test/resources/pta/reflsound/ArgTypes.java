@@ -28,6 +28,7 @@ public class ArgTypes {
         anonymousOverload();
         markerLambda();
         serializableLambda();
+        serializableMethodRef();
         lambdaFromParam(() -> "p");
         nullReference();
         stackOverload(new AtStack());
@@ -83,6 +84,23 @@ public class ArgTypes {
         AtPriv.class.getMethod("mark", AtMarker.class).invoke(null, action);
         PTAAssert.callsExact(INVOKE, "<AtPriv: void mark(AtMarker)>",
                 "<AtPriv: void mark(java.io.Serializable)>");
+    }
+
+    /**
+     * A serializable method reference also comes from altMetafactory. The
+     * argument filter reads the bootstrap method, not the class of the
+     * lambda object (a synthetic class of the added interfaces): the
+     * Serializable and marker overloads stay, the class one is dropped.
+     */
+    static void serializableMethodRef() throws Exception {
+        AtSerAction action = ArgTypes::serValue;
+        AtPriv.class.getMethod("mark", Serializable.class).invoke(null, action);
+        PTAAssert.callsExact(INVOKE, "<AtPriv: void mark(AtMarker)>",
+                "<AtPriv: void mark(java.io.Serializable)>");
+    }
+
+    static Object serValue() {
+        return "r";
     }
 
     /** A parameter may be null: every reference overload stays. */
