@@ -58,6 +58,8 @@ public class LambdaReceiver {
 
     static Runnable cycleB;
 
+    static Runnable lateField;
+
     public static void main(String[] args) {
         bound();
         unbound();
@@ -67,6 +69,24 @@ public class LambdaReceiver {
         arguments();
         targets();
         cycle();
+        lateArrival();
+    }
+
+    static void lateArrival() {
+        // the lambda reaches the method reference's receiver only after the
+        // call r.run() on the method reference is resolved: fillLate is
+        // reachable only through the trigger lambda's call edge
+        Runnable r = lateField::run;
+        Runnable trigger = () -> fillLate();
+        trigger.run();
+        r.run();
+    }
+
+    static void fillLate() {
+        lateField = () -> lateBody();
+    }
+
+    static void lateBody() {
     }
 
     static void bound() {

@@ -45,7 +45,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * lambda object), nested (a method reference of a method reference, and a
  * lambda calling a method reference), on a lambda object of
  * {@code altMetafactory} with a marker's default method, to static,
- * instance and constructor targets, and along a cycle of the points-to sets.
+ * instance and constructor targets, along a cycle of the points-to sets,
+ * and for a lambda object that reaches the receiver only after the call on
+ * the method reference is resolved.
  */
 public class LambdaReceiverTest {
 
@@ -55,7 +57,8 @@ public class LambdaReceiverTest {
             "boundBody", "unboundBody", "nestedBody", "lambdaOfRefBody",
             "markBody", "markerSamBody",
             "boundArgSink", "boundReturnSink", "unboundArgSink", "unboundReturnSink",
-            "staticBody", "holderBody", "ctorBody", "cycleBody");
+            "staticBody", "holderBody", "ctorBody", "cycleBody",
+            "lateBody");
 
     private static Set<String> reachedNames(String cs) {
         Main.main("-cp", "src/test/resources/pta/lambda", "-m", MAIN,
