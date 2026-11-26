@@ -22,6 +22,59 @@ public class TypeMatch {
         nullArgs();
         paramArgs(new Object[0]);
         twoBranchArgs(args.length);
+        unrelatedCast();
+        objectParameter("text");
+        objectField();
+        interfaceArgument("text");
+        unrelatedClassArgument(new TmOtherTask());
+        numberToPrimitive(Integer.valueOf(2));
+        constructorObjectArgument();
+    }
+
+    /** The target runs before the cast fails: a cast unrelated to its return type keeps it. */
+    static Integer unrelatedCast() throws Exception {
+        Integer i = (Integer) TmTarget.class.getMethod("label").invoke(new TmTarget());
+        PTAAssert.calls("<TmTarget: java.lang.String label()>");
+        return i;
+    }
+
+    /** A parameter typed Object may hold a String. */
+    static void objectParameter(Object value) throws Exception {
+        TmTarget.class.getMethod("take", String.class).invoke(new TmTarget(), value);
+        PTAAssert.calls("<TmTarget: void take(java.lang.String)>");
+    }
+
+    static Object objectValue = "text";
+
+    /** A field typed Object may hold a String. */
+    static void objectField() throws Exception {
+        TmTarget.class.getMethod("take", String.class).invoke(new TmTarget(), objectValue);
+        PTAAssert.calls("<TmTarget: void take(java.lang.String)>");
+    }
+
+    /** A value typed by an interface the parameter class implements may be of that class. */
+    static void interfaceArgument(CharSequence value) throws Exception {
+        TmTarget.class.getMethod("take", String.class).invoke(new TmTarget(), value);
+        PTAAssert.calls("<TmTarget: void take(java.lang.String)>");
+    }
+
+    /** A subclass of the declared class may implement the parameter's interface. */
+    static void unrelatedClassArgument(TmOther value) throws Exception {
+        TmTarget.class.getMethod("run", Runnable.class).invoke(new TmTarget(), value);
+        PTAAssert.calls("<TmTarget: void run(java.lang.Runnable)>");
+    }
+
+    /** A value typed Number may be a box that invoke unboxes and widens. */
+    static void numberToPrimitive(Number value) throws Exception {
+        TmTarget.class.getMethod("takeLong", long.class).invoke(new TmTarget(), value);
+        PTAAssert.calls("<TmTarget: void takeLong(long)>");
+    }
+
+    /** Constructor.newInstance admits a wider argument the same way. */
+    static Object constructorObjectArgument() throws Exception {
+        Object named = TmNamed.class.getConstructor(String.class).newInstance(text());
+        PTAAssert.calls("<TmNamed: void <init>(java.lang.String)>");
+        return named;
     }
 
     static String castResult() throws Exception {
@@ -120,5 +173,28 @@ class TmTarget {
     }
 
     public void pair(Object first, Object second) {
+    }
+
+    public String label() {
+        return "label";
+    }
+
+    public void run(Runnable task) {
+    }
+}
+
+class TmOther {
+}
+
+class TmOtherTask extends TmOther implements Runnable {
+
+    @Override
+    public void run() {
+    }
+}
+
+class TmNamed {
+
+    public TmNamed(String name) {
     }
 }
