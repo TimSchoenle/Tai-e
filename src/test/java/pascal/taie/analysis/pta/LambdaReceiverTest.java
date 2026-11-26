@@ -79,10 +79,11 @@ public class LambdaReceiverTest {
      * Context insensitive only: the fixture's analysis covers the whole JDK,
      * and more context-sensitive runs exhaust the shared 2 GB test fork of
      * the full suite. The timeout fails a cycle of method references that
-     * does not reach its fixed point instead of hanging the fork.
+     * does not reach its fixed point instead of hanging the fork: the test
+     * runs in a separate thread, as the solver does not check interrupts.
      */
     @Test
-    @Timeout(600)
+    @Timeout(value = 600, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void methodReferencesOnLambdaObjectsReachTheirBodies() {
         Set<String> reached = reachedNames("ci");
         List<String> unreached = REACHED.stream()

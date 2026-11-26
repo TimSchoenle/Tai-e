@@ -383,12 +383,28 @@ public class LambdaAnalysis implements Plugin {
         if (!CSObjs.hasDescriptor(recv, LAMBDA_DESC)) {
             return;
         }
-        if (counters != null) {
-            counters.startEvent();
+        boolean completed = false;
+        try {
+            callLambda(recv, csManager.getCSCallSite(context, invoke),
+                    invoke.getMethodRef().getName(), null);
+            completed = true;
+        } finally {
+            finishEvent(completed);
         }
-        callLambda(recv, csManager.getCSCallSite(context, invoke),
-                invoke.getMethodRef().getName(), null);
-        drainLambdaReceiverCalls();
+    }
+
+    /**
+     * Ends a plugin event that may have queued lambda receiver calls
+     * ({@link #queueLambdaReceiverCalls}): makes them if the event
+     * {@code completed}, otherwise drops them, so that no queued call
+     * outlives the event that queued it.
+     */
+    private void finishEvent(boolean completed) {
+        if (completed) {
+            drainLambdaReceiverCalls();
+        } else {
+            lambdaReceiverCalls.clear();
+        }
     }
 
     /**
@@ -415,8 +431,16 @@ public class LambdaAnalysis implements Plugin {
         }
         LambdaSource source;
         if (samArgs == null) {
+            // a call site's own call is one event; a call through a method
+            // reference belongs to the event that queued it
+            if (counters != null) {
+                counters.startEvent();
+            }
             source = lambdaSource(recv, indy);
         } else {
+            if (!hasReceiver(indy, samArgs)) {
+                return;
+            }
             source = chainedSource(recv, indy, samArgs);
             if (!chainedCalls.add(new ChainedCall(csCallSite, source))) {
                 return;
@@ -460,10 +484,8 @@ public class LambdaAnalysis implements Plugin {
                     csRecvVar = csManager.getCSVar(context,
                             invoke.getInvokeExp().getArgs().get(0));
                 } else {
-                    // or the first argument the method reference passes
-                    if (samArgs.isEmpty()) {
-                        return;
-                    }
+                    // or the first argument the method reference passes,
+                    // present by hasReceiver
                     csRecvVar = samArgs.get(0);
                 }
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
@@ -532,8 +554,24 @@ public class LambdaAnalysis implements Plugin {
     private LambdaSource chainedSource(CSObj lambdaObj, InvokeDynamic indy,
                                        List<CSVar> samArgs) {
         LambdaSource base = lambdaSource(lambdaObj, indy);
-        return chainedSources.computeIfAbsent(new ChainKey(base, samArgs),
-                k -> new LambdaSource(indy, base.getContext(), samArgs));
+        // the key keeps its own copy, not a view of a caller's scratch list
+        List<CSVar> args = List.copyOf(samArgs);
+        return chainedSources.computeIfAbsent(new ChainKey(base, args),
+                k -> new LambdaSource(indy, base.getContext(), args));
+    }
+
+    /**
+     * @return whether a call of the lambda objects of {@code indy} with the
+     * arguments {@code samArgs} has the receiver their target method needs:
+     * a static method or constructor needs none, an instance method takes
+     * the first captured variable or, without captures, the first argument.
+     */
+    private static boolean hasReceiver(InvokeDynamic indy, List<CSVar> samArgs) {
+        return switch (getMethodHandle(indy).getKind()) {
+            case REF_invokeInterface, REF_invokeVirtual, REF_invokeSpecial ->
+                    !indy.getArgs().isEmpty() || !samArgs.isEmpty();
+            default -> true;
+        };
     }
 
     /**
@@ -620,7 +658,8 @@ public class LambdaAnalysis implements Plugin {
 
     /**
      * Makes the queued calls of {@link #queueLambdaReceiverCalls}, and the
-     * calls they queue in turn.
+     * calls they queue in turn; if one of them throws, the rest are dropped
+     * with it.
      */
     private void drainLambdaReceiverCalls() {
         if (drainingLambdaReceiverCalls) {
@@ -640,6 +679,7 @@ public class LambdaAnalysis implements Plugin {
             }
         } finally {
             drainingLambdaReceiverCalls = false;
+            lambdaReceiverCalls.clear();
         }
     }
 
@@ -1182,6 +1222,8 @@ public class LambdaAnalysis implements Plugin {
 
         private long inversionChecks;
 
+        private long receiverCallChecks;
+
         private GroupingVerifier(boolean stateChecks) {
             this.stateChecks = stateChecks;
         }
@@ -1295,7 +1337,59 @@ public class LambdaAnalysis implements Plugin {
             checkedFacts += pendingThis.size() + pendingCalls.size();
             pendingThis.clear();
             pendingCalls.clear();
+            if (stateChecks) {
+                checkLambdaReceiverCalls(when);
+            }
             System.out.println("[spd] lambda verify " + when + " OK " + counts());
+        }
+
+        /**
+         * (d) No lambda receiver call is left queued, and every one is
+         * made: per invocation of {@link #invoInfos}, each lambda object of
+         * the receiver variable's points-to set whose type does not dispatch
+         * the target ({@link CalleeGrouper}) and that passes the filters of
+         * {@link #drainLambdaReceiverCalls} and {@link #callLambda} must have
+         * its call in {@link #chainedCalls}.
+         */
+        private void checkLambdaReceiverCalls(String when) {
+            if (!lambdaReceiverCalls.isEmpty()) {
+                throw new AnalysisException("[spd] lambda verify: " + when + ": "
+                        + lambdaReceiverCalls.size() + " lambda receiver calls left queued");
+            }
+            invoInfos.forEach((csRecvVar, infos) -> {
+                PointsToSet pts = solver.getPointsToSetOf(csRecvVar);
+                infos.forEach((csCallSite, outer) -> {
+                    MethodRef targetRef = targetRefOf(outer);
+                    for (CSObj recv : pts) {
+                        checkLambdaReceiverCall(when, recv, csCallSite, outer, targetRef);
+                    }
+                });
+            });
+        }
+
+        private void checkLambdaReceiverCall(String when, CSObj recv, CSCallSite csCallSite,
+                                             LambdaSource outer, MethodRef targetRef) {
+            Type type = recv.getObject().getType();
+            if (!isLambdaObj(recv.getObject()) || hierarchy.dispatch(type, targetRef) != null
+                    || !mayBeLambdaReceiverType(type, targetRef)) {
+                return;
+            }
+            List<CSVar> args = forwardedArgs(csCallSite, outer);
+            InvokeDynamic indy = (InvokeDynamic) ((Invoke) ((MockObj) recv.getObject())
+                    .getAllocation()).getInvokeExp();
+            if (args.size() != targetRef.getParameterTypes().size()
+                    || !indy.getMethodName().equals(targetRef.getName())
+                    || !hasReceiver(indy, args)) {
+                return;
+            }
+            LambdaSource expected = new LambdaSource(indy,
+                    capturedArgsContext(indy, recv.getContext()), args);
+            if (!chainedCalls.contains(new ChainedCall(csCallSite, expected))) {
+                throw new AnalysisException("[spd] lambda verify: " + when
+                        + ": lambda receiver call of " + recv + " at " + csCallSite
+                        + " by " + outer + " missing");
+            }
+            ++receiverCallChecks;
         }
 
         private String counts() {
@@ -1309,7 +1403,8 @@ public class LambdaAnalysis implements Plugin {
                     + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
                     + " checkedFacts=" + checkedFacts + " cachedVars=" + recvByType.size()
                     + " cachedTypes=" + cachedTypes + " cachedObjs=" + cachedObjs
-                    + " inversionChecks=" + inversionChecks + " enterCalls=" + enterCalls
+                    + " inversionChecks=" + inversionChecks
+                    + " receiverCallChecks=" + receiverCallChecks + " enterCalls=" + enterCalls
                     + " enterFullScan=" + enterFullScan;
         }
     }
@@ -1411,6 +1506,21 @@ public class LambdaAnalysis implements Plugin {
         if (counters != null) {
             counters.startEvent();
         }
+        boolean completed = false;
+        try {
+            addNewReceiverFacts(csVar, pts, infos);
+            completed = true;
+        } finally {
+            finishEvent(completed);
+        }
+    }
+
+    /**
+     * The facts of {@link #onNewPointsToSet} for the new points-to set
+     * {@code pts} of the lambda receiver variable {@code csVar}, whose
+     * invocations are {@code infos}.
+     */
+    private void addNewReceiverFacts(CSVar csVar, PointsToSet pts, InstanceInvoInfos infos) {
         // grouped once per new points-to set, shared by every lambda
         // invocation on this receiver variable, and appended to the
         // variable's cached grouping (present since its first invocation)
@@ -1439,7 +1549,6 @@ public class LambdaAnalysis implements Plugin {
             throw new IllegalStateException("lambda receiver event " + thisEvent
                     + " interrupted by event " + event);
         }
-        drainLambdaReceiverCalls();
     }
 
     /**
