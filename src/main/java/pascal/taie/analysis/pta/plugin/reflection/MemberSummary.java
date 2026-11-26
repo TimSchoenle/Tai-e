@@ -58,8 +58,8 @@ import java.util.stream.Stream;
  * signature of the call site's container, its index and the context's text),
  * not from the identity hashes of the call site and the context, so a hash
  * order over summaries is the same in every run as far as the context's text
- * is. The placeholder object's own hash still includes the identity hash of
- * its descriptor, as every mock object's does.
+ * is. The placeholder's descriptor hashes its text too
+ * ({@link LazyMembers#LAZY_DESC}).
  */
 final class MemberSummary {
 

@@ -24,6 +24,7 @@ package pascal.taie.analysis.pta.core.cs.element;
 
 import pascal.taie.analysis.pta.core.cs.context.TrieContext;
 import pascal.taie.analysis.pta.core.heap.MockObj;
+import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.util.Indexer;
 
 /**
@@ -45,6 +46,13 @@ public final class TestElements {
             objs[i] = new CSObj(new MockObj(() -> name, name, null, null, false), context, i);
         }
         return objs;
+    }
+
+    /**
+     * @return {@code obj} in the empty context, with index {@code index}.
+     */
+    public static CSObj object(Obj obj, int index) {
+        return new CSObj(obj, new TrieContext.Factory<>().getEmptyContext(), index);
     }
 
     /**

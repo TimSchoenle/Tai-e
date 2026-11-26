@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.plugin.reflection;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
@@ -64,7 +65,10 @@ import java.util.function.Consumer;
  * {@code Method.getDeclaringClass}, {@code Method.getParameterAnnotations})
  * whose receiver points to the placeholder subscribed to it once, and every
  * subscription received every member of it exactly once, so the consumer
- * resolved what it resolves for the eager objects.</li>
+ * resolved what it resolves for the eager objects;</li>
+ * <li>every call site that subscribed is a consumer of that table, with a
+ * result if the table says the consumer needs one, so the consumer-site
+ * check covers it.</li>
  * </ul>
  * A difference throws {@link IllegalStateException} with the counts and the
  * first offenders. An analysis stopped by its time limit ends with work left,
@@ -92,9 +96,7 @@ final class LazyMembersVerifier {
             "<java.lang.reflect.Method: java.lang.Class getDeclaringClass()>", false,
             "<java.lang.reflect.Method: java.lang.annotation.Annotation[][] getParameterAnnotations()>", true);
 
-    private final Solver solver;
-
-    private final CSManager csManager;
+    private final AnalysisState state;
 
     private final Set<Invoke> invokesWithLog;
 
@@ -103,9 +105,23 @@ final class LazyMembersVerifier {
     private final List<SubscriptionKey> repeatedSubscriptions = new ArrayList<>();
 
     LazyMembersVerifier(Solver solver, Set<Invoke> invokesWithLog) {
-        this.solver = solver;
-        this.csManager = solver.getCSManager();
+        this(new SolverState(solver), invokesWithLog);
+    }
+
+    /**
+     * @param state the state of the analysis the check reads
+     */
+    LazyMembersVerifier(AnalysisState state, Set<Invoke> invokesWithLog) {
+        this.state = state;
         this.invokesWithLog = invokesWithLog;
+    }
+
+    /**
+     * @return the consumers of member objects, by callee signature, each with
+     * whether it takes its member objects only when the call has a result
+     */
+    static Map<String, Boolean> consumers() {
+        return CONSUMERS;
     }
 
     static boolean isEnabled() {
@@ -140,7 +156,7 @@ final class LazyMembersVerifier {
      * @throws IllegalStateException on any difference
      */
     void verify(Collection<MemberSummary> summaries) {
-        if (solver.isStoppedByTimeLimit()) {
+        if (state.isStoppedByTimeLimit()) {
             System.err.println("[refl] lazy members not verified: the analysis stopped"
                     + " at its time limit");
             return;
@@ -163,7 +179,7 @@ final class LazyMembersVerifier {
         Invoke invoke = summary.invoke();
         Context context = summary.context();
         Set<JClass> seen = new LinkedHashSet<>();
-        pointsTo(context, ((InvokeInstanceExp) invoke.getInvokeExp()).getBase())
+        state.pointsTo(context, ((InvokeInstanceExp) invoke.getInvokeExp()).getBase())
                 .forEach(obj -> {
                     JClass clazz = CSObjs.toClass(obj);
                     if (clazz != null) {
@@ -190,7 +206,7 @@ final class LazyMembersVerifier {
         }
         Set<String> names = new LinkedHashSet<>();
         if (summary.isNamed()) {
-            pointsTo(context, invoke.getInvokeExp().getArg(0)).forEach(obj -> {
+            state.pointsTo(context, invoke.getInvokeExp().getArg(0)).forEach(obj -> {
                 String name = CSObjs.toString(obj);
                 if (name != null) {
                     names.add(name);
@@ -239,6 +255,16 @@ final class LazyMembersVerifier {
                 failures.add("subscription", key + " received again "
                         + firstOf(subscription.repeated()));
             }
+            // the consumer-site check covers only the call sites of the
+            // table: a consumer that subscribes must be one of them
+            Boolean needsResult = needsResult(key.consumer());
+            if (needsResult == null) {
+                failures.add("consumer-table", key.consumer() + " subscribed, its callee is"
+                        + " not in the consumer table");
+            } else if (needsResult && key.consumer().getResult() == null) {
+                failures.add("consumer-table", key.consumer() + " subscribed without a result,"
+                        + " the consumer table says it takes member objects only with one");
+            }
         });
         repeatedSubscriptions.forEach(key ->
                 failures.add("subscription", key + " subscribed again"));
@@ -252,17 +278,16 @@ final class LazyMembersVerifier {
      */
     private long checkConsumerSites(Failures failures) {
         long sites = 0;
-        for (CSMethod csMethod : solver.getCallGraph().reachableMethods().toList()) {
+        for (CSMethod csMethod : state.reachableMethods()) {
             Context context = csMethod.getContext();
             for (Invoke invoke : csMethod.getMethod().getIR().invokes(false).toList()) {
-                JMethod callee = invoke.getMethodRef().resolveNullable();
-                Boolean needsResult = callee == null ? null : CONSUMERS.get(callee.getSignature());
+                Boolean needsResult = needsResult(invoke);
                 if (needsResult == null || invokesWithLog.contains(invoke)
                         || (needsResult && invoke.getResult() == null)) {
                     continue;
                 }
                 Var base = ((InvokeInstanceExp) invoke.getInvokeExp()).getBase();
-                for (CSObj obj : pointsTo(context, base)) {
+                for (CSObj obj : state.pointsTo(context, base)) {
                     if (obj.getObject().getAllocation() instanceof MemberSummary summary) {
                         ++sites;
                         if (!subscriptions.containsKey(
@@ -278,16 +303,57 @@ final class LazyMembersVerifier {
     }
 
     /**
-     * The points-to set of {@code var} in {@code context}, read without
-     * creating its pointer, so that the check leaves the result as it is.
+     * @return whether consumer call site {@code invoke} takes its member
+     * objects only when it has a result, or {@code null} if its callee is not
+     * a consumer of the table
      */
-    private Set<CSObj> pointsTo(Context context, Var var) {
-        for (CSVar csVar : csManager.getCSVarsOf(var)) {
-            if (csVar.getContext().equals(context)) {
-                return csVar.getObjects();
-            }
+    private static @Nullable Boolean needsResult(Invoke invoke) {
+        JMethod callee = invoke.getMethodRef().resolveNullable();
+        return callee == null ? null : CONSUMERS.get(callee.getSignature());
+    }
+
+    /**
+     * The state of the analysis that the check reads.
+     */
+    interface AnalysisState {
+
+        boolean isStoppedByTimeLimit();
+
+        /**
+         * @return the reachable methods of the call graph
+         */
+        List<CSMethod> reachableMethods();
+
+        /**
+         * @return the points-to set of {@code var} in {@code context}, read
+         * without creating its pointer, so that the check leaves the result
+         * as it is
+         */
+        Set<CSObj> pointsTo(Context context, Var var);
+    }
+
+    private record SolverState(Solver solver) implements AnalysisState {
+
+        @Override
+        public boolean isStoppedByTimeLimit() {
+            return solver.isStoppedByTimeLimit();
         }
-        return Set.of();
+
+        @Override
+        public List<CSMethod> reachableMethods() {
+            return solver.getCallGraph().reachableMethods().toList();
+        }
+
+        @Override
+        public Set<CSObj> pointsTo(Context context, Var var) {
+            CSManager csManager = solver.getCSManager();
+            for (CSVar csVar : csManager.getCSVarsOf(var)) {
+                if (csVar.getContext().equals(context)) {
+                    return csVar.getObjects();
+                }
+            }
+            return Set.of();
+        }
     }
 
     private static String firstOf(Collection<?> items) {

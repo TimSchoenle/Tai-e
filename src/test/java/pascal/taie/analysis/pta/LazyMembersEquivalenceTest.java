@@ -33,6 +33,7 @@ import pascal.taie.World;
 import pascal.taie.analysis.Tests;
 import pascal.taie.analysis.graph.callgraph.CallGraph;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
 import pascal.taie.analysis.pta.plugin.reflection.LazyMembers;
@@ -136,6 +137,12 @@ public class LazyMembersEquivalenceTest {
      * site's classes into eager and lazy depends on identity hashes. The
      * lines are sorted, as the order of the call graph's edges and of the
      * pointers is a hash order of the solver's maps with the option off too.
+     * Each placeholder adds a line with its object index, its call site and
+     * context read through the public API, and the hash codes of its
+     * descriptor and allocation: the second run has a new world, so an
+     * allocation hash taken from the call site's or the context's identity
+     * would differ. The descriptor is one object in every run of this JVM,
+     * so its hash code is checked against its text's.
      */
     @Test
     void lazyRunsAreDeterministic() {
@@ -143,6 +150,8 @@ public class LazyMembersEquivalenceTest {
         List<String> second = rawOutput("LazyNamed");
         assertTrue(first.stream().anyMatch(line -> line.contains("LazyMembers{")),
                 "no placeholder in the raw output");
+        assertTrue(first.stream().anyMatch(line -> line.startsWith("placeholder ")),
+                "no placeholder object");
         assertEquals(first, second);
     }
 
@@ -274,6 +283,18 @@ public class LazyMembersEquivalenceTest {
         pta.getCSVars().forEach(csVar -> lines.add(csVar + " = " + csVar.getObjects()));
         pta.getInstanceFields().forEach(field -> lines.add(field + " = " + field.getObjects()));
         pta.getArrayIndexes().forEach(index -> lines.add(index + " = " + index.getObjects()));
+        for (Obj obj : pta.getObjects()) {
+            if (LazyMembers.isPlaceholder(obj)) {
+                Descriptor descriptor = ((MockObj) obj).getDescriptor();
+                assertEquals(descriptor.string().hashCode(), descriptor.hashCode(),
+                        "the placeholder descriptor's hash code is not its text's");
+                Invoke site = LazyMembers.site(obj);
+                lines.add("placeholder " + obj.getIndex() + " " + site.getContainer() + "["
+                        + site.getIndex() + "]." + site.getMethodRef().getName() + " in "
+                        + LazyMembers.context(obj) + " hash " + descriptor.hashCode() + "/"
+                        + obj.getAllocation().hashCode());
+            }
+        }
         lines.sort(null);
         return lines;
     }

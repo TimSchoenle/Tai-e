@@ -64,9 +64,14 @@ import java.util.Set;
 public final class LazyMembers {
 
     /**
-     * Descriptor of the placeholder objects.
+     * Descriptor of the placeholder objects. Its equality and hash code come
+     * from its text, as the hash code of the placeholder's allocation
+     * ({@link MemberSummary}) does, so neither of these two parts of the
+     * placeholder's hash code is an identity hash. (Its type's hash code, the
+     * third part, is the {@code ClassType}'s, as for every object of that
+     * type.)
      */
-    static final Descriptor LAZY_DESC = () -> "LazyReflectionMetaObj";
+    static final Descriptor LAZY_DESC = new TextDescriptor("LazyReflectionMetaObj");
 
     private final int threshold;
 
@@ -136,10 +141,48 @@ public final class LazyMembers {
         return summaryOf(obj).members();
     }
 
+    /**
+     * The member-retrieving call site of placeholder {@code obj}. Its
+     * container, its index there and its API ({@link Invoke#getMethodRef})
+     * name the placeholder deterministically, together with {@link #context}.
+     *
+     * @throws IllegalArgumentException if {@code obj} is not a placeholder
+     */
+    public static Invoke site(Obj obj) {
+        return summaryOf(obj).invoke();
+    }
+
+    /**
+     * The call context of the call site of placeholder {@code obj}: there is
+     * one placeholder per (call site, call context).
+     *
+     * @throws IllegalArgumentException if {@code obj} is not a placeholder
+     */
+    public static Context context(Obj obj) {
+        return summaryOf(obj).context();
+    }
+
     private static MemberSummary summaryOf(Obj obj) {
         if (obj.getAllocation() instanceof MemberSummary summary) {
             return summary;
         }
         throw new IllegalArgumentException("not a lazy member placeholder: " + obj);
+    }
+
+    /**
+     * A descriptor equal to every descriptor of this class with the same
+     * text, whose hash code is the text's.
+     */
+    private record TextDescriptor(String string) implements Descriptor {
+
+        @Override
+        public int hashCode() {
+            return string.hashCode();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof TextDescriptor other && string.equals(other.string);
+        }
     }
 }
