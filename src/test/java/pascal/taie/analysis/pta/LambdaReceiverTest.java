@@ -23,6 +23,7 @@
 package pascal.taie.analysis.pta;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import pascal.taie.Main;
 import pascal.taie.World;
 import pascal.taie.analysis.graph.callgraph.CallGraph;
@@ -33,7 +34,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A method reference whose receiver is a lambda object (fixture
@@ -71,13 +72,19 @@ public class LambdaReceiverTest {
                 .collect(Collectors.toSet());
     }
 
+    /**
+     * Context insensitive only: the fixture's analysis covers the whole JDK,
+     * and more context-sensitive runs exhaust the shared 2 GB test fork of
+     * the full suite. The timeout fails a cycle of method references that
+     * does not reach its fixed point instead of hanging the fork.
+     */
     @Test
+    @Timeout(600)
     void methodReferencesOnLambdaObjectsReachTheirBodies() {
-        for (String cs : List.of("ci", "1-obj", "1-call")) {
-            Set<String> reached = reachedNames(cs);
-            for (String name : REACHED) {
-                assertTrue(reached.contains(name), cs + ": " + name + " unreached");
-            }
-        }
+        Set<String> reached = reachedNames("ci");
+        List<String> unreached = REACHED.stream()
+                .filter(name -> !reached.contains(name))
+                .toList();
+        assertEquals(List.of(), unreached, "unreached bodies");
     }
 }

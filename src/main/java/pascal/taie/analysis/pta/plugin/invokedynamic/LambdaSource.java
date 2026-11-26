@@ -113,7 +113,9 @@ final class LambdaSource implements EdgeSource {
         int result = edgeHash;
         result = 31 * result + indy.hashCode();
         result = 31 * result + context.hashCode();
-        result = 31 * result + Objects.hashCode(samArgs);
+        if (samArgs != null) {
+            result = 31 * result + samArgs.hashCode();
+        }
         return result;
     }
 

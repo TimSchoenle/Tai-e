@@ -54,7 +54,9 @@ public class LambdaReceiver {
         }
     }
 
-    static Runnable field;
+    static Runnable cycleA;
+
+    static Runnable cycleB;
 
     public static void main(String[] args) {
         bound();
@@ -130,9 +132,15 @@ public class LambdaReceiver {
     }
 
     static void cycle() {
-        field = () -> cycleBody();
-        field = field::run;
-        field.run();
+        // m1's receiver is m2, m2's receivers are m1 (the cycle) and the
+        // lambda, and nothing else calls m2 or the lambda: cycleBody is
+        // reached only along m1 -> m2 -> lambda, through the cycle
+        Runnable m1 = cycleA::run;
+        Runnable m2 = cycleB::run;
+        cycleA = m2;
+        cycleB = m1;
+        cycleB = () -> cycleBody();
+        m1.run();
     }
 
     static void boundBody() {
