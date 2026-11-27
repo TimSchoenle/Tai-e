@@ -259,6 +259,62 @@ public class CallBlockProbeEquivalenceTest {
         }
     }
 
+    /**
+     * The probe on the batched call path (option {@code call-batching},
+     * px/s116 L-B) on the fixtures of {@link CallBatchingEquivalenceTest}:
+     * {@code p1t} with {@code batched} gives the same solver events in the
+     * same order, call edges, reachable methods and points-to sets as the
+     * probe off with {@code per-object}, and the same probe counts as
+     * {@code p1t} with {@code per-object}: batched offers every receiver
+     * object and claims the same fresh edges.
+     *
+     * @param more further options separated by {@code ;}, or empty
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "blocks | Blocks | ci |", "blocks | Blocks | 1-call |",
+            "blocks | Blocks | 2-call |", "blocks | Blocks | 1-obj |",
+            "blocks | Blocks | 2-type |",
+            "blocks | SharedCallee | 1-obj |", "blocks | SharedCallee | ci |",
+            "lambda | LambdaMix | 2-obj |", "lambda | LambdaSharedReceiver | 1-call |",
+            "lambda | LambdaConstructor | ci |",
+            "basic | Interface | ci |", "basic | Dispatch | 1-call |",
+            "basic | Dispatch | 2-obj |",
+            "getters | Getters | ci | trivial-getters:true",
+            "getters | Getters | 1-call | trivial-getters:true",
+            "blocks | Blocks | 2-obj | share-points-to-sets:true;pack-cold-sets:4",
+            "blocks | Blocks | 1-call | share-points-to-sets:true;pack-cold-sets:4",
+            "misc | Zipper | 2-obj | advanced:zipper",
+            "misc | Zipper | 2-obj | advanced:scaler",
+            "reflection | ReflectiveAction | 1-call | reflection-inference:null;"
+                    + "reflection-log:src/test/resources/pta/reflection/ReflectiveAction.log"})
+    void probeOnBatchedCallsChangesNoResultAndNoCount(String dir, String main, String cs,
+                                                       String more) {
+        List<String> extra = more == null ? List.of() : List.of(more.split(";"));
+        Snapshot off = run(dir, main, cs, "none",
+                withOption(extra, "call-batching:per-object"));
+        assertTrue(off.events().size() > 0, "the solve records events");
+        run(dir, main, cs, "p1t", withOption(extra, "call-batching:per-object"));
+        String perObjectLine = ProbeReader.probe.line();
+        Snapshot on = run(dir, main, cs, "p1t", withOption(extra, "call-batching:batched"));
+        // not assertProbeQuiet: with advanced:zipper or scaler the
+        // pre-analysis builds the IRs, so the main solve may build none
+        assertEquals(List.of(), on.probeIrBuilds(), "IRs built under the probe");
+        assertEquals(0, ProbeReader.probe.pendingEdges(), ProbeReader.probe.line());
+        assertEquals(off.events(), on.events(), "solver events in order");
+        assertEquals(off.edges(), on.edges(), "call edges");
+        assertEquals(off.reached(), on.reached(), "reachable methods");
+        assertEquals(off.pointsTo(), on.pointsTo(), "points-to sets");
+        assertEquals(perObjectLine, ProbeReader.probe.line(), "probe counts");
+        assertEdgesOffered(ProbeReader.probe);
+    }
+
+    private static String[] withOption(List<String> options, String option) {
+        List<String> all = new ArrayList<>(options);
+        all.add(option);
+        return all.toArray(new String[0]);
+    }
+
     @ParameterizedTest
     @CsvSource({"reflection, ReflectiveAction"})
     void reflectiveEdgesAreCounted(String dir, String main) {
