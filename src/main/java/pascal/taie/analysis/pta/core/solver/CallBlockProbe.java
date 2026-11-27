@@ -38,6 +38,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -131,8 +132,11 @@ public final class CallBlockProbe {
         /** Batches without a fresh callee node. */
         STALE,
         /**
-         * PFG edges the fresh callee nodes get today (processCallEdge's
-         * parameter and return edges), summed over the batches.
+         * PFG edges the fresh callee nodes get today (the parameter and
+         * return edges processCallEdge adds for their edges), summed over
+         * the batches. Like every {@code W_} counter and {@link #HUB_PTRS}
+         * and {@link #HUB_PTRS2}, a batch counts here once the solver has
+         * polled all its fresh edges ({@link #edgePolled}).
          */
         W_TODAY,
         P1_HITS,
@@ -183,7 +187,7 @@ public final class CallBlockProbe {
         /** Hub positions (arguments and result) summed over the hub references. */
         W_JOIN,
         /** Hub positions summed over the new keys (their first members; the eager hub pointers). */
-        W_JOIN1,
+        HUB_PTRS,
         /** Hub positions summed over the keys with two or more members (the lazy hub pointers). */
         HUB_PTRS2
     }
@@ -196,6 +200,8 @@ public final class CallBlockProbe {
     private static final int COUNTERS = Counter.values().length;
 
     private static final Object[] NO_NODES = {};
+
+    private static final long[] NO_PAIRS = {};
 
     private static final Comparator<Object> BY_HASH =
             Comparator.comparingInt(Object::hashCode);
@@ -210,10 +216,11 @@ public final class CallBlockProbe {
     private final long[] counts = new long[CLASSES * COUNTERS];
 
     /**
-     * The edges fresh batches offered that the solver has not polled yet;
-     * an edge the solver polls leaves it ({@link #edgePolled}).
+     * The edges fresh batches offered that the solver has not polled yet,
+     * each with the batch that claimed it; an edge the solver polls leaves
+     * it ({@link #edgePolled}).
      */
-    private final Set<Edge<CSCallSite, CSMethod>> pending = new HashSet<>();
+    private final Map<Object, Batch> pending = new HashMap<>();
 
     /** Target hubs: the keys seen. */
     private final Map<TargetKey, TargetKey> targetKeys = new HashMap<>();
@@ -283,14 +290,20 @@ public final class CallBlockProbe {
 
         private int freshSize;
 
-        /** The PFG edges of the fresh offers, summed. */
+        /** The PFG edges of the polled fresh edges, summed. */
         private long weight;
 
-        /** The argument positions of the hub: the largest argument edges of a fresh offer. */
+        /** The argument positions of the hub: the largest argument edges of a polled fresh edge. */
         private int argPositions;
 
-        /** The result position of the hub: 1 when a fresh offer has return edges. */
+        /** The result position of the hub: 1 when a polled fresh edge has return edges. */
         private int resultPosition;
+
+        /** The edges this batch claimed that the solver has not polled yet. */
+        private int unpolled;
+
+        /** What {@link #end} made of this batch; null until then. */
+        private @Nullable Role role;
 
         private Batch(CallBlockProbe probe, Object site, long scope, EdgeClass edgeClass) {
             this.probe = probe;
@@ -301,48 +314,41 @@ public final class CallBlockProbe {
 
         /**
          * Offers the pair of {@code recvObj} (null for a static target) and
-         * {@code callee}, without PFG weights.
+         * {@code callee}. It reads no state of the callee: the PFG weights of
+         * a fresh edge come when the solver polls it ({@link #edgePolled}).
          *
          * @param unlinked the edge of the pair when the call site's edges do
          *                 not hold it yet, null when they do; the callee is
-         *                 fresh when it is not null and not pending from an
-         *                 earlier batch
+         *                 fresh when it is not null and no batch (this one or
+         *                 an earlier one) claimed it since it was last polled
          */
         public void offer(@Nullable CSObj recvObj, CSMethod callee,
                           @Nullable Edge<CSCallSite, CSMethod> unlinked) {
-            offer(recvObj, callee, unlinked, 0, 0);
+            int obj = recvObj == null ? -1 : Objects.requireNonNull(probe.objects,
+                    "a probe without an object indexer").getIndex(recvObj);
+            boolean isFresh = unlinked != null && claim(unlinked);
+            offer(obj, System.identityHashCode(callee), isFresh ? callee : null);
         }
 
         /**
-         * Offers the pair as {@link #offer(CSObj, CSMethod, Edge)} does, with
-         * the PFG edges its edge gets when the solver takes it.
+         * Claims {@code edge} for this batch.
          *
-         * @param argEdges    the parameter-passing edges of the edge
-         * @param returnEdges the return edges of the edge
+         * @return whether the edge was not pending, so that this batch makes it
          */
-        public void offer(@Nullable CSObj recvObj, CSMethod callee,
-                          @Nullable Edge<CSCallSite, CSMethod> unlinked,
-                          int argEdges, int returnEdges) {
-            int obj = recvObj == null ? -1 : Objects.requireNonNull(probe.objects,
-                    "a probe without an object indexer").getIndex(recvObj);
-            boolean isFresh = unlinked != null && probe.pending.add(unlinked);
-            offer(obj, System.identityHashCode(callee), isFresh ? callee : null,
-                    argEdges, returnEdges);
-        }
-
-        /** Offers a pair without PFG weights (tests). */
-        void offer(int obj, int callee, @Nullable Object freshNode) {
-            offer(obj, callee, freshNode, 0, 0);
+        boolean claim(Object edge) {
+            if (probe.pending.putIfAbsent(edge, this) != null) {
+                return false;
+            }
+            ++unpolled;
+            return true;
         }
 
         /**
          * Offers the pair of object index {@code obj} and callee key
          * {@code callee}; {@code freshNode} is the callee node when it is
-         * fresh, else null. The weights count only for a fresh node, which
-         * the pending edges make fresh at most once per batch.
+         * fresh, else null.
          */
-        void offer(int obj, int callee, @Nullable Object freshNode,
-                   int argEdges, int returnEdges) {
+        void offer(int obj, int callee, @Nullable Object freshNode) {
             if (size == pairs.length) {
                 pairs = Arrays.copyOf(pairs, size * 2);
             }
@@ -352,13 +358,35 @@ public final class CallBlockProbe {
                     fresh = Arrays.copyOf(fresh, Math.max(4, freshSize * 2));
                 }
                 fresh[freshSize++] = freshNode;
-                weight += argEdges + returnEdges;
-                argPositions = Math.max(argPositions, argEdges);
-                if (returnEdges > 0) {
-                    resultPosition = 1;
-                }
             }
         }
+
+        /** Adds the PFG edges of one of its polled fresh edges. */
+        private void weigh(int argEdges, int returnEdges) {
+            weight += argEdges + returnEdges;
+            argPositions = Math.max(argPositions, argEdges);
+            if (returnEdges > 0) {
+                resultPosition = 1;
+            }
+        }
+    }
+
+    /**
+     * What {@link #end} made of a batch in the target-hub simulation; it
+     * tells which weight counters the batch's PFG weights go to once its
+     * claimed edges are all polled.
+     */
+    private enum Role {
+        /** No fresh node. */
+        STALE,
+        /** One fresh node: a direct edge. */
+        SINGLE,
+        /** Two or more fresh nodes with a new key. */
+        NEW_KEY,
+        /** Two or more fresh nodes with a known key. */
+        HIT,
+        /** A hit that is the second member of its key. */
+        SECOND_MEMBER
     }
 
     /** @return a new batch of {@code edgeClass} at {@code callSite} */
@@ -393,7 +421,6 @@ public final class CallBlockProbe {
         if (fresh == 0) {
             add(base, Counter.STALE, 1);
         }
-        add(base, Counter.W_TODAY, batch.weight);
         if (mode != Mode.P1T) {
             long hash = contentHash(batch.scope, pairs);
             countPhase1(base, n, targets, fresh, hash);
@@ -401,7 +428,42 @@ public final class CallBlockProbe {
                 countPhase1b(base, batch.scope, pairs, hash, targets, fresh);
             }
         }
-        countTargetHubs(base, batch, freshNodes);
+        batch.role = countTargetHubs(base, batch, freshNodes);
+        // the pairs are counted; only the weights may still come
+        batch.pairs = NO_PAIRS;
+        batch.fresh = NO_NODES;
+        if (batch.unpolled == 0) {
+            countWeights(batch);
+        }
+    }
+
+    /**
+     * Counts the PFG weights of {@code batch}, which has ended and whose
+     * claimed edges the solver has all polled.
+     */
+    private void countWeights(Batch batch) {
+        int base = batch.edgeClass.ordinal() * COUNTERS;
+        Role role = Objects.requireNonNull(batch.role, "a batch that has not ended");
+        int positions = batch.argPositions + batch.resultPosition;
+        add(base, Counter.W_TODAY, batch.weight);
+        switch (role) {
+            case STALE -> {
+            }
+            case SINGLE -> add(base, Counter.W_DIRECT, batch.weight);
+            case NEW_KEY -> {
+                add(base, Counter.W_TARGETS, batch.weight);
+                add(base, Counter.W_JOIN, positions);
+                add(base, Counter.HUB_PTRS, positions);
+            }
+            case HIT -> add(base, Counter.W_JOIN, positions);
+            case SECOND_MEMBER -> {
+                // the positions of a hub depend only on its invoke and
+                // nodes, so the second member's equal those of the first
+                add(base, Counter.W_JOIN, positions);
+                add(base, Counter.HUB_PTRS2, positions);
+            }
+            default -> throw new IllegalStateException("role " + role);
+        }
     }
 
     private void countPhase1(int base, int n, int targets, int fresh, long hash) {
@@ -480,40 +542,37 @@ public final class CallBlockProbe {
         }
     }
 
-    private void countTargetHubs(int base, Batch batch, Object[] freshNodes) {
+    /** @return the role of {@code batch}, whose distinct fresh nodes are {@code freshNodes} */
+    private Role countTargetHubs(int base, Batch batch, Object[] freshNodes) {
         int fresh = freshNodes.length;
         if (fresh == 0) {
-            return;
+            return Role.STALE;
         }
         if (fresh == 1) {
             add(base, Counter.P1T_SINGLES, 1);
             add(base, Counter.P1T_COST, 1);
-            add(base, Counter.W_DIRECT, batch.weight);
-            return;
+            return Role.SINGLE;
         }
-        int positions = batch.argPositions + batch.resultPosition;
         add(base, Counter.P1T_REFS, 1);
-        add(base, Counter.W_JOIN, positions);
         int hash = 31 * (31 * batch.site.hashCode() + batch.edgeClass.ordinal())
                 + nodesHash.applyAsInt(freshNodes);
-        TargetKey key = new TargetKey(batch.site, batch.edgeClass, freshNodes, hash, positions);
+        TargetKey key = new TargetKey(batch.site, batch.edgeClass, freshNodes, hash);
         TargetKey known = targetKeys.putIfAbsent(key, key);
         if (known == null) {
             add(base, Counter.P1T_HUBS, 1);
             add(base, Counter.P1T_HUB1, 1);
             add(base, Counter.P1T_TARGETS, fresh);
             add(base, Counter.P1T_COST, 1 + fresh);
-            add(base, Counter.W_TARGETS, batch.weight);
-            add(base, Counter.W_JOIN1, positions);
-        } else {
-            add(base, Counter.P1T_HITS, 1);
-            add(base, Counter.P1T_COST, 1);
-            if (++known.members == 2) {
-                add(base, Counter.P1T_HUB1, -1);
-                add(base, Counter.P1T_HUB2, 1);
-                add(base, Counter.HUB_PTRS2, known.positions);
-            }
+            return Role.NEW_KEY;
         }
+        add(base, Counter.P1T_HITS, 1);
+        add(base, Counter.P1T_COST, 1);
+        if (++known.members == 2) {
+            add(base, Counter.P1T_HUB1, -1);
+            add(base, Counter.P1T_HUB2, 1);
+            return Role.SECOND_MEMBER;
+        }
+        return Role.HIT;
     }
 
     /**
@@ -530,19 +589,14 @@ public final class CallBlockProbe {
 
         private final int hash;
 
-        /** The hub positions (arguments and result) of the first member. */
-        private final int positions;
-
         /** The batches that made or hit this key. */
         private int members = 1;
 
-        private TargetKey(Object site, EdgeClass edgeClass, Object[] nodes, int hash,
-                          int positions) {
+        private TargetKey(Object site, EdgeClass edgeClass, Object[] nodes, int hash) {
             this.site = site;
             this.edgeClass = edgeClass;
             this.nodes = nodes;
             this.hash = hash;
-            this.positions = positions;
         }
 
         @Override
@@ -678,11 +732,24 @@ public final class CallBlockProbe {
     }
 
     /**
-     * Notes that the solver polled {@code edge} from its work list: from now
-     * on the call graph tells whether it is linked.
+     * Notes that the solver polled {@code edge} from its work list and
+     * processed it: from now on the call graph tells whether it is linked.
+     * When a batch claimed it, the edge adds its PFG edges to that batch,
+     * and a batch that has ended with all its claimed edges polled counts
+     * its weights.
+     *
+     * @param argEdges    the parameter-passing edges the solver added for it
+     * @param returnEdges the return edges the solver added for it
      */
-    void edgePolled(Edge<CSCallSite, CSMethod> edge) {
-        pending.remove(edge);
+    void edgePolled(Object edge, int argEdges, int returnEdges) {
+        Batch batch = pending.remove(edge);
+        if (batch == null) {
+            return;
+        }
+        batch.weigh(argEdges, returnEdges);
+        if (--batch.unpolled == 0 && batch.role != null) {
+            countWeights(batch);
+        }
     }
 
     /**
@@ -701,6 +768,15 @@ public final class CallBlockProbe {
             return;
         }
         add(edgeClass.ordinal() * COUNTERS, Counter.EDGES, 1);
+    }
+
+    /**
+     * @return the edges batches claimed that the solver has not polled yet;
+     * their batches' weights are not counted yet. After a solve that reached
+     * its fixpoint it is 0.
+     */
+    public int pendingEdges() {
+        return pending.size();
     }
 
     /** @return the counter {@code counter} of {@code edgeClass} */
@@ -742,10 +818,10 @@ public final class CallBlockProbe {
 
     /** @return the counters as one log line, per edge class and in total */
     public String line() {
-        StringBuilder line = new StringBuilder(mode.name().toLowerCase());
+        StringBuilder line = new StringBuilder(mode.name().toLowerCase(Locale.ROOT));
         long[] total = new long[5];
         for (EdgeClass c : EdgeClass.values()) {
-            line.append("; ").append(c.name().toLowerCase())
+            line.append("; ").append(c.name().toLowerCase(Locale.ROOT))
                     .append(" edges=").append(count(c, Counter.EDGES));
             total[0] += count(c, Counter.EDGES);
             if (!isHubbable(c)) {
@@ -764,14 +840,18 @@ public final class CallBlockProbe {
                     .append(" t_targets=").append(count(c, Counter.P1T_TARGETS))
                     .append(" t_hub1=").append(count(c, Counter.P1T_HUB1))
                     .append(" t_hub2=").append(count(c, Counter.P1T_HUB2))
-                    .append(" p1t=").append(count(c, Counter.P1T_COST))
-                    .append(" w_today=").append(count(c, Counter.W_TODAY))
-                    .append(" w_direct=").append(count(c, Counter.W_DIRECT))
-                    .append(" w_targets=").append(count(c, Counter.W_TARGETS))
-                    .append(" w_join=").append(count(c, Counter.W_JOIN))
-                    .append(" w_join1=").append(count(c, Counter.W_JOIN1))
-                    .append(" hub_ptrs=").append(count(c, Counter.W_JOIN1))
-                    .append(" hub_ptrs2=").append(count(c, Counter.HUB_PTRS2));
+                    .append(" p1t=").append(count(c, Counter.P1T_COST));
+            if (c == EdgeClass.PLAIN) {
+                // lambda edges are of kind OTHER: processCallEdge adds no
+                // PFG edge for them (the lambda analysis does), so the
+                // probe has no weights of their class
+                line.append(" w_today=").append(count(c, Counter.W_TODAY))
+                        .append(" w_direct=").append(count(c, Counter.W_DIRECT))
+                        .append(" w_targets=").append(count(c, Counter.W_TARGETS))
+                        .append(" w_join=").append(count(c, Counter.W_JOIN))
+                        .append(" hub_ptrs=").append(count(c, Counter.HUB_PTRS))
+                        .append(" hub_ptrs2=").append(count(c, Counter.HUB_PTRS2));
+            }
             total[1] += count(c, Counter.FRESH);
             total[2] += count(c, Counter.P1T_COST);
             total[3] += count(c, Counter.W_TODAY);
@@ -800,7 +880,8 @@ public final class CallBlockProbe {
             total[4] += phase1RuleCost(c);
         }
         line.append("; total edges=").append(total[0]).append(" t_fresh=").append(total[1])
-                .append(" p1t=").append(total[2]).append(" w_today=").append(total[3]);
+                .append(" p1t=").append(total[2]).append(" w_today=").append(total[3])
+                .append(" w_pending=").append(pendingEdges());
         if (simulatesPhase1()) {
             line.append(" p1r=").append(total[4]);
         }

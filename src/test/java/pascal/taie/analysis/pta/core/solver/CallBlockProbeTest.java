@@ -23,10 +23,19 @@
 package pascal.taie.analysis.pta.core.solver;
 
 import org.junit.jupiter.api.Test;
+import pascal.taie.analysis.graph.callgraph.CallKind;
+import pascal.taie.analysis.graph.callgraph.Edge;
+import pascal.taie.analysis.pta.core.cs.context.Context;
+import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
+import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe.Counter;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe.EdgeClass;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe.Mode;
 import pascal.taie.config.ConfigException;
+import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.language.classes.JMethod;
+
+import java.lang.reflect.Constructor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,6 +65,16 @@ class CallBlockProbeTest {
             batch.offer(pairs[i], pairs[i + 1], pairs[i + 1]);
         }
         probe.end(batch);
+    }
+
+    /**
+     * Offers the pair ({@code obj}, {@code callee}) to {@code batch} with the
+     * edge {@code edge}, which the batch claims, so the callee is fresh; the
+     * edge's PFG weights come when the test polls it.
+     */
+    private static void claimed(CallBlockProbe.Batch batch, int obj, int callee, Object edge) {
+        assertTrue(batch.claim(edge), "the edge is not pending");
+        batch.offer(obj, callee, callee);
     }
 
     /**
@@ -166,7 +185,7 @@ class CallBlockProbeTest {
         // callee 10 is fresh (offered twice), callee 20 is linked already
         batch.offer(1, 10, 10);
         batch.offer(2, 10, 10);
-        batch.offer(3, 20, null, 2, 1);
+        batch.offer(3, 20, null);
         probe.end(batch);
         assertEquals(2, probe.count(PLAIN, Counter.DIRECT));
         assertEquals(1, probe.count(PLAIN, Counter.FRESH));
@@ -224,9 +243,11 @@ class CallBlockProbeTest {
         CallBlockProbe probe = new CallBlockProbe(Mode.P1T, null);
         // node 10 gets two argument edges and one return edge, node 20 one return edge
         CallBlockProbe.Batch first = begin(probe, 7, PLAIN);
-        first.offer(1, 10, 10, 2, 1);
-        first.offer(2, 20, 20, 0, 1);
+        claimed(first, 1, 10, "7->10");
+        claimed(first, 2, 20, "7->20");
         probe.end(first);
+        probe.edgePolled("7->10", 2, 1);
+        probe.edgePolled("7->20", 0, 1);
         // the same context later: 10 and 20 are linked, 30 and 40 are new
         freshBatch(probe, 1, 10, 0, 2, 20, 0, 3, 30, 1, 4, 40, 1);
         assertEquals(2, probe.count(PLAIN, Counter.P1T_HUBS));
@@ -245,7 +266,7 @@ class CallBlockProbeTest {
         assertEquals(4, probe.count(PLAIN, Counter.W_TARGETS));
         assertEquals(0, probe.count(PLAIN, Counter.W_DIRECT));
         assertEquals(3, probe.count(PLAIN, Counter.W_JOIN));
-        assertEquals(3, probe.count(PLAIN, Counter.W_JOIN1));
+        assertEquals(3, probe.count(PLAIN, Counter.HUB_PTRS));
         // only the key {30, 40} got a second member, and its first had no positions
         assertEquals(1, probe.count(PLAIN, Counter.P1T_HUB1));
         assertEquals(1, probe.count(PLAIN, Counter.P1T_HUB2));
@@ -257,25 +278,105 @@ class CallBlockProbeTest {
         CallBlockProbe probe = new CallBlockProbe(Mode.P1T, null);
         for (int member = 0; member < 3; ++member) {
             CallBlockProbe.Batch batch = begin(probe, 7, PLAIN);
-            batch.offer(member, 10, 10, 1, 0);
-            batch.offer(member, 20, 20, 1, 2);
+            claimed(batch, member, 10, member + "->10");
+            claimed(batch, member, 20, member + "->20");
             probe.end(batch);
+            probe.edgePolled(member + "->10", 1, 0);
+            probe.edgePolled(member + "->20", 1, 2);
         }
         // three members of one key: weights of the first count as targets
         assertEquals(3 * 4, probe.count(PLAIN, Counter.W_TODAY));
         assertEquals(4, probe.count(PLAIN, Counter.W_TARGETS));
         assertEquals(3 * 2, probe.count(PLAIN, Counter.W_JOIN));
-        assertEquals(2, probe.count(PLAIN, Counter.W_JOIN1));
+        assertEquals(2, probe.count(PLAIN, Counter.HUB_PTRS));
         assertEquals(2, probe.count(PLAIN, Counter.HUB_PTRS2));
         assertEquals(0, probe.count(PLAIN, Counter.P1T_HUB1));
         assertEquals(1, probe.count(PLAIN, Counter.P1T_HUB2));
         // a single fresh node is a direct edge with its weight
         CallBlockProbe.Batch single = begin(probe, 7, PLAIN);
-        single.offer(5, 30, 30, 3, 1);
+        claimed(single, 5, 30, "5->30");
         probe.end(single);
+        probe.edgePolled("5->30", 3, 1);
         assertEquals(4, probe.count(PLAIN, Counter.W_DIRECT));
         // a new key (1 + 2), two hits and the direct edge
         assertEquals(3 + 1 + 1 + 1, probe.count(PLAIN, Counter.P1T_COST));
+    }
+
+    @Test
+    void aPendingEdgeIsFreshOnceAndWeighsWhenPolled() {
+        CallBlockProbe probe = new CallBlockProbe(Mode.P1T, null);
+        CallBlockProbe.Batch first = begin(probe, 7, PLAIN);
+        claimed(first, 1, 10, "c->10");
+        // a second receiver dispatching to callee 10: its edge is claimed already
+        assertFalse(first.claim("c->10"));
+        first.offer(2, 10, null);
+        claimed(first, 3, 20, "c->20");
+        probe.end(first);
+        assertEquals(2, probe.count(PLAIN, Counter.FRESH));
+        assertEquals(1, probe.count(PLAIN, Counter.P1T_HUBS));
+        // a batch before the solver polls them: both edges are pending, so it is stale
+        CallBlockProbe.Batch second = begin(probe, 7, PLAIN);
+        assertFalse(second.claim("c->10"));
+        second.offer(4, 10, null);
+        assertFalse(second.claim("c->20"));
+        second.offer(5, 20, null);
+        probe.end(second);
+        assertEquals(2, probe.count(PLAIN, Counter.FRESH));
+        assertEquals(1, probe.count(PLAIN, Counter.STALE));
+        // the weights of a batch count once all its claimed edges are polled
+        probe.edgePolled("c->10", 2, 1);
+        assertEquals(0, probe.count(PLAIN, Counter.W_TODAY));
+        // an edge no batch claimed weighs nothing
+        probe.edgePolled("other", 5, 5);
+        assertEquals(0, probe.count(PLAIN, Counter.W_TODAY));
+        probe.edgePolled("c->20", 1, 0);
+        assertEquals(4, probe.count(PLAIN, Counter.W_TODAY));
+        assertEquals(4, probe.count(PLAIN, Counter.W_TARGETS));
+        assertEquals(2 + 1, probe.count(PLAIN, Counter.W_JOIN));
+        assertEquals(2 + 1, probe.count(PLAIN, Counter.HUB_PTRS));
+        // a polled edge is no longer pending, so a later batch claims it
+        // (the solver's own test of the call graph comes first)
+        CallBlockProbe.Batch third = begin(probe, 8, PLAIN);
+        claimed(third, 1, 10, "c->10");
+        // an edge polled before its batch ends counts at the end
+        probe.edgePolled("c->10", 0, 1);
+        assertEquals(4, probe.count(PLAIN, Counter.W_TODAY));
+        probe.end(third);
+        assertEquals(5, probe.count(PLAIN, Counter.W_TODAY));
+        assertEquals(1, probe.count(PLAIN, Counter.W_DIRECT));
+        // a second poll of the edge counts nothing
+        probe.edgePolled("c->10", 9, 9);
+        assertEquals(5, probe.count(PLAIN, Counter.W_TODAY));
+    }
+
+    /**
+     * The offer reads no state of its callee: the callee here has no method
+     * and no context (a read of its method, IR or parameters throws), yet
+     * the offer claims its edge, and the edge's weights come at the poll.
+     */
+    @Test
+    void theOfferReadsNoCalleeState() throws ReflectiveOperationException {
+        Constructor<CSMethod> newMethod = CSMethod.class.getDeclaredConstructor(
+                JMethod.class, Context.class);
+        newMethod.setAccessible(true);
+        CSMethod callee = newMethod.newInstance(null, null);
+        Constructor<CSCallSite> newSite = CSCallSite.class.getDeclaredConstructor(
+                Invoke.class, Context.class, CSMethod.class);
+        newSite.setAccessible(true);
+        CSCallSite site = newSite.newInstance(null, null, null);
+        Edge<CSCallSite, CSMethod> edge = new Edge<>(CallKind.VIRTUAL, site, callee);
+        CallBlockProbe probe = new CallBlockProbe(Mode.P1T, null);
+        CallBlockProbe.Batch batch = begin(probe, 7, PLAIN);
+        batch.offer(null, callee, edge);
+        batch.offer(null, callee, null);
+        probe.end(batch);
+        assertEquals(1, probe.count(PLAIN, Counter.FRESH));
+        assertEquals(1, probe.pendingEdges());
+        assertEquals(0, probe.count(PLAIN, Counter.W_TODAY));
+        probe.edgePolled(edge, 2, 1);
+        assertEquals(0, probe.pendingEdges());
+        assertEquals(3, probe.count(PLAIN, Counter.W_TODAY));
+        assertEquals(3, probe.count(PLAIN, Counter.W_DIRECT));
     }
 
     @Test

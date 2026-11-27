@@ -28,15 +28,27 @@ import org.junit.jupiter.params.provider.CsvSource;
 import pascal.taie.World;
 import pascal.taie.analysis.Tests;
 import pascal.taie.analysis.graph.callgraph.CallGraph;
+import pascal.taie.analysis.graph.callgraph.CallKind;
+import pascal.taie.analysis.graph.callgraph.Edge;
+import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
+import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe.Counter;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe.EdgeClass;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
+import pascal.taie.ir.IR;
+import pascal.taie.ir.IRBuilder;
+import pascal.taie.ir.exp.InvokeExp;
 import pascal.taie.ir.exp.Var;
 import pascal.taie.ir.stmt.Invoke;
+import pascal.taie.language.classes.ClassHierarchy;
 import pascal.taie.language.classes.JMethod;
+import pascal.taie.language.type.NullType;
+import pascal.taie.language.type.ReferenceType;
+import pascal.taie.language.type.Type;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +73,82 @@ public class CallBlockProbeEquivalenceTest {
 
     private static final String PLUGINS = "plugins:["
             + SolverOrderRecorder.class.getName() + ","
+            + IrBuildGuard.class.getName() + ","
             + ProbeReader.class.getName() + "]";
+
+    /** The class name of the probe; its nested classes start with it and {@code $}. */
+    private static final String PROBE_CLASS = CallBlockProbe.class.getName();
+
+    /**
+     * Watches each IR the solve builds ({@link JMethod#getIR()} builds a
+     * method's IR once): a build while a frame of {@link CallBlockProbe} (or
+     * of a class nested in it) is on the stack is a violation, as the probe
+     * must read no callee state, so it never builds an IR earlier than a
+     * solve without it. Only the builds of the solve count: after it,
+     * readers of the result build IRs of their own.
+     */
+    public static class IrBuildGuard implements Plugin {
+
+        static volatile boolean solving;
+
+        /** The IRs the current solve built. */
+        static int builds;
+
+        /** The methods whose IR was built under a probe frame. */
+        static final List<String> VIOLATIONS = new ArrayList<>();
+
+        @Override
+        public void onFinish() {
+            solving = false;
+        }
+
+        @Override
+        public void onStart() {
+            builds = 0;
+            solving = true;
+            World world = World.get();
+            IRBuilder builder = world.getIRBuilder();
+            if (!(builder instanceof RecordingIRBuilder)) {
+                try {
+                    // World sets its IR builder once; a test replaces it
+                    Field field = World.class.getDeclaredField("irBuilder");
+                    field.setAccessible(true);
+                    field.set(world, new RecordingIRBuilder(builder));
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException("cannot record the IR builds", e);
+                }
+            }
+        }
+    }
+
+    /** An IR builder that checks the stack of each IR it builds during a solve. */
+    private record RecordingIRBuilder(IRBuilder delegate) implements IRBuilder {
+
+        @Override
+        public IR buildIR(JMethod method) {
+            if (IrBuildGuard.solving) {
+                ++IrBuildGuard.builds;
+                if (underProbeFrame()) {
+                    synchronized (IrBuildGuard.VIOLATIONS) {
+                        IrBuildGuard.VIOLATIONS.add(method.toString());
+                    }
+                }
+            }
+            return delegate.buildIR(method);
+        }
+
+        private static boolean underProbeFrame() {
+            return StackWalker.getInstance().walk(frames -> frames
+                    .map(StackWalker.StackFrame::getClassName)
+                    .anyMatch(name -> name.equals(PROBE_CLASS)
+                            || name.startsWith(PROBE_CLASS + "$")));
+        }
+
+        @Override
+        public void buildAll(ClassHierarchy hierarchy) {
+            delegate.buildAll(hierarchy);
+        }
+    }
 
     /** Keeps the probe of the last solve. */
     public static class ProbeReader implements Plugin {
@@ -90,10 +177,20 @@ public class CallBlockProbeEquivalenceTest {
     @AfterEach
     void dropProbe() {
         ProbeReader.probe = null;
+        IrBuildGuard.solving = false;
+        IrBuildGuard.builds = 0;
+        synchronized (IrBuildGuard.VIOLATIONS) {
+            IrBuildGuard.VIOLATIONS.clear();
+        }
     }
 
+    /**
+     * @param irBuilds         the IRs the solve built
+     * @param probeIrBuilds    the methods whose IR it built under a probe frame
+     */
     private record Snapshot(List<String> events, Set<String> edges, Set<String> reached,
-                            Map<String, Set<String>> pointsTo) {
+                            Map<String, Set<String>> pointsTo, int irBuilds,
+                            List<String> probeIrBuilds) {
     }
 
     private static Snapshot run(String dir, String main, String cs, String mode,
@@ -119,7 +216,25 @@ public class CallBlockProbeEquivalenceTest {
                     pta.getPointsToSet(var).stream().map(Object::toString)
                             .collect(Collectors.toCollection(TreeSet::new)));
         }
-        return new Snapshot(List.copyOf(SolverOrderRecorder.EVENTS), edges, reached, pointsTo);
+        List<String> probeIrBuilds;
+        synchronized (IrBuildGuard.VIOLATIONS) {
+            probeIrBuilds = List.copyOf(IrBuildGuard.VIOLATIONS);
+            IrBuildGuard.VIOLATIONS.clear();
+        }
+        return new Snapshot(List.copyOf(SolverOrderRecorder.EVENTS), edges, reached, pointsTo,
+                IrBuildGuard.builds, probeIrBuilds);
+    }
+
+    /**
+     * Checks a solve with the probe on: it built IRs, none of them under a
+     * probe frame, and every edge a batch claimed was polled.
+     */
+    private static void assertProbeQuiet(Snapshot on, String mode) {
+        assertTrue(on.irBuilds() > 0, mode + ": the solve builds IRs");
+        assertEquals(List.of(), on.probeIrBuilds(), mode + ": IRs built under the probe");
+        CallBlockProbe probe = ProbeReader.probe;
+        assertEquals(0, probe.pendingEdges(), mode + ": " + probe.line());
+        assertTrue(probe.line().contains(" w_pending=0"), probe.line());
     }
 
     @ParameterizedTest
@@ -135,6 +250,7 @@ public class CallBlockProbeEquivalenceTest {
             Snapshot on = run(dir, main, cs, mode);
             assertNotNull(ProbeReader.probe, mode);
             assertTrue(off.events().size() > 0, "the solve records events");
+            assertProbeQuiet(on, mode);
             assertEquals(off.events(), on.events(), mode + ": solver events in order");
             assertEquals(off.edges(), on.edges(), mode + ": call edges");
             assertEquals(off.reached(), on.reached(), mode + ": reachable methods");
@@ -151,6 +267,7 @@ public class CallBlockProbeEquivalenceTest {
         Snapshot off = run(dir, main, "1-call", "none", log);
         for (String mode : List.of("p1b", "p1t")) {
             Snapshot on = run(dir, main, "1-call", mode, log);
+            assertProbeQuiet(on, mode);
             assertEquals(off.events(), on.events(), mode + ": solver events in order");
             assertEquals(off.edges(), on.edges(), mode + ": call edges");
             assertEquals(off.pointsTo(), on.pointsTo(), mode + ": points-to sets");
@@ -159,7 +276,6 @@ public class CallBlockProbeEquivalenceTest {
             assertEdgesOffered(probe);
         }
     }
-
 
     @ParameterizedTest
     @CsvSource({"1-call"})
@@ -171,10 +287,62 @@ public class CallBlockProbeEquivalenceTest {
         assertTrue(probe.count(EdgeClass.PLAIN, Counter.P1_BLOCKS)
                 < probe.count(EdgeClass.PLAIN, Counter.BATCHES), probe.line());
         assertTrue(probe.phase1RuleCost(EdgeClass.PLAIN)
-                <= probe.phase1Cost(EdgeClass.PLAIN), probe.line());        for (EdgeClass c : List.of(EdgeClass.LAMBDA_BOUND, EdgeClass.LAMBDA_UNBOUND,
+                <= probe.phase1Cost(EdgeClass.PLAIN), probe.line());
+        for (EdgeClass c : List.of(EdgeClass.LAMBDA_BOUND, EdgeClass.LAMBDA_UNBOUND,
                 EdgeClass.LAMBDA_STATIC, EdgeClass.LAMBDA_NEW)) {
             assertTrue(probe.count(c, Counter.EDGES) > 0, c + ": " + probe.line());
         }
+    }
+
+    /**
+     * Plain {@code W_TODAY} is the PFG edges processCallEdge adds for the
+     * plain call edges, recounted here from the CS call graph: one per
+     * argument of reference type when the call site's arguments match the
+     * callee's parameters, and one per return variable of reference type
+     * when the call site's result is of reference type (the default
+     * propagate types), for a callee that is not ignored (an application
+     * method under the tests' {@code only-app:true}).
+     */
+    @ParameterizedTest
+    @CsvSource({"ci", "1-call", "2-obj"})
+    void plainWeightsAreTheAddedParameterAndReturnEdges(String cs) {
+        run("basic", "Call", cs, "p1t");
+        PointerAnalysisResult pta = World.get().getResult(PointerAnalysis.ID);
+        long argEdges = 0;
+        long returnEdges = 0;
+        for (Edge<CSCallSite, CSMethod> edge : pta.getCSCallGraph().edges().toList()) {
+            JMethod callee = edge.getCallee().getMethod();
+            if (!isPlain(edge) || !callee.isApplication()) {
+                continue;
+            }
+            Invoke callSite = edge.getCallSite().getCallSite();
+            InvokeExp invokeExp = callSite.getInvokeExp();
+            if (invokeExp.getArgCount() == callee.getParamCount()) {
+                argEdges += invokeExp.getArgs().stream()
+                        .filter(arg -> isReference(arg.getType())).count();
+            }
+            Var lhs = callSite.getResult();
+            if (lhs != null && isReference(lhs.getType())) {
+                returnEdges += callee.getIR().getReturnVars().stream()
+                        .filter(ret -> isReference(ret.getType())).count();
+            }
+        }
+        CallBlockProbe probe = ProbeReader.probe;
+        // the fixture passes two arguments to foo and takes its result
+        assertTrue(argEdges > 0 && returnEdges > 0, argEdges + " " + returnEdges);
+        assertEquals(argEdges + returnEdges, probe.count(EdgeClass.PLAIN, Counter.W_TODAY),
+                probe.line());
+    }
+
+    /** @return whether the probe counts {@code edge} as {@link EdgeClass#PLAIN} */
+    private static boolean isPlain(Edge<CSCallSite, CSMethod> edge) {
+        CallKind kind = edge.getKind();
+        return edge.getClass() == Edge.class && (kind == CallKind.VIRTUAL
+                || kind == CallKind.INTERFACE || kind == CallKind.SPECIAL);
+    }
+
+    private static boolean isReference(Type type) {
+        return type instanceof ReferenceType && !(type instanceof NullType);
     }
 
     /**
