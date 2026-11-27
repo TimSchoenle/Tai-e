@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import pascal.taie.World;
@@ -78,6 +79,17 @@ public class CallBlockProbeEquivalenceTest {
         public void onStart() {
             probe = solver.getCallBlockProbe();
         }
+    }
+
+    /**
+     * The probe holds the object indexer of its CS manager, so a kept probe
+     * keeps the whole solve and its World reachable for the rest of the
+     * test JVM (the fork sweep ran out of its 2G heap); drop it after each
+     * case.
+     */
+    @AfterEach
+    void dropProbe() {
+        ProbeReader.probe = null;
     }
 
     private record Snapshot(List<String> events, Set<String> edges, Set<String> reached,
