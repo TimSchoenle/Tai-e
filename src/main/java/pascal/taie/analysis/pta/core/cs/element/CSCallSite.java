@@ -126,6 +126,13 @@ public class CSCallSite extends AbstractCSElement {
     }
 
     /**
+     * Adds the sources of the edges from this call site to {@code census}.
+     */
+    void census(EdgeSourceCensus census) {
+        edges.census(census);
+    }
+
+    /**
      * @return the live set of exceptions that the exception analysis found
      * this call site may throw, or null if it found none yet; only that
      * analysis changes it.

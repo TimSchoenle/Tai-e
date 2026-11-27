@@ -30,10 +30,13 @@ import pascal.taie.util.collection.OpenHashSet;
 
 import java.util.AbstractSet;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Add-only set of the call edges out of one call site, laid out exactly as
@@ -45,9 +48,9 @@ import java.util.Objects;
  * <p>
  * A plain edge (see {@link #isPlain}) is held as its callee alone, a
  * sourced edge (see {@link #sourceOf}) as its callee and, at the same index
- * of a parallel array, its {@link EdgeSource}; both are rebuilt on read as
- * an equal edge of the same class, with the same hash code. Every other
- * edge is held as the object that was added. Membership follows
+ * of a parallel source store, its {@link EdgeSource}; both are rebuilt on
+ * read as an equal edge of the same class, with the same hash code. Every
+ * other edge is held as the object that was added. Membership follows
  * {@link Edge#equals}: a plain edge never equals another edge, two plain
  * edges are equal exactly when their callees are the same, and two sourced
  * edges exactly when their callees are the same and their sources equal.
@@ -74,12 +77,27 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
     /**
      * The sources of the sourced edges. While {@link #table} is empty: the
      * {@link EdgeSource} of {@link #single}, or null if it is not a sourced
-     * edge. Otherwise an {@code EdgeSource[]} as long as {@link #table},
-     * with the sources at the indices of their callees, or null while no
-     * sourced edge is in {@link #table}. One field for both, so that the set
-     * takes no more space than without sourced edges.
+     * edge. Otherwise null while no sourced edge is in {@link #table}, else
+     * a store as long as {@link #table} with the sources at the indices of
+     * their callees: a {@link SourceColumn} for a hashed table of at least
+     * {@value #COLUMN_MIN_CAPACITY} slots while its codes fit, else an
+     * {@code EdgeSource[]} (see {@link #storeSource}). One field for all,
+     * so that the set takes no more space than without sourced edges.
      */
     private @Nullable Object sources;
+
+    /**
+     * Tables of at least this many slots keep their sources in a
+     * {@link SourceColumn}; smaller ones (dense tables of at most
+     * {@link OpenHashSet#SMALL_LIMIT} slots among them) in an
+     * {@code EdgeSource[]}. A column never takes more bytes than the array
+     * (it refuses a source that would make it so), but it saves little in a
+     * small table: at 16 slots the array takes 80 bytes and a column at
+     * least 112, at 32 slots 144 against at least 128, at 64 slots 272
+     * against 160 for up to three distinct sources (see
+     * {@link SourceColumn#bytes}).
+     */
+    private static final int COLUMN_MIN_CAPACITY = 64;
 
     /**
      * The only element while {@link #table} is empty and one edge is held.
@@ -151,37 +169,68 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
                     int capacity = Math.max(1,
                             Math.min(OpenHashSet.SMALL_LIMIT, size * 2));
                     table = Arrays.copyOf(table, capacity);
-                    EdgeSource[] srcs = tableSources();
-                    if (srcs != null) {
+                    if (sources instanceof EdgeSource[] srcs) {
                         sources = Arrays.copyOf(srcs, capacity);
                     }
                 }
                 slot = size;
             } else {
                 rehash(OpenHashSet.SMALL_LIMIT * 2);
-                slot = findSlot(table, tableSources(), e, source);
+                slot = findSlot(table, sources, e, source);
             }
         } else {
-            slot = findSlot(table, tableSources(), e, source);
+            slot = findSlot(table, sources, e, source);
             if (table[slot] != null) {
                 return false;
             }
             if ((size + 1) * 3L > table.length * 2L) {
                 rehash(table.length * 2);
-                slot = findSlot(table, tableSources(), e, source);
+                slot = findSlot(table, sources, e, source);
             }
         }
         table[slot] = e;
         if (source != null) {
-            EdgeSource[] srcs = tableSources();
-            if (srcs == null) {
-                srcs = new EdgeSource[table.length];
-                sources = srcs;
-            }
-            srcs[slot] = source;
+            setSource(slot, source);
         }
         ++size;
         return true;
+    }
+
+    /**
+     * Sets the source of {@code slot} of {@link #table}, creating the
+     * source store of the table if it has none.
+     */
+    private void setSource(int slot, EdgeSource source) {
+        sources = storeSource(sources, table.length, slot, source);
+    }
+
+    /**
+     * Puts {@code source} at {@code slot} of {@code srcs}, the source store
+     * of a table of {@code capacity} slots, or of a new store if
+     * {@code srcs} is null: an {@link SourceColumn} for a table of at least
+     * {@value #COLUMN_MIN_CAPACITY} slots, else an {@code EdgeSource[]}. A
+     * column that refuses the source is replaced by an equal
+     * {@code EdgeSource[]}, as a column of codes it cannot use takes more
+     * bytes than the array.
+     *
+     * @return the store that holds the source
+     */
+    private static Object storeSource(@Nullable Object srcs, int capacity,
+                                      int slot, EdgeSource source) {
+        Object store = srcs;
+        if (store == null) {
+            store = capacity < COLUMN_MIN_CAPACITY
+                    ? new EdgeSource[capacity]
+                    : new SourceColumn(capacity);
+        }
+        if (store instanceof SourceColumn column) {
+            if (column.set(slot, source)) {
+                return column;
+            }
+            store = column.toArray();
+        }
+        ((EdgeSource[]) store)[slot] = source;
+        return store;
     }
 
     /**
@@ -221,7 +270,7 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         if (isDense()) {
             return containsDense(e, source);
         }
-        return table[findSlot(table, tableSources(), e, source)] != null;
+        return table[findSlot(table, sources, e, source)] != null;
     }
 
     /**
@@ -240,7 +289,7 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         if (isDense()) {
             return containsDense(callee, null);
         }
-        return table[findSlot(table, tableSources(), callee, null)] != null;
+        return table[findSlot(table, sources, callee, null)] != null;
     }
 
     @Override
@@ -256,7 +305,7 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
 
             private final Object[] tab = table;
 
-            private final EdgeSource @Nullable [] srcs = tableSources();
+            private final @Nullable Object srcs = tab == EMPTY ? null : sources;
 
             private Object pendingSingle = tab == EMPTY ? single : null;
 
@@ -293,18 +342,57 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
                 }
                 int i = index;
                 index = advance(i + 1);
-                return expand(tab[i], srcs == null ? null : srcs[i]);
+                return expand(tab[i], sourceIn(srcs, i));
             }
         };
     }
 
     /**
-     * @return the parallel array of the sources of the edges in
-     * {@link #table}, or null if none of them is a sourced edge or the
-     * table is empty.
+     * Adds the sources of this call site to {@code census}: the number of
+     * sourced edges, of their distinct sources (by identity), the bytes of
+     * the source store and the bytes an {@code EdgeSource[]} as long as
+     * {@link #table} would take. A call site without sourced edges is not
+     * added.
      */
-    private EdgeSource @Nullable [] tableSources() {
-        return table == EMPTY ? null : (EdgeSource[]) sources;
+    void census(EdgeSourceCensus census) {
+        Object srcs = sources;
+        if (srcs == null) {
+            return;
+        }
+        if (table == EMPTY) {
+            // the source of the single edge, held in the field itself
+            census.site(1, 1, 0, 0);
+            return;
+        }
+        Set<EdgeSource> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+        int sourced = 0;
+        for (int i = 0; i < table.length; ++i) {
+            EdgeSource source = sourceIn(srcs, i);
+            if (source != null) {
+                ++sourced;
+                distinct.add(source);
+            }
+        }
+        long bytes = srcs instanceof SourceColumn column
+                ? column.bytes()
+                : EdgeSourceCensus.arrayBytes(((EdgeSource[]) srcs).length, 4);
+        census.site(sourced, distinct.size(), bytes,
+                EdgeSourceCensus.arrayBytes(table.length, 4));
+    }
+
+    /**
+     * @return the source at index {@code i} of the source store
+     * {@code srcs} of a table (see {@link #sources}), or null if {@code srcs}
+     * is null or holds no source there.
+     */
+    @Nullable
+    private static EdgeSource sourceIn(@Nullable Object srcs, int i) {
+        if (srcs == null) {
+            return null;
+        }
+        return srcs instanceof SourceColumn column
+                ? column.get(i)
+                : ((EdgeSource[]) srcs)[i];
     }
 
     /**
@@ -367,28 +455,32 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
     }
 
     private boolean containsDense(Object e, @Nullable EdgeSource source) {
-        EdgeSource[] srcs = tableSources();
+        Object srcs = sources;
         for (int i = 0; i < size; ++i) {
-            if (matches(table[i], srcs == null ? null : srcs[i], e, source)) {
+            if (matches(table[i], sourceIn(srcs, i), e, source)) {
                 return true;
             }
         }
         return false;
     }
 
+    /**
+     * Moves the edges into a hashed table of {@code capacity} slots, with a
+     * new source store (see {@link #storeSource}) if any edge is sourced.
+     */
     private void rehash(int capacity) {
         Object[] old = table;
-        EdgeSource[] oldSources = tableSources();
+        Object oldSources = sources;
         Object[] fresh = new Object[capacity];
-        EdgeSource[] freshSources = oldSources == null ? null : new EdgeSource[capacity];
+        Object freshSources = null;
         for (int i = 0; i < old.length; ++i) {
             Object e = old[i];
             if (e != null) {
-                EdgeSource source = oldSources == null ? null : oldSources[i];
+                EdgeSource source = sourceIn(oldSources, i);
                 int slot = findSlot(fresh, freshSources, e, source);
                 fresh[slot] = e;
-                if (freshSources != null) {
-                    freshSources[slot] = source;
+                if (source != null) {
+                    freshSources = storeSource(freshSources, capacity, slot, source);
                 }
             }
         }
@@ -396,14 +488,14 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         sources = freshSources;
     }
 
-    private int findSlot(Object[] tab, EdgeSource @Nullable [] srcs,
+    private int findSlot(Object[] tab, @Nullable Object srcs,
                          Object e, @Nullable EdgeSource source) {
         int h = hash(e, source);
         int mask = tab.length - 1;
         int i = (h ^ (h >>> 16)) & mask;
         Object cur;
         while ((cur = tab[i]) != null
-                && !matches(cur, srcs == null ? null : srcs[i], e, source)) {
+                && !matches(cur, sourceIn(srcs, i), e, source)) {
             i = (i + 1) & mask;
         }
         return i;

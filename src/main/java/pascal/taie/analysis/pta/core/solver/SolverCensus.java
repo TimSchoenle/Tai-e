@@ -26,7 +26,9 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
+import pascal.taie.analysis.pta.core.cs.CSCallGraph;
 import pascal.taie.analysis.pta.core.cs.element.CSManager;
+import pascal.taie.analysis.pta.core.cs.element.EdgeSourceCensus;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
 import pascal.taie.analysis.pta.pts.PointsToSetCensus;
 
@@ -43,19 +45,23 @@ import java.util.stream.Stream;
  *     of a kind other than {@link FlowKind#OTHER} (plugin edges), with the
  *     transfer {@link Identity}, into a pointer without filters;</li>
  *     <li>the block census of the points-to sets of all pointers;</li>
- *     <li>the census of the context-sensitive objects ({@link CSObjCensus}).</li>
+ *     <li>the census of the context-sensitive objects ({@link CSObjCensus});</li>
+ *     <li>the census of the sources of the sourced call edges
+ *     ({@link EdgeSourceCensus}) over the reachable CS methods, logged with
+ *     its own wall time.</li>
  * </ul>
  * Mock pointers are included in the first two. The graph's edges are the
  * qualifying edge transfers (one per edge and transfer).
  */
-record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts, CSObjCensus objs) {
+record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts, CSObjCensus objs,
+                    EdgeSourceCensus edgeSources) {
 
     private static final Logger logger = LoggerFactory.getLogger(SolverCensus.class);
 
     /**
      * Takes the census of the pointers of the manager and logs it.
      */
-    static SolverCensus take(CSManager csManager) {
+    static SolverCensus take(CSManager csManager, CSCallGraph callGraph) {
         Pointer[] byIndex = pointersByIndex(csManager);
         int n = byIndex.length;
         int[] start = new int[n + 1];
@@ -83,9 +89,15 @@ record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts, CSObjCensus objs) {
         }
         pts.finish();
         CSObjCensus objs = CSObjCensus.take(csManager);
-        SolverCensus census = new SolverCensus(scc, pts, objs);
-        // the wall time of the points-to set census closes its last line
-        logger.info("{}\n{} wall-ms={}\n{}", scc, pts, pts.wallNanos() / 1_000_000, objs);
+        long edgeStart = System.nanoTime();
+        EdgeSourceCensus edgeSources = new EdgeSourceCensus();
+        callGraph.reachableMethods().forEach(edgeSources::add);
+        long edgeMillis = (System.nanoTime() - edgeStart) / 1_000_000;
+        SolverCensus census = new SolverCensus(scc, pts, objs, edgeSources);
+        // each census with a wall time ends its line with it: the points-to
+        // set census (wall-ms) and the edge-source census (wall_ms)
+        logger.info("{}\n{} wall-ms={}\n{}\n{} wall_ms={}", scc, pts,
+                pts.wallNanos() / 1_000_000, objs, edgeSources, edgeMillis);
         return census;
     }
 

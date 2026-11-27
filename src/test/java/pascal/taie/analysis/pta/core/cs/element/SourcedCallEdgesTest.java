@@ -164,6 +164,108 @@ public class SourcedCallEdgesTest {
     }
 
     /**
+     * Sourced edges from pools of distinct source objects that take a call
+     * site's source store through every form: byte codes (3 sources),
+     * char codes (300), back to the sources themselves when the sources
+     * outnumber one per six slots (1500, rebuilt as codes on each growth)
+     * and when they outnumber the char codes (70000); with plain edges in
+     * between, so that callees hold sparse and dense source stores. Every
+     * reader sees the very source objects that an object store holds.
+     */
+    @Test
+    void readersSeeTheSameSourceObjectsInEveryStoreForm() {
+        checkSourcePool(new Random(1), 2_000, 3, 30, true);
+        checkSourcePool(new Random(2), 3_000, 300, 10, true);
+        checkSourcePool(new Random(3), 6_000, 1_500, 90, true);
+        checkSourcePool(new Random(4), 450_000, 70_000, 5, false);
+    }
+
+    private void checkSourcePool(Random random, int steps, int poolSize,
+                                 int plainPercent, boolean checkEachStep) {
+        List<TestSource> pool = new ArrayList<>();
+        for (int i = 0; i < poolSize; ++i) {
+            pool.add(new TestSource(i, i % 7));
+        }
+        CSCallSite site = virtualSite();
+        List<CSCallSite> otherSites = List.of(virtualSite(), virtualSite());
+        List<CSMethod> callees = new ArrayList<>();
+        for (int i = 0; i < 64; ++i) {
+            callees.add(new CSMethod(null, context));
+        }
+        Set<Edge<CSCallSite, CSMethod>> outRef = new OpenHashSet<>();
+        Map<CSMethod, List<Edge<CSCallSite, CSMethod>>> inRef = Maps.newMap();
+        for (int step = 0; step < steps; ++step) {
+            CSMethod callee = callees.get(random.nextInt(callees.size()));
+            Edge<CSCallSite, CSMethod> edge;
+            // the share of plain edges flips halfway, so that callees start
+            // sparse source stores and turn them dense
+            int percent = step < steps / 2 ? plainPercent : 100 - plainPercent;
+            if (random.nextInt(100) < percent) {
+                // plain edges from the sourced site itself (null-source
+                // slots among the sourced ones), from two fixed sites and
+                // from fresh ones, so that callees gather many plain edges
+                int pick = random.nextInt(4);
+                CSCallSite from = pick == 0 ? site
+                        : pick == 1 ? otherSites.get(random.nextInt(otherSites.size()))
+                        : virtualSite();
+                edge = new Edge<>(CallKind.VIRTUAL, from, callee);
+                boolean added = from.addEdge(edge);
+                if (from == site) {
+                    assertEquals(outRef.add(edge), added);
+                }
+                if (added) {
+                    callee.addEdge(edge);
+                    inRef.computeIfAbsent(callee, c -> new ArrayList<>()).add(edge);
+                }
+                continue;
+            }
+            TestSource source = pool.get(random.nextInt(pool.size()));
+            if (random.nextInt(50) == 0) {
+                // an equal source as another object
+                source = new TestSource(source.id(), source.hash());
+            }
+            edge = source.edge(site, callee);
+            boolean expected = outRef.add(edge);
+            assertEquals(expected, site.addEdge(edge));
+            if (expected) {
+                callee.addEdge(edge);
+                inRef.computeIfAbsent(callee, c -> new ArrayList<>()).add(edge);
+            }
+            if (checkEachStep && step % 97 == 0) {
+                assertSameSources(List.copyOf(outRef), List.copyOf(site.getEdges()));
+            }
+        }
+        assertSameSources(List.copyOf(outRef), List.copyOf(site.getEdges()));
+        for (CSMethod callee : callees) {
+            List<Edge<CSCallSite, CSMethod>> expected = inRef.getOrDefault(callee, List.of());
+            List<Edge<CSCallSite, CSMethod>> byIndex = new ArrayList<>();
+            for (int i = 0; i < callee.getEdgeCount(); ++i) {
+                byIndex.add(callee.getEdge(i));
+            }
+            assertSameSources(expected, byIndex);
+            assertSameSources(expected, List.copyOf(callee.getEdges()));
+        }
+    }
+
+    /**
+     * Asserts that the lists hold equal edges of the same classes in the
+     * same order, the sourced ones with the same source objects.
+     */
+    private static void assertSameSources(List<Edge<CSCallSite, CSMethod>> expected,
+                                          List<Edge<CSCallSite, CSMethod>> actual) {
+        assertEquals(expected, actual);
+        for (int i = 0; i < expected.size(); ++i) {
+            Edge<CSCallSite, CSMethod> e = expected.get(i);
+            Edge<CSCallSite, CSMethod> a = actual.get(i);
+            assertSame(e.getClass(), a.getClass());
+            assertSame(e.getCallSite(), a.getCallSite());
+            if (e instanceof SourcedEdge sourced) {
+                assertSame(sourced.getSource(), ((SourcedEdge) a).getSource());
+            }
+        }
+    }
+
+    /**
      * Bytes that a sourced edge adds to its call site and callee, against
      * the same edge held as its object (as an {@link OtherEdge} is), over
      * call sites and callees with eight edges each; the median of five
@@ -331,7 +433,7 @@ public class SourcedCallEdgesTest {
      * A source whose equality is its id and whose hash is {@code hash}, so
      * that sources may collide.
      */
-    private record TestSource(int id, int hash) implements EdgeSource {
+    record TestSource(int id, int hash) implements EdgeSource {
 
         @Override
         public Edge<CSCallSite, CSMethod> edge(CSCallSite callSite, CSMethod callee) {

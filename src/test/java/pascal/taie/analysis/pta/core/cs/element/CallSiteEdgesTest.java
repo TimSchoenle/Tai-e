@@ -62,6 +62,108 @@ public class CallSiteEdgesTest {
 
     private final CSMethod caller = new CSMethod(null, context);
 
+    /**
+     * The edge-source census counts the call sites with sourced edges by
+     * their distinct sources, skips call sites without, and shows the
+     * bytes of the source stores dropping against the layout of one
+     * {@code EdgeSource[]} slot per table slot (forward) and per index up
+     * to the last sourced one (reverse).
+     */
+    @Test
+    void edgeSourceCensusCountsDistinctSourcesAndStoreBytes() {
+        List<SourcedCallEdgesTest.TestSource> three = List.of(
+                new SourcedCallEdgesTest.TestSource(1, 1),
+                new SourcedCallEdgesTest.TestSource(2, 2),
+                new SourcedCallEdgesTest.TestSource(3, 3));
+        List<CSMethod> callees = new ArrayList<>();
+        for (int i = 0; i < 1000; ++i) {
+            callees.add(new CSMethod(null, context));
+        }
+        CSCallSite many = virtualSite();
+        for (int i = 0; i < callees.size(); ++i) {
+            addBoth(three.get(i % 3).edge(many, callees.get(i)));
+        }
+        CSCallSite single = virtualSite();
+        addBoth(three.get(0).edge(single, callees.get(0)));
+        // mixed: 100 plain edges (50 from a site without sources), then two
+        // sourced ones
+        CSMethod mixed = new CSMethod(null, context);
+        CSCallSite plain = virtualSite();
+        for (int i = 0; i < 50; ++i) {
+            addBoth(new Edge<>(CallKind.VIRTUAL, plain, mixed));
+            addBoth(new Edge<>(CallKind.VIRTUAL, virtualSite(), mixed));
+        }
+        addBoth(three.get(1).edge(single, mixed));
+        addBoth(three.get(2).edge(virtualSite(), mixed));
+        callees.add(mixed);
+
+        EdgeSourceCensus census = new EdgeSourceCensus();
+        callees.forEach(census::add);
+        String line = census.toString();
+        assertTrue(line.contains(" sites=3 forward_edges=1003 "), line);
+        assertTrue(line.contains("distinct_per_site(1=1 2-8=2 9-255=0 256-65535=0 more=0)"), line);
+        assertTrue(line.contains(" max_distinct=3 "), line);
+        assertTrue(line.contains(" callees=1001 reverse_edges=1003 "), line);
+        assertTrue(census.forwardBytes() * 3 < census.forwardRefBytes(), line);
+
+        EdgeSourceCensus reverse = new EdgeSourceCensus();
+        reverse.add(mixed);
+        reverse.add(mixed); // each call site counts once
+        String reverseLine = reverse.toString();
+        assertTrue(reverseLine.contains(" sites=2 forward_edges=3 "), reverseLine);
+        assertTrue(reverse.reverseBytes() * 3 < reverse.reverseDenseBytes(), reverseLine);
+    }
+
+    /**
+     * A call site keeps the sources in an {@code EdgeSource[]} in a hashed
+     * table below 64 slots (16 and 32 slots, one source), and where a
+     * column of codes with its dictionary and lookup table would take more
+     * bytes than the array (10 sources in 64 slots, 200 in 512); in a
+     * table of 64 slots with one source, a column that takes fewer.
+     */
+    @Test
+    void sourceStoreIsNoLargerThanTheArrayWhereCodesDoNotPay() {
+        EdgeSourceCensus census = forwardCensus(10, 1);
+        assertEquals(census.forwardRefBytes(), census.forwardBytes(), census.toString());
+        census = forwardCensus(20, 1);
+        assertEquals(census.forwardRefBytes(), census.forwardBytes(), census.toString());
+        census = forwardCensus(40, 10);
+        assertEquals(census.forwardRefBytes(), census.forwardBytes(), census.toString());
+        census = forwardCensus(200, 200);
+        assertEquals(census.forwardRefBytes(), census.forwardBytes(), census.toString());
+        census = forwardCensus(40, 1);
+        assertTrue(census.forwardBytes() < census.forwardRefBytes(), census.toString());
+    }
+
+    /**
+     * @return the edge-source census of one call site with {@code edges}
+     * sourced edges to fresh callees, of {@code distinct} sources in turn.
+     */
+    private EdgeSourceCensus forwardCensus(int edges, int distinct) {
+        List<SourcedCallEdgesTest.TestSource> pool = new ArrayList<>();
+        for (int i = 0; i < distinct; ++i) {
+            pool.add(new SourcedCallEdgesTest.TestSource(i, i));
+        }
+        CSCallSite site = virtualSite();
+        List<CSMethod> callees = new ArrayList<>();
+        for (int i = 0; i < edges; ++i) {
+            CSMethod callee = new CSMethod(null, context);
+            callees.add(callee);
+            addBoth(pool.get(i % distinct).edge(site, callee));
+        }
+        EdgeSourceCensus census = new EdgeSourceCensus();
+        callees.forEach(census::add);
+        String line = census.toString();
+        assertTrue(line.contains(" sites=1 forward_edges=" + edges + " "), line);
+        return census;
+    }
+
+    private static void addBoth(Edge<CSCallSite, CSMethod> edge) {
+        if (edge.getCallSite().addEdge(edge)) {
+            edge.getCallee().addEdge(edge);
+        }
+    }
+
     @Test
     void plainEdgeIsRebuiltNotRetained() {
         CSCallSite site = staticSite();

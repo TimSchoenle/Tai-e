@@ -46,6 +46,15 @@ import java.util.function.Supplier;
  */
 public class CSMethod extends AbstractCSElement {
 
+    /**
+     * Below this index, the first sourced edge starts a dense store, as it
+     * takes no more bytes than a sparse one there: a dense store up to
+     * index 13 takes at most 16 + 14 * 4 = 72 bytes, a sparse store with one
+     * source 72 bytes too (the object 24, a one-element {@code int[]} and
+     * {@code EdgeSource[]} 24 each; see {@link SparseSources#bytes}).
+     */
+    private static final int SPARSE_MIN_INDEX = 14;
+
     private final JMethod method;
 
     /**
@@ -58,11 +67,16 @@ public class CSMethod extends AbstractCSElement {
     private final ArrayList<Object> edges = new ArrayList<>(4);
 
     /**
-     * The sources of the sourced edges, at their indices in {@link #edges};
-     * null at the other indices, and may be shorter than {@link #edges}.
-     * Null while no sourced edge was added.
+     * The sources of the sourced edges by their indices in {@link #edges};
+     * null while no sourced edge was added. Either an {@code EdgeSource[]}
+     * with the sources at their indices, null at the other indices, which
+     * may be shorter than {@link #edges} (dense), or a
+     * {@link SparseSources} with the sourced indices only. A sourced edge
+     * keeps the form that takes fewer bytes: the sparse one while fewer
+     * than half of the indices up to the last sourced one are sourced, and
+     * once dense, the store stays dense.
      */
-    private EdgeSource @Nullable [] sources;
+    private @Nullable Object sources;
 
     private final ResultHolder resultHolder = new AbstractResultHolder() {};
 
@@ -99,16 +113,47 @@ public class CSMethod extends AbstractCSElement {
 
     /**
      * Records {@code source} as the source of the edge at {@code index} of
-     * {@link #edges}, growing {@link #sources} as {@link ArrayList} grows.
+     * {@link #edges}, the last one so far, in the form of {@link #sources}
+     * that takes fewer bytes; a dense store grows as {@link ArrayList}
+     * grows.
      */
     private void setSource(int index, EdgeSource source) {
-        if (sources == null) {
-            sources = new EdgeSource[index + 1];
-        } else if (index >= sources.length) {
-            int length = sources.length;
-            sources = Arrays.copyOf(sources, Math.max(index + 1, length + (length >> 1)));
+        Object s = sources;
+        if (s == null) {
+            sources = index < SPARSE_MIN_INDEX
+                    ? dense(index + 1, index, source)
+                    : new SparseSources(index, source);
+            return;
         }
-        sources[index] = source;
+        if (s instanceof SparseSources sparse) {
+            // dense takes 4 bytes per index up to this one, sparse 8 per
+            // sourced index
+            if (2L * (sparse.count + 1) >= index + 1L) {
+                EdgeSource[] dense = dense(index + 1, index, source);
+                sparse.copyTo(dense);
+                sources = dense;
+            } else {
+                sparse.add(index, source);
+            }
+            return;
+        }
+        EdgeSource[] dense = (EdgeSource[]) s;
+        if (index >= dense.length) {
+            int length = dense.length;
+            dense = Arrays.copyOf(dense, Math.max(index + 1, length + (length >> 1)));
+            sources = dense;
+        }
+        dense[index] = source;
+    }
+
+    /**
+     * @return a dense store of {@code length} with {@code source} at
+     * {@code index}.
+     */
+    private static EdgeSource[] dense(int length, int index, EdgeSource source) {
+        EdgeSource[] dense = new EdgeSource[length];
+        dense[index] = source;
+        return dense;
     }
 
     /**
@@ -117,8 +162,109 @@ public class CSMethod extends AbstractCSElement {
      */
     @Nullable
     private EdgeSource sourceAt(int index) {
-        EdgeSource[] s = sources;
-        return s != null && index < s.length ? s[index] : null;
+        Object s = sources;
+        if (s instanceof EdgeSource[] dense) {
+            return index < dense.length ? dense[index] : null;
+        }
+        return s == null ? null : ((SparseSources) s).get(index);
+    }
+
+    /**
+     * Adds the call sites of the edges to this CS method, and its sources,
+     * to {@code census}: the number of sourced edges, the bytes of
+     * {@link #sources} and the bytes of the shortest dense store.
+     */
+    @SuppressWarnings("unchecked")
+    void census(EdgeSourceCensus census) {
+        for (Object e : edges) {
+            census.callSite(e instanceof CSCallSite callSite
+                    ? callSite
+                    : ((Edge<CSCallSite, CSMethod>) e).getCallSite());
+        }
+        Object s = sources;
+        if (s == null) {
+            return;
+        }
+        int sourced = 0;
+        int last = -1;
+        long bytes;
+        if (s instanceof EdgeSource[] dense) {
+            for (int i = 0; i < dense.length; ++i) {
+                if (dense[i] != null) {
+                    ++sourced;
+                    last = i;
+                }
+            }
+            bytes = EdgeSourceCensus.arrayBytes(dense.length, 4);
+        } else {
+            SparseSources sparse = (SparseSources) s;
+            sourced = sparse.count;
+            last = sparse.indices[sparse.count - 1];
+            bytes = sparse.bytes();
+        }
+        census.callee(sourced, bytes, EdgeSourceCensus.arrayBytes(last + 1, 4));
+    }
+
+    /**
+     * The sources of the sourced edges of a CS method with their indices
+     * in {@link #edges}, by ascending index.
+     */
+    private static final class SparseSources {
+
+        /**
+         * Estimated bytes of the object itself: header and fields.
+         */
+        private static final int OBJECT_BYTES = 24;
+
+        private int[] indices;
+
+        private EdgeSource[] values;
+
+        private int count;
+
+        private SparseSources(int index, EdgeSource source) {
+            indices = new int[] {index};
+            values = new EdgeSource[] {source};
+            count = 1;
+        }
+
+        /**
+         * Adds {@code source} at {@code index}, above every index held.
+         */
+        private void add(int index, EdgeSource source) {
+            if (count == indices.length) {
+                int length = count + Math.max(1, count >> 1);
+                indices = Arrays.copyOf(indices, length);
+                values = Arrays.copyOf(values, length);
+            }
+            indices[count] = index;
+            values[count] = source;
+            ++count;
+        }
+
+        @Nullable
+        private EdgeSource get(int index) {
+            if (index > indices[count - 1]) {
+                // the edges after the last sourced one, without a search
+                return null;
+            }
+            int i = Arrays.binarySearch(indices, 0, count, index);
+            return i >= 0 ? values[i] : null;
+        }
+
+        /**
+         * Puts the sources at their indices of {@code dense}.
+         */
+        private void copyTo(EdgeSource[] dense) {
+            for (int i = 0; i < count; ++i) {
+                dense[indices[i]] = values[i];
+            }
+        }
+
+        private long bytes() {
+            return OBJECT_BYTES + EdgeSourceCensus.arrayBytes(indices.length, 4)
+                    + EdgeSourceCensus.arrayBytes(values.length, 4);
+        }
     }
 
     /**
