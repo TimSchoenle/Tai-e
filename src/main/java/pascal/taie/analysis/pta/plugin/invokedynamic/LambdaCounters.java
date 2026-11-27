@@ -45,8 +45,15 @@ import static pascal.taie.analysis.pta.pts.PointsToSetCensus.formatHistogram;
  *     <li>the points-to updates of a callee's this variable, and those
  *     repeating a callee already updated in the same event (one lambda
  *     invocation or one new points-to set);</li>
- *     <li>the lambda call edges built and handed to the solver, and those
- *     the call graph took as new;</li>
+ *     <li>the lambda call edges offered to the solver (handed to it, or
+ *     found already in the call graph and not built), and those the call
+ *     graph took as new;</li>
+ *     <li>per edge path ({@link #EDGE_PATH_NAMES}), the offered edges found
+ *     already in the call graph (redundant); the calls at a lambda
+ *     invocation of a call site and source already registered for the
+ *     receiver variable (repeated), and those the option
+ *     {@code lambda-skip-repeated-call} skipped; the this updates whose receivers the
+ *     this variable already points to (redundant);</li>
  *     <li>at the finish, the receiver variables by their number of
  *     invocation infos, in log2 buckets.</li>
  * </ul>
@@ -77,9 +84,74 @@ final class LambdaCounters {
     private record Callee(Context context, JMethod method) {
     }
 
-    private long edgesBuilt;
+    private long edgesOffered;
 
     private long edgesNew;
+
+    /**
+     * The edge path of a single lambda call edge (a constructor or a static
+     * method); the grouped paths are {@link #PATH_CALL},
+     * {@link #PATH_NEW_PTS} and {@link #PATH_SHARED}.
+     */
+    static final int EDGE_PATH_SINGLE = 3;
+
+    private static final String[] EDGE_PATH_NAMES = {"call", "new_pts", "shared", "single"};
+
+    private final long[] redundantEdges = new long[EDGE_PATH_NAMES.length];
+
+    private long repeatedSiteSourceCalls;
+
+    private long skippedSiteSourceCalls;
+
+    private long redundantThisUpdates;
+
+    /**
+     * Counts an offered lambda call edge on {@code path} that the call graph
+     * already holds.
+     */
+    void edgeRedundant(int path) {
+        ++redundantEdges[path];
+    }
+
+    /**
+     * Counts a call at a lambda invocation whose call site and source the
+     * receiver variable already has.
+     */
+    void repeatedSiteSourceCall() {
+        ++repeatedSiteSourceCalls;
+    }
+
+    /**
+     * Counts a repeated call ({@link #repeatedSiteSourceCall}) that the
+     * option {@code lambda-skip-repeated-call} skipped.
+     */
+    void skippedSiteSourceCall() {
+        ++skippedSiteSourceCalls;
+    }
+
+    /**
+     * Counts a this update whose receivers the this variable already
+     * points to.
+     */
+    void redundantThisUpdate() {
+        ++redundantThisUpdates;
+    }
+
+    long redundantEdges(int path) {
+        return redundantEdges[path];
+    }
+
+    long repeatedSiteSourceCalls() {
+        return repeatedSiteSourceCalls;
+    }
+
+    long skippedSiteSourceCalls() {
+        return skippedSiteSourceCalls;
+    }
+
+    long redundantThisUpdates() {
+        return redundantThisUpdates;
+    }
 
     void enter(int path, boolean hit) {
         ++enters[path];
@@ -108,8 +180,21 @@ final class LambdaCounters {
         }
     }
 
-    void edgeBuilt() {
-        ++edgesBuilt;
+    /**
+     * @return the redundant edges per path, as {@code " edges_redundant_<path>=n"}
+     * items.
+     */
+    private String redundantEdgesText() {
+        StringBuilder text = new StringBuilder();
+        for (int p = 0; p < EDGE_PATH_NAMES.length; ++p) {
+            text.append(" edges_redundant_").append(EDGE_PATH_NAMES[p]).append('=')
+                    .append(redundantEdges[p]);
+        }
+        return text.toString();
+    }
+
+    void edgeOffered() {
+        ++edgesOffered;
     }
 
     void edgeNew() {
@@ -132,8 +217,8 @@ final class LambdaCounters {
         return repeatedThisUpdates;
     }
 
-    long edgesBuilt() {
-        return edgesBuilt;
+    long edgesOffered() {
+        return edgesOffered;
     }
 
     long edgesNew() {
@@ -160,8 +245,12 @@ final class LambdaCounters {
         }
         return line.append("this_updates=").append(thisUpdates)
                 .append(" this_updates_repeated=").append(repeatedThisUpdates)
-                .append(" edges_built=").append(edgesBuilt)
+                .append(" edges_offered=").append(edgesOffered)
                 .append(" edges_new=").append(edgesNew)
+                .append(redundantEdgesText())
+                .append(" site_source_calls_repeated=").append(repeatedSiteSourceCalls)
+                .append(" site_source_calls_skipped=").append(skippedSiteSourceCalls)
+                .append(" this_updates_redundant=").append(redundantThisUpdates)
                 .append(" receiver_vars=").append(vars)
                 .append(" infos_per_receiver_var=").append(formatHistogram(histogram))
                 .toString();

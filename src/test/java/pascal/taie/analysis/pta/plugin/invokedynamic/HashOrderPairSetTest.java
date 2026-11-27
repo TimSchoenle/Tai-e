@@ -186,11 +186,14 @@ class HashOrderPairSetTest {
         private int adds;
 
         /**
-         * Adds to both sets and compares the results and sizes, and the
-         * orders after every add while the sets are small and after every
-         * 31st add later.
+         * Looks the pair up in both sets first (a lookup must not change the
+         * order the later comparison reads), then adds to both sets and
+         * compares the results and sizes, and the orders after every add
+         * while the sets are small and after every 31st add later.
          */
         void add(Key a, Key b) {
+            assertEquals(reference.contains(new Ref(a, b)), set.contains(a, b),
+                    "contains of " + a + ", " + b);
             boolean expected = reference.add(new Ref(a, b));
             assertEquals(expected, set.add(a, b), "add of " + a + ", " + b);
             assertEquals(reference.size(), set.size());

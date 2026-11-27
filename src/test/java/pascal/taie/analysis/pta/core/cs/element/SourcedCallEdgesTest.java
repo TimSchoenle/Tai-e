@@ -97,6 +97,17 @@ public class SourcedCallEdgesTest {
     }
 
     @Test
+    void sourcedLookupRejectsANullSource() {
+        CSCallSite site = virtualSite();
+        CSMethod callee = new CSMethod(null, context);
+        assertThrows(NullPointerException.class, () -> site.hasSourcedEdge(null, callee),
+                "empty set");
+        assertTrue(site.addEdge(new Edge<>(CallKind.VIRTUAL, site, callee)));
+        assertThrows(NullPointerException.class, () -> site.hasSourcedEdge(null, callee),
+                "a null source must not answer for the plain edge");
+    }
+
+    @Test
     void sourcedSecondEdgeAfterAPlainSingle() {
         CSCallSite site = virtualSite();
         CSMethod callee = new CSMethod(null, context);
@@ -254,10 +265,12 @@ public class SourcedCallEdgesTest {
             Set<Edge<CSCallSite, CSMethod>> siteRef = outRef.get(site);
             if (siteRef.size() <= OpenHashSet.SMALL_LIMIT * 3) {
                 assertSameEdges(siteRef, site.getEdges(), probes);
+                assertSourcedLookupAgrees(site, probes);
             }
         }
         for (CSCallSite site : sites) {
             assertSameEdges(outRef.getOrDefault(site, Set.of()), site.getEdges(), probes);
+            assertSourcedLookupAgrees(site, probes);
         }
         for (CSMethod callee : callees) {
             List<Edge<CSCallSite, CSMethod>> expected = inRef.getOrDefault(callee, List.of());
@@ -285,6 +298,23 @@ public class SourcedCallEdgesTest {
         }
         for (Edge<CSCallSite, CSMethod> probe : probes) {
             assertEquals(expected.contains(probe), actual.contains(probe));
+        }
+    }
+
+    /**
+     * The allocation-free lookup {@link CSCallSite#hasSourcedEdge} agrees
+     * with {@code contains} of the edge the source would build at
+     * {@code site}, for the source and callee of every sourced probe.
+     */
+    private static void assertSourcedLookupAgrees(CSCallSite site,
+                                                  List<Edge<CSCallSite, CSMethod>> probes) {
+        for (Edge<CSCallSite, CSMethod> probe : probes) {
+            if (probe instanceof SourcedEdge sourced) {
+                EdgeSource source = sourced.getSource();
+                CSMethod callee = probe.getCallee();
+                assertEquals(site.getEdges().contains(source.edge(site, callee)),
+                        site.hasSourcedEdge(source, callee));
+            }
         }
     }
 

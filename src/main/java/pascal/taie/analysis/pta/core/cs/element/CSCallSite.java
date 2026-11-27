@@ -90,6 +90,14 @@ public class CSCallSite extends AbstractCSElement {
     }
 
     /**
+     * @return whether this call site already has the sourced edge
+     * {@code source.edge(this, callee)}, checked without allocating it.
+     */
+    public boolean hasSourcedEdge(EdgeSource source, CSMethod callee) {
+        return edges.containsSourced(source, callee);
+    }
+
+    /**
      * @return a live, unmodifiable view of the call edges from this call
      * site. A plain edge (of class {@link Edge}, of this call site's own
      * kind) and a {@link SourcedEdge} are held without their objects and
