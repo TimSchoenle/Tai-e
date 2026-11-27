@@ -29,7 +29,6 @@ import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
-import pascal.taie.analysis.pta.core.cs.element.EdgeSource;
 import pascal.taie.ir.exp.InvokeDynamic;
 import pascal.taie.util.Hashes;
 
@@ -51,7 +50,7 @@ import java.util.Objects;
  * ones the method reference passes to its target, which the edge passes
  * instead of the call site's.
  */
-final class LambdaSource implements EdgeSource {
+final class LambdaSource implements LambdaEdgeSource {
 
     private final InvokeDynamic indy;
 
@@ -59,6 +58,13 @@ final class LambdaSource implements EdgeSource {
 
     @Nullable
     private final List<CSVar> samArgs;
+
+    /**
+     * Cache of the interned shape {@link LambdaAnalysis} gives this source
+     * under the option {@code lambda-shared-edges}; not part of the identity.
+     */
+    @Nullable
+    private LambdaShape shape;
 
     LambdaSource(InvokeDynamic indy, Context context) {
         this(indy, context, null);
@@ -85,8 +91,23 @@ final class LambdaSource implements EdgeSource {
      * arguments are then the call site's).
      */
     @Nullable
-    List<CSVar> getSamArgs() {
+    @Override
+    public List<CSVar> getSamArgs() {
         return samArgs;
+    }
+
+    @Override
+    public int capturedCount() {
+        return indy.getArgs().size();
+    }
+
+    @Nullable
+    LambdaShape getShape() {
+        return shape;
+    }
+
+    void setShape(LambdaShape shape) {
+        this.shape = shape;
     }
 
     @Override
@@ -109,7 +130,8 @@ final class LambdaSource implements EdgeSource {
      * @return the hash code of a lambda call edge of this source whose
      * {@link Edge} hash code is {@code edgeHash}.
      */
-    int edgeHashCode(int edgeHash) {
+    @Override
+    public int edgeHashCode(int edgeHash) {
         int result = edgeHash;
         result = 31 * result + indy.hashCode();
         result = 31 * result + context.hashCode();

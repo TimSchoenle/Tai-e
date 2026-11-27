@@ -90,6 +90,8 @@ final class LambdaCounters {
 
     private long edgesNew;
 
+    private long capturedArgsPasses;
+
     /**
      * The edge path of a single lambda call edge (a constructor or a static
      * method); the grouped paths are {@link #PATH_CALL},
@@ -211,6 +213,18 @@ final class LambdaCounters {
         ++edgesNew;
     }
 
+    /**
+     * Counts a pass of a capturing source's captured variables to a callee
+     * under the option {@code lambda-shared-edges}.
+     */
+    void capturedArgsPassed() {
+        ++capturedArgsPasses;
+    }
+
+    long capturedArgsPasses() {
+        return capturedArgsPasses;
+    }
+
     long enters(int path) {
         return enters[path];
     }
@@ -262,6 +276,7 @@ final class LambdaCounters {
                 .append(" edges_offered=").append(edgesOffered)
                 .append(" edges_new=").append(edgesNew)
                 .append(" edges_handed=").append(edgesHanded)
+                .append(" captured_args_passes=").append(capturedArgsPasses)
                 .append(redundantEdgesText())
                 .append(" site_source_calls_repeated=").append(repeatedSiteSourceCalls)
                 .append(" site_source_calls_skipped=").append(skippedSiteSourceCalls)

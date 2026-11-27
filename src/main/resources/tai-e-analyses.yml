@@ -33,6 +33,7 @@
     # object is a field or array base, fewer callee contexts under limit 2)
     lambda-edge-prefilter: true # skip a lambda call edge the call graph already holds before building it (same facts, same order; false only for the equivalence test)
     lambda-skip-repeated-call: false # return early from a lambda invocation call whose call site and non-capturing source the receiver variable already has (same fixpoint, different work-list order: needs owner acceptance)
+    lambda-shared-edges: false # one lambda call edge per call site, callee and passing shape instead of per source; captured variables passed once per source and callee at the offer (same fixpoint, different work-list order)
     propagate-types: [ reference ] # ,null,int,long,...(other primitive types)
     advanced: null # specify advanced analysis:
     # zipper | zipper-e | zipper-e=PV
