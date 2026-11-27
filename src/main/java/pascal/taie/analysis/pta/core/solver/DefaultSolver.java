@@ -243,16 +243,16 @@ public class DefaultSolver implements Solver {
     /**
      * Callee dispatches ({@link CallGraphs#resolveCallee}) made by
      * {@link #processCall}: one per receiver object with {@code per-object},
-     * one per receiver type and call site when batched; counted only when the
-     * counters are kept.
+     * one per receiver type and call site within one points-to delta when
+     * batched; counted only when the counters are kept.
      */
     private long dispatches;
 
     /**
      * Offers of {@link #processCall} that checked the call edge and looked up
      * the {@code this} variable: every offer with {@code per-object}, the
-     * first offer of each CS callee at a call site when batched; counted only
-     * when the counters are kept.
+     * first offer of each CS callee at a call site within one points-to delta
+     * when batched; counted only when the counters are kept.
      */
     private long firstOffers;
 
@@ -275,8 +275,10 @@ public class DefaultSolver implements Solver {
          * {@code batched}: per call site, one dispatch per receiver type, one context
          * selection per callee whose context does not depend on the receiver
          * ({@link ContextSelector#isInstanceContextReceiverFree}), and one
-         * edge check and this-variable lookup per CS callee. It queues no
-         * equal pending call edge twice, so the solver polls fewer work-list
+         * edge check and this-variable lookup per CS callee. Within one
+         * points-to delta of a call site it queues no equal call edge twice
+         * (per-object queues one per receiver object), so the solver polls
+         * fewer work-list
          * entries: its iteration count, and with it the cadence of the
          * progress log and of the live census, can be lower than with
          * {@link #OFF}, while the solver events and their order are the same.

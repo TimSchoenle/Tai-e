@@ -78,6 +78,8 @@ public class CallBatchingCountersTest {
     }
 
     private static long[] offers(String main, String cs, String mode) {
+        // a solve that never finishes must not leave the previous line
+        CountersReader.line = null;
         String old = System.setProperty(DefaultSolver.COUNTERS_PROPERTY, "true");
         try {
             Tests.testPTA(false, "blocks", main, "cs:" + cs,
