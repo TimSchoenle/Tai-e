@@ -37,6 +37,7 @@ import pascal.taie.analysis.pta.core.cs.element.RelayDescriptor;
 import pascal.taie.analysis.pta.core.cs.element.StaticField;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.core.solver.CallBlockProbe;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.util.AnalysisModelPlugin;
@@ -522,6 +523,13 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         }
         ReflectiveCallEdge callEdge = new ReflectiveCallEdge(csCallSite,
                 csManager.getCSMethod(calleeCtx, callee), args);
+        CallBlockProbe probe = solver.getCallBlockProbe();
+        if (probe != null) {
+            CallBlockProbe.Batch batch = probe.begin(callSite,
+                    CallBlockProbe.EdgeClass.REFLECTIVE);
+            batch.offer(callee.isStatic() ? null : recvObj, callEdge.getCallee());
+            probe.end(batch);
+        }
         solver.addCallEdge(callEdge);
         allTargets.put(callSite, callee); // record target
     }

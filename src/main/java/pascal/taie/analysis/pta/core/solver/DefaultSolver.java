@@ -226,6 +226,12 @@ public class DefaultSolver implements Solver {
     private final ProgressCounters progressCounters = new ProgressCounters();
 
     /**
+     * The block-sharing probe (option {@code call-block-probe}), null when
+     * off; it only counts.
+     */
+    private @Nullable CallBlockProbe blockProbe;
+
+    /**
      * Work list entries processed by the current solve.
      */
     private long iterations;
@@ -468,6 +474,11 @@ public class DefaultSolver implements Solver {
         return progressCounters;
     }
 
+    @Override
+    public @Nullable CallBlockProbe getCallBlockProbe() {
+        return blockProbe;
+    }
+
     /**
      * @return the work list entries processed by the last solve.
      */
@@ -569,6 +580,8 @@ public class DefaultSolver implements Solver {
         solveStartNanos = System.nanoTime();
         lastProgressNanos = solveStartNanos;
         liveCensusClock = LiveCensusClock.of(options.getInt("census-interval"), solveStartNanos);
+        blockProbe = CallBlockProbe.of(options.getString("call-block-probe"),
+                csManager.getObjectIndexer());
         liveCensuses = 0;
         liveCensusNanos = 0;
         lastLiveCensus = null;
@@ -705,6 +718,9 @@ public class DefaultSolver implements Solver {
             logger.info("Type filter guards: {}",
                     TypeFilter.guardsBlock(typeFilters.values(), true, GUARD_LINES));
         }
+        if (blockProbe != null) {
+            logger.info("Call block probe: {}", blockProbe.line());
+        }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager);
             owners = takeOwners();
@@ -740,6 +756,9 @@ public class DefaultSolver implements Solver {
                         interner.size(), interner.counters());
             }
             logger.info("Solver counters: {}", countersLine());
+        }
+        if (blockProbe != null) {
+            logger.info("Call block probe: {}", blockProbe.line());
         }
         plugin.onCensus();
         ++liveCensuses;
@@ -1103,6 +1122,9 @@ public class DefaultSolver implements Solver {
             // the CS call site, looked up once per call site and only at
             // its first resolved callee (where the lookup always happened)
             CSCallSite[] csCallSiteOnce = new CSCallSite[1];
+            CallBlockProbe probe = blockProbe;
+            CallBlockProbe.Batch batch = probe == null ? null
+                    : probe.begin(callSite, CallBlockProbe.EdgeClass.PLAIN);
             pts.forEach(recvObj -> {
                 // resolve callee
                 JMethod callee = CallGraphs.resolveCallee(
@@ -1114,13 +1136,16 @@ public class DefaultSolver implements Solver {
                         csCallSite = csManager.getCSCallSite(context, callSite);
                         csCallSiteOnce[0] = csCallSite;
                     }
-                    if (trivialGetters && inlinesGetter(csCallSite, callee, recvObj)) {
+                    if (trivialGetters && inlinesGetter(csCallSite, callee, recvObj, batch)) {
                         return;
                     }
                     Context calleeContext = contextSelector.selectContext(
                             csCallSite, recvObj, callee);
                     // build call edge
                     CSMethod csCallee = csManager.getCSMethod(calleeContext, callee);
+                    if (batch != null) {
+                        batch.offer(recvObj, csCallee);
+                    }
                     CallKind kind = CallGraphs.getCallKind(callSite);
                     // an edge already in the call graph would be a no-op
                     // when polled (processCallEdge), so it is not allocated
@@ -1136,6 +1161,9 @@ public class DefaultSolver implements Solver {
                     plugin.onUnresolvedCall(recvObj, context, callSite);
                 }
             });
+            if (probe != null && batch != null) {
+                probe.end(batch);
+            }
         }
     }
 
@@ -1155,11 +1183,14 @@ public class DefaultSolver implements Solver {
      * one callee context.
      *
      * @param recvObj the receiver object, null for a static call
+     * @param batch   the block probe's batch of the call site, null when the
+     *                probe is off; it gets the getter's edge
      * @return whether the call was taken as a load; false when the callee is
      * not a trivial getter or is ignored
      */
     private boolean inlinesGetter(CSCallSite csCallSite, JMethod callee,
-                                  @Nullable CSObj recvObj) {
+                                  @Nullable CSObj recvObj,
+                                  CallBlockProbe.@Nullable Batch batch) {
         if (isIgnored(callee)) {
             return false;
         }
@@ -1169,6 +1200,9 @@ public class DefaultSolver implements Solver {
         }
         Invoke callSite = csCallSite.getCallSite();
         CSMethod csCallee = csManager.getCSMethod(contextSelector.getEmptyContext(), callee);
+        if (batch != null) {
+            batch.offer(recvObj, csCallee);
+        }
         CallKind kind = CallGraphs.getCallKind(callSite);
         if (!csCallSite.hasPlainEdge(kind, csCallee)) {
             addCallEdge(new Edge<>(kind, csCallSite, csCallee));
@@ -1194,6 +1228,9 @@ public class DefaultSolver implements Solver {
     private void processCallEdge(Edge<CSCallSite, CSMethod> edge) {
         if (callGraph.addEdge(edge)) {
             ++csCallEdges;
+            if (blockProbe != null) {
+                blockProbe.edgeAdded(edge);
+            }
             // process new call edge
             CSMethod csCallee = edge.getCallee();
             addCSMethod(csCallee);
@@ -1364,7 +1401,8 @@ public class DefaultSolver implements Solver {
                 JMethod callee = CallGraphs.resolveCallee(null, callSite);
                 if (callee != null) {
                     CSCallSite csCallSite = csManager.getCSCallSite(context, callSite);
-                    if (trivialGetters && inlinesGetter(csCallSite, callee, null)) {
+                    // a static call is no class of the block probe
+                    if (trivialGetters && inlinesGetter(csCallSite, callee, null, null)) {
                         return;
                     }
                     Context calleeCtx = contextSelector.selectContext(csCallSite, callee);

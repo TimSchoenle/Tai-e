@@ -38,6 +38,7 @@ import pascal.taie.analysis.pta.core.heap.Descriptor;
 import pascal.taie.analysis.pta.core.heap.HeapModel;
 import pascal.taie.analysis.pta.core.heap.MockObj;
 import pascal.taie.analysis.pta.core.heap.Obj;
+import pascal.taie.analysis.pta.core.solver.CallBlockProbe;
 import pascal.taie.analysis.pta.core.solver.DefaultSolver;
 import pascal.taie.analysis.pta.core.solver.PointerFlowEdge;
 import pascal.taie.analysis.pta.core.solver.Solver;
@@ -793,6 +794,13 @@ public class LambdaAnalysis implements Plugin {
         if (counters != null) {
             counters.edgeBuilt();
         }
+        CallBlockProbe probe = solver.getCallBlockProbe();
+        if (probe != null) {
+            CallBlockProbe.Batch batch = probe.begin(csCallSite.getCallSite(),
+                    LambdaCallEdge.probeClass(source, callee));
+            batch.offer(recvObj, callEdge.getCallee());
+            probe.end(batch);
+        }
         solver.addCallEdge(callEdge);
     }
 
@@ -1071,6 +1079,12 @@ public class LambdaAnalysis implements Plugin {
         int argsToStatic = argsToStatic(csCallSite, source);
         int argsToInstance = argsToInstance(csCallSite, source);
         queueLambdaReceiverCalls(csCallSite, source, grouping);
+        // the block probe sees the grouping as one batch: its targets are
+        // instance methods, so its class is that of the source
+        CallBlockProbe probe = solver.getCallBlockProbe();
+        CallBlockProbe.Batch batch = probe == null || receiversByCallee.isEmpty() ? null
+                : probe.begin(csCallSite.getCallSite(), LambdaCallEdge.probeClass(source,
+                        receiversByCallee.keySet().iterator().next().getMethod()));
         receiversByCallee.forEach((csCallee, receivers) -> {
             JMethod callee = csCallee.getMethod();
             // pass receiver objects to 'this' variable of callee
@@ -1083,10 +1097,16 @@ public class LambdaAnalysis implements Plugin {
                 if (counters != null) {
                     counters.edgeBuilt();
                 }
+                if (batch != null) {
+                    receivers.forEach(recvObj -> batch.offer(recvObj, csCallee));
+                }
                 solver.addCallEdge(new LambdaCallEdge(
                         csCallSite, csCallee, source));
             }
         });
+        if (probe != null && batch != null) {
+            probe.end(batch);
+        }
     }
 
     @Override

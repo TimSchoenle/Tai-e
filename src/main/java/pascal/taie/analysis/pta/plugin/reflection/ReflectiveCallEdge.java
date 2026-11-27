@@ -26,13 +26,20 @@ import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.OtherEdge;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
+import pascal.taie.analysis.pta.core.solver.CallBlockProbe;
 import pascal.taie.ir.exp.Var;
 
 
 /**
  * Represents reflective call edges.
  */
-class ReflectiveCallEdge extends OtherEdge<CSCallSite, CSMethod> {
+class ReflectiveCallEdge extends OtherEdge<CSCallSite, CSMethod>
+        implements CallBlockProbe.Classified {
+
+    @Override
+    public CallBlockProbe.EdgeClass blockProbeClass() {
+        return CallBlockProbe.EdgeClass.REFLECTIVE;
+    }
 
     /**
      * Variable pointing to the array argument of reflective call,

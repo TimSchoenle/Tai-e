@@ -5,6 +5,7 @@
     cs: ci # | k-[obj|type|call][-k'h]
     only-app: false # only analyze application code
     trivial-getters: false # take a call to a trivial getter (t = this.f / C.f / null; return t) as a load at the call site: the callee is reached in the empty context only (px/s115-P57; refused in Android mode)
+    call-block-probe: none # none | p1 | p1b: count how call edges would share hub blocks (px/s116 L0, only counts; logged at each census during the solve and at the end, read by plugins through Solver.getCallBlockProbe; with a time-limit its CPU time counts, so do not combine the two)
     implicit-entries: true # analyze implicit entries
     distinguish-string-constants: reflection # (distinguish reflection-relevant
     # string constants, i.e., class, method, and field names)

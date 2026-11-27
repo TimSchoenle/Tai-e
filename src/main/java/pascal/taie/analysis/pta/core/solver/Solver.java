@@ -22,6 +22,7 @@
 
 package pascal.taie.analysis.pta.core.solver;
 
+import org.jspecify.annotations.Nullable;
 import pascal.taie.analysis.graph.callgraph.CallGraph;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
@@ -73,6 +74,15 @@ public interface Solver {
      */
     default ProgressCounters getProgressCounters() {
         return new ProgressCounters();
+    }
+
+    /**
+     * @return the block-sharing probe (option {@code call-block-probe}),
+     * present from the start of the solve ({@link Plugin#onStart}) when the
+     * option asks for it; null when it is off or the solver has none
+     */
+    default @Nullable CallBlockProbe getCallBlockProbe() {
+        return null;
     }
 
     /**
