@@ -176,7 +176,21 @@ public final class PointsToSetCensus {
 
     private final Population distinct = new Population();
 
-    private final Map<PointsToSet, Boolean> seen = new IdentityHashMap<>();
+    /**
+     * The sets seen, by identity, each with what it added to {@link #all},
+     * so that a set held by more pointers is collected only once.
+     */
+    private final Map<PointsToSet, Recorded> seen = new IdentityHashMap<>();
+
+    /**
+     * When the census began: its construction.
+     */
+    private final long startNanos = System.nanoTime();
+
+    /**
+     * The wall time from construction to {@link #finish()}; 0 before.
+     */
+    private long wallNanos;
 
     private long bytesToday;
 
@@ -207,48 +221,65 @@ public final class PointsToSetCensus {
             all.record(indexes, 0);
             return;
         }
-        int n = collect(pts);
-        all.record(indexes, n);
-        if (seen.put(pts, Boolean.TRUE) == null) {
-            Population.Shape shape = distinct.record(indexes, n);
-            boolean large = pts instanceof DelegatePointsToSet d
-                    && d.set instanceof HybridBitSet<?> && d.isLarge();
-            long today = WRAPPER + HYBRID;
-            long packed = today;
-            if (large) {
-                // the level1 table grows to the next power of two
-                long tableLength = shape.areaSpan() <= 1 ? 1
-                        : (long) Integer.highestOneBit(shape.areaSpan() - 1) << 1;
-                today += SPARSE_OBJECTS + align(ARRAY_HEADER + REF * tableLength)
-                        + shape.areaBytes()
-                        + shape.blocks() * align(ARRAY_HEADER + 8L * WORDS_PER_BLOCK);
-                packed = WRAPPER + align(ARRAY_HEADER + 8L * shape.packedLength());
-                largeDistinct++;
-                bytesTodayLarge += today;
-                bytesPackedLarge += packed;
-                if (((DelegatePointsToSet) pts).isPacked()) {
-                    largeStoredPacked++;
-                    bytesStoredLarge += WRAPPER + HYBRID + SPARSE_OBJECTS + PACKED_FIELDS
-                            + align(ARRAY_HEADER + 8L * shape.packedLength());
-                } else {
-                    bytesStoredLarge += today;
-                }
-            } else if (n > 1) {
-                today += SMALL_OBJECTS + align(ARRAY_HEADER + REF * (long) SMALL_CAPACITY);
-                packed = today;
-            }
-            bytesToday += today;
-            bytesPacked += packed;
+        Recorded known = seen.get(pts);
+        if (known != null) {
+            // the same set object holds the same objects: the same figures
+            all.repeat(known);
+            return;
         }
+        int n = collect(pts);
+        int[] setWordsPerBlock = new int[WORDS_PER_BLOCK + 1];
+        Population.Shape allShape = all.record(indexes, n, setWordsPerBlock);
+        seen.put(pts, new Recorded(n, allShape, setWordsPerBlock));
+        Population.Shape shape = distinct.record(indexes, n);
+        boolean large = pts instanceof DelegatePointsToSet d
+                && d.set instanceof HybridBitSet<?> && d.isLarge();
+        long today = WRAPPER + HYBRID;
+        long packed = today;
+        if (large) {
+            // the level1 table grows to the next power of two
+            long tableLength = shape.areaSpan() <= 1 ? 1
+                    : (long) Integer.highestOneBit(shape.areaSpan() - 1) << 1;
+            today += SPARSE_OBJECTS + align(ARRAY_HEADER + REF * tableLength)
+                    + shape.areaBytes()
+                    + shape.blocks() * align(ARRAY_HEADER + 8L * WORDS_PER_BLOCK);
+            packed = WRAPPER + align(ARRAY_HEADER + 8L * shape.packedLength());
+            largeDistinct++;
+            bytesTodayLarge += today;
+            bytesPackedLarge += packed;
+            if (((DelegatePointsToSet) pts).isPacked()) {
+                largeStoredPacked++;
+                bytesStoredLarge += WRAPPER + HYBRID + SPARSE_OBJECTS + PACKED_FIELDS
+                        + align(ARRAY_HEADER + 8L * shape.packedLength());
+            } else {
+                bytesStoredLarge += today;
+            }
+        } else if (n > 1) {
+            today += SMALL_OBJECTS + align(ARRAY_HEADER + REF * (long) SMALL_CAPACITY);
+            packed = today;
+        }
+        bytesToday += today;
+        bytesPacked += packed;
     }
 
     /**
-     * Drops the state that only {@link #add} needs (the identity set of
-     * the sets seen), keeping the figures.
+     * Drops the state that only {@link #add} needs (the identity map of
+     * the sets seen), keeping the figures, and takes the wall time of the
+     * census.
      */
     public void finish() {
         seen.clear();
         indexes = new int[0];
+        wallNanos = System.nanoTime() - startNanos;
+    }
+
+    /**
+     * @return the wall time from the construction of the census to
+     * {@link #finish()}, 0 before; not part of {@link #toString()}, so
+     * that the census lines of two runs compare equal.
+     */
+    public long wallNanos() {
+        return wallNanos;
     }
 
     /**
@@ -343,6 +374,17 @@ public final class PointsToSetCensus {
         return sb.append('}').toString();
     }
 
+    /**
+     * What one set added to a population when it was recorded.
+     *
+     * @param objects       its cardinality
+     * @param shape         its block shape
+     * @param wordsPerBlock its nonzero blocks by their count of nonzero
+     *                      words (index 1 to {@link #WORDS_PER_BLOCK})
+     */
+    record Recorded(int objects, Population.Shape shape, int[] wordsPerBlock) {
+    }
+
     private static long align(long bytes) {
         return (bytes + 7) & ~7L;
     }
@@ -404,6 +446,18 @@ public final class PointsToSetCensus {
         private long words;
 
         Shape record(int[] sorted, int n) {
+            return record(sorted, n, null);
+        }
+
+        /**
+         * Counts one set of the sorted object indexes {@code sorted[0, n)}.
+         *
+         * @param setWordsPerBlock if not null, a zeroed array of length
+         *                         {@link #WORDS_PER_BLOCK} + 1 that gets
+         *                         the nonzero blocks of this set by their
+         *                         count of nonzero words (for {@link #repeat})
+         */
+        Shape record(int[] sorted, int n, int @Nullable [] setWordsPerBlock) {
             sets++;
             objects += n;
             cardinality[bucket(n)]++;
@@ -427,6 +481,9 @@ public final class PointsToSetCensus {
                     i++;
                 }
                 wordsPerBlock[blockWords]++;
+                if (setWordsPerBlock != null) {
+                    setWordsPerBlock[blockWords]++;
+                }
                 setBlocks++;
                 setWords += blockWords;
                 int area = block / BLOCKS_PER_AREA;
@@ -446,6 +503,24 @@ public final class PointsToSetCensus {
             blocks += setBlocks;
             words += setWords;
             return new Shape(setBlocks, setWords, areas, lastArea + 1, areaBytes);
+        }
+
+        /**
+         * Counts once more a set that {@link #record(int[], int, int[])}
+         * counted, without its indexes: the figures recording it again adds.
+         */
+        void repeat(Recorded set) {
+            sets++;
+            objects += set.objects();
+            cardinality[bucket(set.objects())]++;
+            int[] setWordsPerBlock = set.wordsPerBlock();
+            for (int w = 1; w <= WORDS_PER_BLOCK; w++) {
+                wordsPerBlock[w] += setWordsPerBlock[w];
+            }
+            Shape shape = set.shape();
+            blocksPerSet[bucket(shape.blocks())]++;
+            blocks += shape.blocks();
+            words += shape.words();
         }
 
         /**

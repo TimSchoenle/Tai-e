@@ -84,7 +84,8 @@ record SolverCensus(PfgSccCensus scc, PointsToSetCensus pts, CSObjCensus objs) {
         pts.finish();
         CSObjCensus objs = CSObjCensus.take(csManager);
         SolverCensus census = new SolverCensus(scc, pts, objs);
-        logger.info("{}\n{}\n{}", scc, pts, objs);
+        // the wall time of the points-to set census closes its last line
+        logger.info("{}\n{} wall-ms={}\n{}", scc, pts, pts.wallNanos() / 1_000_000, objs);
         return census;
     }
 
