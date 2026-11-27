@@ -40,8 +40,11 @@ import pascal.taie.analysis.pta.core.cs.element.CSManager;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.CSObj;
 import pascal.taie.analysis.pta.core.cs.element.CSVar;
+import pascal.taie.analysis.pta.core.cs.element.CallHub;
 import pascal.taie.analysis.pta.core.cs.element.InstanceField;
+import pascal.taie.analysis.pta.core.cs.element.MockPointer;
 import pascal.taie.analysis.pta.core.cs.element.Pointer;
+import pascal.taie.analysis.pta.core.cs.element.RelayDescriptor;
 import pascal.taie.analysis.pta.core.cs.element.StaticField;
 import pascal.taie.analysis.pta.core.cs.selector.ContextSelector;
 import pascal.taie.analysis.pta.core.heap.Descriptor;
@@ -80,6 +83,7 @@ import pascal.taie.ir.stmt.StmtVisitor;
 import pascal.taie.ir.stmt.StoreArray;
 import pascal.taie.ir.stmt.StoreField;
 import pascal.taie.language.classes.ClassHierarchy;
+import pascal.taie.language.classes.ClassNames;
 import pascal.taie.language.classes.JClass;
 import pascal.taie.language.classes.JField;
 import pascal.taie.language.classes.JMethod;
@@ -335,6 +339,41 @@ public class DefaultSolver implements Solver {
     private @Nullable CallBlockProbe blockProbe;
 
     /**
+     * Whether the plain call edges of batched {@link #processCall} are linked
+     * through call hubs (option {@code call-hubs}, px/s116 re-keyed B).
+     */
+    private final boolean callHubs;
+
+    /**
+     * A call site with this many hubs links its later fresh callee nodes as
+     * stored edges, which bounds the hub scan of
+     * {@link CSCallSite#hasPlainEdge}.
+     */
+    static final int HUB_REFS_MAX = 16;
+
+    private static final RelayDescriptor HUB_RELAY_DESC = () -> "CallHubRelay";
+
+    /** The call hubs of the current solve by key. */
+    private CallHubTable hubTable = new CallHubTable();
+
+    /** The hub link of the current batched call site, null if none yet. */
+    private @Nullable HubLink batchLink;
+
+    /** The nodes {@link #batchLink} holds. */
+    private final IdentityScratchMap linkSeen = new IdentityScratchMap();
+
+    /** Call hub counters of the current solve. */
+    private long hubsCreated;
+
+    private long hubJoins;
+
+    private long hubTargets;
+
+    private long hubEdges;
+
+    private long hubDirectLinks;
+
+    /**
      * Work list entries processed by the current solve.
      */
     private long iterations;
@@ -510,6 +549,14 @@ public class DefaultSolver implements Solver {
         trivialGetters = options.getBoolean("trivial-getters");
         // read as an object: YAML turns an unquoted on/off into a boolean
         callBatching = CallBatching.of(String.valueOf(options.get("call-batching")));
+        callHubs = options.getBoolean("call-hubs");
+        if (callHubs && callBatching == CallBatching.OFF) {
+            throw new ConfigException("call-hubs needs call-batching batched or verify");
+        }
+        if (callHubs && !"none".equals(options.getString("call-block-probe"))) {
+            // the probe counts the polled call edges one by one
+            throw new ConfigException("call-hubs is refused with call-block-probe");
+        }
         if (trivialGetters && World.get().getOptions().isAndroidMode()) {
             // the Android models read loads in a callee's body against its
             // own this variable (OtherMiscModel), which a getter taken as a
@@ -687,6 +734,12 @@ public class DefaultSolver implements Solver {
         liveCensusClock = LiveCensusClock.of(options.getInt("census-interval"), solveStartNanos);
         blockProbe = CallBlockProbe.of(options.getString("call-block-probe"),
                 csManager.getObjectIndexer());
+        hubTable = new CallHubTable();
+        hubsCreated = 0;
+        hubJoins = 0;
+        hubTargets = 0;
+        hubEdges = 0;
+        hubDirectLinks = 0;
         plainOffers = 0;
         receiverFreeOffers = 0;
         dispatches = 0;
@@ -771,7 +824,7 @@ public class DefaultSolver implements Solver {
                 }
                 packColdSets();
                 if (workList.hasCallEdge()) {
-                    processCallEdge(workList.pollCallEdge());
+                    processCallEntry(workList.pollCallEdge());
                 } else {
                     Pointer p = workList.pollPointer();
                     PointsToSet pts = workList.takePolledDelta();
@@ -830,6 +883,9 @@ public class DefaultSolver implements Solver {
         if (blockProbe != null) {
             logger.info("Call block probe: {}", blockProbe.line());
         }
+        if (callHubs) {
+            logger.info("Call hubs: {}", callHubsLine());
+        }
         if (options.getBoolean("census")) {
             census = SolverCensus.take(csManager, callGraph);
             owners = takeOwners();
@@ -868,6 +924,9 @@ public class DefaultSolver implements Solver {
         }
         if (blockProbe != null) {
             logger.info("Call block probe: {}", blockProbe.line());
+        }
+        if (callHubs) {
+            logger.info("Call hubs: {}", callHubsLine());
         }
         plugin.onCensus();
         ++liveCensuses;
@@ -951,6 +1010,9 @@ public class DefaultSolver implements Solver {
         if (blockProbe != null) {
             // reads only the probe's counters, so a run needs no census
             logger.info("Call block probe: {}", blockProbe.line());
+        }
+        if (callHubs) {
+            logger.info("Call hubs: {}", callHubsLine());
         }
     }
 
@@ -1267,6 +1329,8 @@ public class DefaultSolver implements Solver {
                 batchTypes.clear();
                 batchCallees.clear();
                 batchNodes.clear();
+                batchLink = null;
+                linkSeen.clear();
                 CSCallSite[] csCallSiteOnce = new CSCallSite[1];
                 CallBlockProbe probe = blockProbe;
                 CallBlockProbe.Batch batch = probe == null ? null
@@ -1292,13 +1356,19 @@ public class DefaultSolver implements Solver {
                             ++firstOffers;
                         }
                         CallKind kind = CallGraphs.getCallKind(callSite);
-                        Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
-                                ? null : new Edge<>(kind, csCallSite, csCallee);
-                        if (batch != null) {
-                            batch.offer(recvObj, csCallee, edge);
-                        }
-                        if (edge != null) {
-                            addCallEdge(edge);
+                        if (callHubs && csCallSite.isOwnPlainKind(kind)) {
+                            if (!csCallSite.hasPlainEdge(kind, csCallee)) {
+                                linkFresh(csCallSite, csCallee);
+                            }
+                        } else {
+                            Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
+                                    ? null : new Edge<>(kind, csCallSite, csCallee);
+                            if (batch != null) {
+                                batch.offer(recvObj, csCallee, edge);
+                            }
+                            if (edge != null) {
+                                addCallEdge(edge);
+                            }
                         }
                         thisVar = isIgnored(callee) ? IGNORED_THIS
                                 : csManager.getCSVar(csCallee.getContext(),
@@ -1324,8 +1394,224 @@ public class DefaultSolver implements Solver {
             batchTypes.clear();
             batchCallees.clear();
             batchNodes.clear();
+            batchLink = null;
+            linkSeen.clear();
             inCallBatch = false;
         }
+    }
+
+    /**
+     * Adds a fresh callee node of the current batched call site to the
+     * site's hub link (option {@code call-hubs}); the link is queued at its
+     * first node, where that node's call edge would be queued.
+     */
+    private void linkFresh(CSCallSite csCallSite, CSMethod csCallee) {
+        if (linkSeen.get(csCallee) != null) {
+            return;
+        }
+        linkSeen.put(csCallee, csCallee);
+        HubLink link = batchLink;
+        if (link == null) {
+            checkAcceptsWork();
+            link = new HubLink(csCallSite);
+            batchLink = link;
+            workList.addHubLink(link);
+        }
+        link.add(csCallee);
+    }
+
+    /**
+     * Processes a polled call-edge work-list entry: a call edge or a hub
+     * link.
+     */
+    @SuppressWarnings("unchecked")
+    private void processCallEntry(Object entry) {
+        if (entry instanceof HubLink link) {
+            processHubLink(link);
+        } else {
+            processCallEdge((Edge<CSCallSite, CSMethod>) entry);
+        }
+    }
+
+    /**
+     * Links the nodes of {@code link} that its call site does not link yet
+     * (a plugin or an earlier entry may have linked some since the batch):
+     * one alone, or any when the site has {@link #HUB_REFS_MAX} hubs, as
+     * stored call edges; two or more through the call hub of their set,
+     * made on first use. The member's targets are announced in the hub's
+     * order: per target its method is added, a new hub's relay edges into
+     * and out of it are made, and the edge is announced to the plugins.
+     */
+    private void processHubLink(HubLink link) {
+        CSCallSite site = link.site();
+        Invoke invoke = site.getCallSite();
+        CallKind kind = CallGraphs.getCallKind(invoke);
+        CSMethod[] fresh = new CSMethod[link.size()];
+        int n = 0;
+        for (int i = 0; i < link.size(); ++i) {
+            CSMethod node = link.node(i);
+            if (!site.hasPlainEdge(kind, node)) {
+                fresh[n++] = node;
+            }
+        }
+        if (n == 0) {
+            return;
+        }
+        if (n == 1 || site.getHubCount() >= HUB_REFS_MAX) {
+            hubDirectLinks += n;
+            for (int i = 0; i < n; ++i) {
+                processCallEdge(new Edge<>(kind, site, fresh[i]));
+            }
+            return;
+        }
+        int hash = hubTable.hash(invoke, fresh, n);
+        CallHub hub = hubTable.find(invoke, fresh, n, hash);
+        boolean created = hub == null;
+        if (hub == null) {
+            hub = CallHub.create(invoke, n == fresh.length ? fresh : Arrays.copyOf(fresh, n), hash);
+            makeRelays(hub);
+            hubTable.add(hub);
+            ++hubsCreated;
+            hubTargets += n;
+        }
+        ++hubJoins;
+        hub.beginJoin(site);
+        try {
+            linkMember(hub, site);
+            for (int k = 0; k < hub.targetCount(); ++k) {
+                CSMethod target = hub.target(k);
+                addCSMethod(target);
+                if (created) {
+                    linkTarget(hub, target);
+                }
+                hub.announce();
+                ++csCallEdges;
+                ++hubEdges;
+                plugin.onNewCallEdge(new Edge<>(kind, site, target));
+            }
+        } finally {
+            hub.endJoin();
+        }
+    }
+
+    /**
+     * Makes the relay pointers of a new hub, with the guards of
+     * {@link #processCallEdge}: an argument relay per allowed argument when
+     * some target takes the arguments, a return relay when the result is
+     * allowed and some target is not ignored.
+     */
+    private void makeRelays(CallHub hub) {
+        Invoke invoke = hub.getInvoke();
+        InvokeExp invokeExp = invoke.getInvokeExp();
+        int argCount = invokeExp.getArgCount();
+        boolean takesArgs = false;
+        boolean anyAnalyzed = false;
+        for (int k = 0; k < hub.targetCount(); ++k) {
+            JMethod callee = hub.target(k).getMethod();
+            if (!isIgnored(callee)) {
+                anyAnalyzed = true;
+                takesArgs |= callee.getParamCount() == argCount;
+            }
+        }
+        MockPointer[] argRelays = null;
+        if (takesArgs) {
+            for (int i = 0; i < argCount; ++i) {
+                if (propTypes.isAllowed(invokeExp.getArg(i))) {
+                    if (argRelays == null) {
+                        argRelays = new MockPointer[argCount];
+                    }
+                    argRelays[i] = csManager.getMockPointer(HUB_RELAY_DESC,
+                            new CallHub.RelaySlot(hub, i), objectType());
+                }
+            }
+        }
+        Var lhs = invoke.getResult();
+        MockPointer retRelay = anyAnalyzed && lhs != null && propTypes.isAllowed(lhs)
+                ? csManager.getMockPointer(HUB_RELAY_DESC, new CallHub.RelaySlot(hub, -1),
+                objectType())
+                : null;
+        hub.setRelays(argRelays, retRelay);
+    }
+
+    private ClassType objectType() {
+        return typeSystem.getClassType(ClassNames.OBJECT);
+    }
+
+    /**
+     * Makes the PFG edges of a joining member: its arguments into the
+     * argument relays, the return relay into its result.
+     */
+    private void linkMember(CallHub hub, CSCallSite site) {
+        Context callerCtx = site.getContext();
+        Invoke invoke = site.getCallSite();
+        InvokeExp invokeExp = invoke.getInvokeExp();
+        for (int i = 0; i < invokeExp.getArgCount(); ++i) {
+            MockPointer relay = hub.argRelay(i);
+            if (relay != null) {
+                addPFGEdge(csManager.getCSVar(callerCtx, invokeExp.getArg(i)), relay,
+                        FlowKind.PARAMETER_PASSING);
+            }
+        }
+        MockPointer retRelay = hub.retRelay();
+        if (retRelay != null) {
+            addPFGEdge(retRelay, csManager.getCSVar(callerCtx,
+                    Objects.requireNonNull(invoke.getResult())), FlowKind.RETURN);
+        }
+    }
+
+    /**
+     * Makes the PFG edges of a target of a new hub, with the guards of
+     * {@link #processCallEdge}: the argument relays into its parameters,
+     * its allowed return variables into the return relay.
+     */
+    private void linkTarget(CallHub hub, CSMethod target) {
+        JMethod callee = target.getMethod();
+        if (isIgnored(callee)) {
+            return;
+        }
+        Context calleeCtx = target.getContext();
+        InvokeExp invokeExp = hub.getInvoke().getInvokeExp();
+        if (invokeExp.getArgCount() == callee.getParamCount()) {
+            for (int i = 0; i < invokeExp.getArgCount(); ++i) {
+                MockPointer relay = hub.argRelay(i);
+                if (relay != null) {
+                    addPFGEdge(relay, csManager.getCSVar(calleeCtx, callee.getIR().getParam(i)),
+                            FlowKind.PARAMETER_PASSING);
+                }
+            }
+        }
+        MockPointer retRelay = hub.retRelay();
+        if (retRelay != null) {
+            for (Var ret : callee.getIR().getReturnVars()) {
+                if (propTypes.isAllowed(ret)) {
+                    addPFGEdge(csManager.getCSVar(calleeCtx, ret), retRelay, FlowKind.RETURN);
+                }
+            }
+        }
+    }
+
+    /**
+     * @return the call hub counters: hubs, member joins, stored hub targets,
+     * edges announced through hubs, nodes linked as stored edges by hub
+     * links, all CS call edges, and the stored call graph entries (stored
+     * edges + joins + hub targets) against the CS call edges
+     */
+    public String callHubsLine() {
+        long stored = csCallEdges - hubEdges + hubJoins + hubTargets;
+        return "hubs=" + hubsCreated + " joins=" + hubJoins + " targets=" + hubTargets
+                + " hub_edges=" + hubEdges + " direct_links=" + hubDirectLinks
+                + " cs_edges=" + csCallEdges + " stored=" + stored;
+    }
+
+    /**
+     * Replaces the hub table's hash function, before the solve makes its
+     * first hub; for the key equality test only.
+     */
+    void setCallHubHasherForTesting(CallHubTable.Hasher hasher) {
+        if (hubTable.size() != 0) {
+            throw new IllegalStateException("the solve has made hubs");
+        }
+        hubTable = new CallHubTable(hasher);
     }
 
     /**
@@ -1491,13 +1777,19 @@ public class DefaultSolver implements Solver {
         Invoke callSite = csCallSite.getCallSite();
         CSMethod csCallee = csManager.getCSMethod(contextSelector.getEmptyContext(), callee);
         CallKind kind = CallGraphs.getCallKind(callSite);
-        Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
-                ? null : new Edge<>(kind, csCallSite, csCallee);
-        if (batch != null) {
-            batch.offer(recvObj, csCallee, edge);
-        }
-        if (edge != null) {
-            addCallEdge(edge);
+        if (callHubs && inCallBatch && csCallSite.isOwnPlainKind(kind)) {
+            if (!csCallSite.hasPlainEdge(kind, csCallee)) {
+                linkFresh(csCallSite, csCallee);
+            }
+        } else {
+            Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
+                    ? null : new Edge<>(kind, csCallSite, csCallee);
+            if (batch != null) {
+                batch.offer(recvObj, csCallee, edge);
+            }
+            if (edge != null) {
+                addCallEdge(edge);
+            }
         }
         if (getter.form() == TrivialGetter.Form.INSTANCE_FIELD) {
             LoadField load = Objects.requireNonNull(getter.load());

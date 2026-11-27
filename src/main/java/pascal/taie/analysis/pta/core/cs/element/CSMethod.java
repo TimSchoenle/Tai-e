@@ -35,9 +35,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.RandomAccess;
 import java.util.Spliterator;
+import java.util.Spliterators;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -65,6 +67,20 @@ public class CSMethod extends AbstractCSElement {
      * {@link #sources}, any other edge as the {@link Edge} object.
      */
     private final ArrayList<Object> edges = new ArrayList<>(4);
+
+    private static final CallHub[] NO_HUBS = {};
+
+    /**
+     * The call hubs (option {@code call-hubs}) this method is a target of,
+     * in creation order, the first {@link #hubCount} of them; each holds one
+     * call edge per member.
+     */
+    private CallHub[] hubs = NO_HUBS;
+
+    private int hubCount;
+
+    /** {@link #hubPrefix()}'s last result, null until first needed. */
+    private volatile @Nullable HubPrefix prefixCache;
 
     /**
      * The sources of the sourced edges by their indices in {@link #edges};
@@ -282,17 +298,79 @@ public class CSMethod extends AbstractCSElement {
      * @return the number of call edges to this CS method.
      */
     public int getEdgeCount() {
-        return edges.size();
+        int count = edges.size();
+        for (int h = 0; h < hubCount; ++h) {
+            count += hubs[h].visibleMembers(this);
+        }
+        return count;
     }
 
     /**
-     * @return the {@code i}-th call edge to this CS method, in the order
-     * the edges were added.
+     * @return the {@code i}-th call edge to this CS method: the stored edges
+     * in the order they were added, then per call hub of this method
+     * (option {@code call-hubs}, in creation order) its members in join
+     * order. While no edge is added, the indices are stable.
      * @throws IndexOutOfBoundsException if {@code i} is not below
      *                                   {@link #getEdgeCount()}
      */
     public Edge<CSCallSite, CSMethod> getEdge(int i) {
-        return expand(edges.get(i), i);
+        int stored = edges.size();
+        if (i < stored || hubCount == 0) {
+            return expand(edges.get(i), i);
+        }
+        int[] prefix = hubPrefix();
+        int k = i - stored;
+        if (k >= prefix[hubCount]) {
+            throw new IndexOutOfBoundsException(i);
+        }
+        int pos = Arrays.binarySearch(prefix, 0, hubCount + 1, k);
+        // the last hub whose prefix is at most k (prefixes repeat for hubs
+        // that show no member)
+        int h = pos >= 0 ? pos : -pos - 2;
+        while (h + 1 < hubCount && prefix[h + 1] <= k) {
+            ++h;
+        }
+        return hubs[h].member(k - prefix[h]).plainEdgeTo(this);
+    }
+
+    /**
+     * @return per hub index h the number of hub edges before hub h, and at
+     * index {@link #hubCount} their total; cached for one
+     * {@link CallHub#stamp()} and hub count
+     */
+    private int[] hubPrefix() {
+        HubPrefix cached = prefixCache;
+        long stamp = CallHub.stamp();
+        if (cached != null && cached.stamp == stamp && cached.prefix.length == hubCount + 1) {
+            return cached.prefix;
+        }
+        int[] prefix = new int[hubCount + 1];
+        for (int h = 0; h < hubCount; ++h) {
+            prefix[h + 1] = prefix[h] + hubs[h].visibleMembers(this);
+        }
+        prefixCache = new HubPrefix(stamp, prefix);
+        return prefix;
+    }
+
+    private record HubPrefix(long stamp, int[] prefix) {
+    }
+
+    /**
+     * Registers {@code hub}, of which this method is a target; for
+     * {@link CallHub#create} only.
+     */
+    void addHub(CallHub hub) {
+        if (hubCount == hubs.length) {
+            hubs = Arrays.copyOf(hubs, Math.max(2, hubCount + (hubCount >> 1)));
+        }
+        hubs[hubCount++] = hub;
+    }
+
+    /**
+     * @return the number of call hubs this method is a target of
+     */
+    public int getHubCount() {
+        return hubCount;
     }
 
     /**
@@ -325,11 +403,14 @@ public class CSMethod extends AbstractCSElement {
 
         @Override
         public int size() {
-            return edges.size();
+            return getEdgeCount();
         }
 
         @Override
         public Iterator<Edge<CSCallSite, CSMethod>> iterator() {
+            if (hubCount != 0) {
+                return new HubbedIterator();
+            }
             Iterator<Object> it = edges.iterator();
             return new Iterator<>() {
 
@@ -350,13 +431,64 @@ public class CSMethod extends AbstractCSElement {
 
         @Override
         public void forEach(Consumer<? super Edge<CSCallSite, CSMethod>> action) {
+            if (hubCount != 0) {
+                iterator().forEachRemaining(action);
+                return;
+            }
             int[] index = {0};
             edges.forEach(e -> action.accept(expand(e, index[0]++)));
         }
 
         @Override
         public Spliterator<Edge<CSCallSite, CSMethod>> spliterator() {
+            if (hubCount != 0) {
+                return Spliterators.spliterator(new HubbedIterator(), getEdgeCount(),
+                        Spliterator.ORDERED | Spliterator.NONNULL | Spliterator.DISTINCT);
+            }
             return new ExpandingSpliterator(edges.spliterator(), 0);
+        }
+    }
+
+    /**
+     * Iterator over the edges of a method with call hubs: the stored edges,
+     * then per hub its members visible to this method.
+     */
+    private final class HubbedIterator implements Iterator<Edge<CSCallSite, CSMethod>> {
+
+        private final int stored = edges.size();
+
+        private int index;
+
+        private int hub;
+
+        private int member;
+
+        @Override
+        public boolean hasNext() {
+            if (index < stored) {
+                return true;
+            }
+            while (hub < hubCount) {
+                if (member < hubs[hub].visibleMembers(CSMethod.this)) {
+                    return true;
+                }
+                ++hub;
+                member = 0;
+            }
+            return false;
+        }
+
+        @Override
+        public Edge<CSCallSite, CSMethod> next() {
+            if (index < stored) {
+                Edge<CSCallSite, CSMethod> edge = expand(edges.get(index), index);
+                ++index;
+                return edge;
+            }
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            return hubs[hub].member(member++).plainEdgeTo(CSMethod.this);
         }
     }
 

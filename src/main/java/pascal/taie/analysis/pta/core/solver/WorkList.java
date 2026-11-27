@@ -105,9 +105,10 @@ final class WorkList {
     private static final int MAX_CAPACITY = 1 << 30;
 
     /**
-     * Call edges to be processed.
+     * Call edges ({@link Edge}) and call hub links ({@link HubLink}) to be
+     * processed, in one FIFO.
      */
-    private final Queue<Edge<CSCallSite, CSMethod>> callEdges = new ArrayDeque<>();
+    private final Queue<Object> callEdges = new ArrayDeque<>();
 
     private final PointsToSetFactory ptsFactory;
 
@@ -627,16 +628,25 @@ final class WorkList {
     }
 
     /**
-     * Polls a call edge. For correctness, any call edges in the work list
+     * Polls a call edge ({@link Edge}) or a call hub link ({@link HubLink}).
+     * For correctness, any call edges in the work list
      * must be processed prior to the pointers: the caller polls pointers
      * only while {@link #hasCallEdge()} is false.
      */
-    Edge<CSCallSite, CSMethod> pollCallEdge() {
-        Edge<CSCallSite, CSMethod> edge = callEdges.poll();
-        if (edge == null) {
+    Object pollCallEdge() {
+        Object entry = callEdges.poll();
+        if (entry == null) {
             throw new NoSuchElementException();
         }
-        return edge;
+        return entry;
+    }
+
+    /**
+     * Queues a call hub link (option {@code call-hubs}) behind the pending
+     * call edges.
+     */
+    void addHubLink(HubLink link) {
+        callEdges.add(link);
     }
 
     /**
