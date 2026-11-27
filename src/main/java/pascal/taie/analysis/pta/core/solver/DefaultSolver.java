@@ -839,6 +839,10 @@ public class DefaultSolver implements Solver {
                     addsLine(), workList.polledBits(), workList.diffBits(),
                     workList.emptyDiffPolls(), workList.mergesUnchanged());
         }
+        if (blockProbe != null) {
+            // reads only the probe's counters, so a run needs no census
+            logger.info("Call block probe: {}", blockProbe.line());
+        }
     }
 
     private String addsLine() {
@@ -1143,14 +1147,16 @@ public class DefaultSolver implements Solver {
                             csCallSite, recvObj, callee);
                     // build call edge
                     CSMethod csCallee = csManager.getCSMethod(calleeContext, callee);
-                    if (batch != null) {
-                        batch.offer(recvObj, csCallee);
-                    }
                     CallKind kind = CallGraphs.getCallKind(callSite);
                     // an edge already in the call graph would be a no-op
                     // when polled (processCallEdge), so it is not allocated
-                    if (!csCallSite.hasPlainEdge(kind, csCallee)) {
-                        addCallEdge(new Edge<>(kind, csCallSite, csCallee));
+                    Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
+                            ? null : new Edge<>(kind, csCallSite, csCallee);
+                    if (batch != null) {
+                        offerToProbe(batch, recvObj, csCallee, edge);
+                    }
+                    if (edge != null) {
+                        addCallEdge(edge);
                     }
                     // pass receiver object to *this* variable
                     if (!isIgnored(callee)) {
@@ -1200,12 +1206,14 @@ public class DefaultSolver implements Solver {
         }
         Invoke callSite = csCallSite.getCallSite();
         CSMethod csCallee = csManager.getCSMethod(contextSelector.getEmptyContext(), callee);
-        if (batch != null) {
-            batch.offer(recvObj, csCallee);
-        }
         CallKind kind = CallGraphs.getCallKind(callSite);
-        if (!csCallSite.hasPlainEdge(kind, csCallee)) {
-            addCallEdge(new Edge<>(kind, csCallSite, csCallee));
+        Edge<CSCallSite, CSMethod> edge = csCallSite.hasPlainEdge(kind, csCallee)
+                ? null : new Edge<>(kind, csCallSite, csCallee);
+        if (batch != null) {
+            offerToProbe(batch, recvObj, csCallee, edge);
+        }
+        if (edge != null) {
+            addCallEdge(edge);
         }
         if (getter.form() == TrivialGetter.Form.INSTANCE_FIELD) {
             LoadField load = Objects.requireNonNull(getter.load());
@@ -1226,6 +1234,9 @@ public class DefaultSolver implements Solver {
     }
 
     private void processCallEdge(Edge<CSCallSite, CSMethod> edge) {
+        if (blockProbe != null) {
+            blockProbe.edgePolled(edge);
+        }
         if (callGraph.addEdge(edge)) {
             ++csCallEdges;
             if (blockProbe != null) {
@@ -1234,8 +1245,7 @@ public class DefaultSolver implements Solver {
             // process new call edge
             CSMethod csCallee = edge.getCallee();
             addCSMethod(csCallee);
-            if (edge.getKind() != CallKind.OTHER
-                    && !isIgnored(csCallee.getMethod())) {
+            if (passesValues(edge.getKind(), csCallee.getMethod())) {
                 Context callerCtx = edge.getCallSite().getContext();
                 Invoke callSite = edge.getCallSite().getCallSite();
                 Context calleeCtx = csCallee.getContext();
@@ -1244,7 +1254,7 @@ public class DefaultSolver implements Solver {
                 // pass arguments to parameters
                 int argCount = invokeExp.getArgCount();
                 int paramCount = callee.getParamCount();
-                if (argCount == paramCount) {
+                if (passesArguments(invokeExp, callee)) {
                     for (int i = 0; i < argCount; ++i) {
                         Var arg = invokeExp.getArg(i);
                         if (propTypes.isAllowed(arg)) {
@@ -1267,7 +1277,7 @@ public class DefaultSolver implements Solver {
                 }
                 // pass results to LHS variable
                 Var lhs = callSite.getResult();
-                if (lhs != null && propTypes.isAllowed(lhs)) {
+                if (passesResult(lhs)) {
                     CSVar csLHS = csManager.getCSVar(callerCtx, lhs);
                     for (Var ret : callee.getIR().getReturnVars()) {
                         if (propTypes.isAllowed(ret)) {
@@ -1279,6 +1289,60 @@ public class DefaultSolver implements Solver {
             }
             plugin.onNewCallEdge(edge);
         }
+    }
+
+    /*
+     * The guards of processCallEdge, shared with the PFG weights of the
+     * block probe (offerToProbe) so that the two cannot drift apart.
+     */
+
+    /** @return whether a new call edge of {@code kind} to {@code callee} passes values */
+    private boolean passesValues(CallKind kind, JMethod callee) {
+        return kind != CallKind.OTHER && !isIgnored(callee);
+    }
+
+    /** @return whether the arguments of {@code invokeExp} go to the parameters of {@code callee} */
+    private static boolean passesArguments(InvokeExp invokeExp, JMethod callee) {
+        return invokeExp.getArgCount() == callee.getParamCount();
+    }
+
+    /** @return whether the results go to {@code lhs} */
+    private boolean passesResult(@Nullable Var lhs) {
+        return lhs != null && propTypes.isAllowed(lhs);
+    }
+
+    /**
+     * Offers a plain pair to the block probe's {@code batch}, with the PFG
+     * edges processCallEdge adds when it takes {@code edge}: one per allowed
+     * argument and one per allowed return variable, under its guards.
+     *
+     * @param edge the new edge, null when the call graph holds it already
+     *             (then the pair is not fresh and has no weight)
+     */
+    private void offerToProbe(CallBlockProbe.Batch batch, @Nullable CSObj recvObj,
+                              CSMethod csCallee, @Nullable Edge<CSCallSite, CSMethod> edge) {
+        int argEdges = 0;
+        int returnEdges = 0;
+        JMethod callee = csCallee.getMethod();
+        if (edge != null && passesValues(edge.getKind(), callee)) {
+            Invoke callSite = edge.getCallSite().getCallSite();
+            InvokeExp invokeExp = callSite.getInvokeExp();
+            if (passesArguments(invokeExp, callee)) {
+                for (Var arg : invokeExp.getArgs()) {
+                    if (propTypes.isAllowed(arg)) {
+                        ++argEdges;
+                    }
+                }
+            }
+            if (passesResult(callSite.getResult())) {
+                for (Var ret : callee.getIR().getReturnVars()) {
+                    if (propTypes.isAllowed(ret)) {
+                        ++returnEdges;
+                    }
+                }
+            }
+        }
+        batch.offer(recvObj, csCallee, edge, argEdges, returnEdges);
     }
 
     private boolean isIgnored(JMethod method) {

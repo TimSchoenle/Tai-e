@@ -131,7 +131,7 @@ public class CallBlockProbeEquivalenceTest {
     void probeChangesNoResultAndNoOrder(String dir, String main, String cs) {
         Snapshot off = run(dir, main, cs, "none");
         assertNull(ProbeReader.probe, "the probe is off by default value none");
-        for (String mode : List.of("p1", "p1b")) {
+        for (String mode : List.of("p1", "p1b", "p1t")) {
             Snapshot on = run(dir, main, cs, mode);
             assertNotNull(ProbeReader.probe, mode);
             assertTrue(off.events().size() > 0, "the solve records events");
@@ -149,14 +149,17 @@ public class CallBlockProbeEquivalenceTest {
         String[] log = {"reflection-inference:null",
                 "reflection-log:src/test/resources/pta/reflection/ReflectiveAction.log"};
         Snapshot off = run(dir, main, "1-call", "none", log);
-        Snapshot on = run(dir, main, "1-call", "p1b", log);
-        assertEquals(off.events(), on.events(), "solver events in order");
-        assertEquals(off.edges(), on.edges(), "call edges");
-        assertEquals(off.pointsTo(), on.pointsTo(), "points-to sets");
-        CallBlockProbe probe = ProbeReader.probe;
-        assertTrue(probe.count(EdgeClass.REFLECTIVE, Counter.EDGES) > 0, probe.line());
-        assertEdgesOffered(probe);
+        for (String mode : List.of("p1b", "p1t")) {
+            Snapshot on = run(dir, main, "1-call", mode, log);
+            assertEquals(off.events(), on.events(), mode + ": solver events in order");
+            assertEquals(off.edges(), on.edges(), mode + ": call edges");
+            assertEquals(off.pointsTo(), on.pointsTo(), mode + ": points-to sets");
+            CallBlockProbe probe = ProbeReader.probe;
+            assertTrue(probe.count(EdgeClass.REFLECTIVE, Counter.EDGES) > 0, probe.line());
+            assertEdgesOffered(probe);
+        }
     }
+
 
     @ParameterizedTest
     @CsvSource({"1-call"})
@@ -168,8 +171,7 @@ public class CallBlockProbeEquivalenceTest {
         assertTrue(probe.count(EdgeClass.PLAIN, Counter.P1_BLOCKS)
                 < probe.count(EdgeClass.PLAIN, Counter.BATCHES), probe.line());
         assertTrue(probe.phase1RuleCost(EdgeClass.PLAIN)
-                <= probe.phase1Cost(EdgeClass.PLAIN), probe.line());
-        for (EdgeClass c : List.of(EdgeClass.LAMBDA_BOUND, EdgeClass.LAMBDA_UNBOUND,
+                <= probe.phase1Cost(EdgeClass.PLAIN), probe.line());        for (EdgeClass c : List.of(EdgeClass.LAMBDA_BOUND, EdgeClass.LAMBDA_UNBOUND,
                 EdgeClass.LAMBDA_STATIC, EdgeClass.LAMBDA_NEW)) {
             assertTrue(probe.count(c, Counter.EDGES) > 0, c + ": " + probe.line());
         }
@@ -177,12 +179,16 @@ public class CallBlockProbeEquivalenceTest {
 
     /**
      * Every call edge the call graph took is in some batch: per class, the
-     * edges are at most the summed distinct callee nodes of the batches.
+     * edges are at most the summed distinct callee nodes of the batches; and
+     * a callee node is fresh exactly when its batch makes a new edge, so the
+     * fresh nodes are the edges.
      */
     private static void assertEdgesOffered(CallBlockProbe probe) {
         for (EdgeClass c : EdgeClass.values()) {
             assertTrue(probe.count(c, Counter.EDGES) <= probe.count(c, Counter.DIRECT),
                     c + ": " + probe.line());
+            assertEquals(probe.count(c, Counter.EDGES), probe.count(c, Counter.FRESH),
+                    c + " fresh: " + probe.line());
         }
     }
 }

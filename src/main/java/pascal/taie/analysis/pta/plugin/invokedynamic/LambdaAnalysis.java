@@ -798,7 +798,8 @@ public class LambdaAnalysis implements Plugin {
         if (probe != null) {
             CallBlockProbe.Batch batch = probe.begin(csCallSite.getCallSite(),
                     LambdaCallEdge.probeClass(source, callee));
-            batch.offer(recvObj, callEdge.getCallee());
+            batch.offer(recvObj, callEdge.getCallee(),
+                    csCallSite.getEdges().contains(callEdge) ? null : callEdge);
             probe.end(batch);
         }
         solver.addCallEdge(callEdge);
@@ -1097,11 +1098,13 @@ public class LambdaAnalysis implements Plugin {
                 if (counters != null) {
                     counters.edgeBuilt();
                 }
+                LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
                 if (batch != null) {
-                    receivers.forEach(recvObj -> batch.offer(recvObj, csCallee));
+                    LambdaCallEdge unlinked = csCallSite.getEdges().contains(callEdge)
+                            ? null : callEdge;
+                    receivers.forEach(recvObj -> batch.offer(recvObj, csCallee, unlinked));
                 }
-                solver.addCallEdge(new LambdaCallEdge(
-                        csCallSite, csCallee, source));
+                solver.addCallEdge(callEdge);
             }
         });
         if (probe != null && batch != null) {

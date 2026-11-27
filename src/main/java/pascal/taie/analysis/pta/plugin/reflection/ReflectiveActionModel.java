@@ -486,14 +486,21 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         if (isSkippedTarget(callSite, callee)) {
             return;
         }
-        addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+        CallBlockProbe probe = solver.getCallBlockProbe();
+        CallBlockProbe.Batch batch = probe == null ? null
+                : probe.begin(callSite, CallBlockProbe.EdgeClass.REFLECTIVE);
+        addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args, batch);
+        if (probe != null && batch != null) {
+            probe.end(batch);
+        }
     }
 
     /**
      * Adds the call edges of instance method {@code target} on
      * {@code receivers}, all of type {@code type}, dispatched once on that
      * type. The skip check stays per receiver: each edge added raises the
-     * call site's target count that it reads.
+     * call site's target count that it reads. The block probe sees the
+     * edges of one call as one batch.
      */
     private void addDispatchedCallEdges(
             Context callerCtx, Invoke callSite, JMethod target,
@@ -502,16 +509,29 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         if (callee == null) {
             return;
         }
+        CallBlockProbe probe = solver.getCallBlockProbe();
+        CallBlockProbe.Batch batch = probe == null ? null
+                : probe.begin(callSite, CallBlockProbe.EdgeClass.REFLECTIVE);
         for (CSObj recvObj : receivers) {
             if (!isSkippedTarget(callSite, target)) {
-                addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args);
+                addResolvedCallEdge(callerCtx, callSite, recvObj, callee, args, batch);
             }
+        }
+        if (probe != null && batch != null) {
+            probe.end(batch);
         }
     }
 
+    /**
+     * Adds the reflective call edge to {@code callee}.
+     *
+     * @param batch the block probe's batch the edge is offered to, null
+     *              when the probe is off
+     */
     private void addResolvedCallEdge(
             Context callerCtx, Invoke callSite,
-            @Nullable CSObj recvObj, JMethod callee, Var args) {
+            @Nullable CSObj recvObj, JMethod callee, Var args,
+            CallBlockProbe.@Nullable Batch batch) {
         CSCallSite csCallSite = csManager.getCSCallSite(callerCtx, callSite);
         Context calleeCtx;
         if (callee.isStatic()) {
@@ -523,12 +543,9 @@ public class ReflectiveActionModel extends AnalysisModelPlugin {
         }
         ReflectiveCallEdge callEdge = new ReflectiveCallEdge(csCallSite,
                 csManager.getCSMethod(calleeCtx, callee), args);
-        CallBlockProbe probe = solver.getCallBlockProbe();
-        if (probe != null) {
-            CallBlockProbe.Batch batch = probe.begin(callSite,
-                    CallBlockProbe.EdgeClass.REFLECTIVE);
-            batch.offer(callee.isStatic() ? null : recvObj, callEdge.getCallee());
-            probe.end(batch);
+        if (batch != null) {
+            batch.offer(callee.isStatic() ? null : recvObj, callEdge.getCallee(),
+                    csCallSite.getEdges().contains(callEdge) ? null : callEdge);
         }
         solver.addCallEdge(callEdge);
         allTargets.put(callSite, callee); // record target
