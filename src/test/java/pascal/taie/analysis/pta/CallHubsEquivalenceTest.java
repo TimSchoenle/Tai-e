@@ -286,6 +286,75 @@ public class CallHubsEquivalenceTest {
         assertTrue(fullResults >= 3, "results with the three arguments: " + fullResults);
     }
 
+    /**
+     * HubCap: one call site links twenty node sets of two, one after the
+     * other. The first sixteen become hubs (DefaultSolver.HUB_REFS_MAX), the
+     * nodes of every later set become stored call edges, and the results
+     * are those without hubs.
+     */
+    @Test
+    void sitesBeyondTheHubCapStoreTheirEdges() {
+        Snapshot on = run("hubs", "HubCap", "ci", List.of("call-hubs:true"));
+        String c = on.counters();
+        System.out.println("call hubs HubCap ci: " + c);
+        assertEquals(16, counter(c, "hubs"), c);
+        assertTrue(counter(c, "direct_links") >= 4, c);
+        Snapshot off = run("hubs", "HubCap", "ci", List.of());
+        assertSameResults(off, on, "HubCap ci");
+        assertEquals(off.csEdges().size(), counter(c, "cs_edges"), c);
+    }
+
+    /**
+     * HubIgnored: hubs whose targets include ignored library methods (and
+     * one hub of ignored targets only) pass no argument to and take no
+     * return from an ignored target, as without hubs.
+     */
+    @ParameterizedTest
+    @CsvSource({"ci", "1-call", "1-obj"})
+    void ignoredTargetsInsideAHub(String cs) {
+        Snapshot on = run("hubs", "HubIgnored", cs, List.of("call-hubs:true"));
+        String c = on.counters();
+        System.out.println("call hubs HubIgnored " + cs + ": " + c);
+        assertTrue(counter(c, "hubs") >= 3, c);
+        Snapshot off = run("hubs", "HubIgnored", cs, List.of());
+        assertSameResults(off, on, "HubIgnored " + cs);
+    }
+
+    /**
+     * Adds every plain edge again through {@link Solver#addCallEdge} when it
+     * is announced: the call site refuses an edge it already has, stored or
+     * in a hub, so no edge is stored or announced twice.
+     */
+    public static class EdgeReAdder implements Plugin {
+
+        private Solver solver;
+
+        @Override
+        public void setSolver(Solver solver) {
+            this.solver = solver;
+        }
+
+        @Override
+        public void onNewCallEdge(Edge<CSCallSite, CSMethod> edge) {
+            if (edge.getClass() == Edge.class) {
+                solver.addCallEdge(new Edge<>(edge.getKind(), edge.getCallSite(),
+                        edge.getCallee()));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"HubJoin, 1-call", "HubJoin, ci", "HubCap, ci", "HubIgnored, 1-obj"})
+    void plainEdgesAddedAgainAreRefused(String main, String cs) {
+        List<Class<? extends Plugin>> readd = List.of(EdgeReAdder.class);
+        Snapshot on = run("hubs", main, cs, List.of("call-hubs:true"), readd);
+        String c = on.counters();
+        assertTrue(counter(c, "hubs") >= 1, c);
+        Snapshot off = run("hubs", main, cs, List.of(), readd);
+        assertSameResults(off, on, main + " " + cs + " re-added");
+        assertEquals(off.csEdges().size(), counter(c, "cs_edges"), c);
+    }
+
     public static long counter(String line, String name) {
         Matcher m = Pattern.compile("(?:^| )" + name + "=(\\d+)").matcher(line);
         assertTrue(m.find(), name + " in " + line);
