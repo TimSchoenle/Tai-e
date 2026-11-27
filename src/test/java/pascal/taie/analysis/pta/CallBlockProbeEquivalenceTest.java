@@ -101,6 +101,8 @@ public class CallBlockProbeEquivalenceTest {
         List<String> opts = new ArrayList<>(List.of("cs:" + cs,
                 "call-block-probe:" + mode, PLUGINS));
         opts.addAll(List.of(more));
+        // the probe of the previous solve would keep that solve while this one runs
+        ProbeReader.probe = null;
         Tests.testPTA(false, dir, main, opts.toArray(new String[0]));
         PointerAnalysisResult pta = World.get().getResult(PointerAnalysis.ID);
         CallGraph<Invoke, JMethod> callGraph = pta.getCallGraph();
