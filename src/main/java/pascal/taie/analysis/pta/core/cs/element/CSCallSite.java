@@ -32,7 +32,6 @@ import pascal.taie.util.collection.SetEx;
 
 import java.util.AbstractSet;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.Set;
@@ -169,20 +168,32 @@ public class CSCallSite extends AbstractCSElement {
      * edge objects across reads.
      */
     public Set<Edge<CSCallSite, CSMethod>> getEdges() {
-        return hubs == null ? Collections.unmodifiableSet(edges) : new HubbedEdges();
+        return new HubbedEdges();
+    }
+
+    private static final CallHub[] NO_HUBS = {};
+
+    /**
+     * @return the current hubs of this call site, never null
+     */
+    private CallHub[] hubsNow() {
+        CallHub[] refs = hubs;
+        return refs == null ? NO_HUBS : refs;
     }
 
     /**
-     * The edges of a call site with hubs: the stored edges, then per hub
-     * its targets announced to this call site, in hub order. Hub targets
-     * are disjoint from the stored plain edges and from each other.
+     * The live edge view of a call site: the stored edges, then per hub its
+     * targets announced to this call site, in hub order; every read sees the
+     * hubs of that moment, so a view taken before the first hub shows the
+     * hub edges added later. Hub targets are disjoint from the stored plain
+     * edges and from each other.
      */
     private final class HubbedEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
 
         @Override
         public int size() {
             int size = edges.size();
-            for (CallHub hub : hubs) {
+            for (CallHub hub : hubsNow()) {
                 size += hub.visibleTargets(CSCallSite.this);
             }
             return size;
@@ -197,7 +208,7 @@ public class CSCallSite extends AbstractCSElement {
                     || !(edge.getCallee() instanceof CSMethod callee)) {
                 return false;
             }
-            for (CallHub hub : hubs) {
+            for (CallHub hub : hubsNow()) {
                 int i = hub.indexOf(callee);
                 if (i >= 0) {
                     return i < hub.visibleTargets(CSCallSite.this);
@@ -209,7 +220,7 @@ public class CSCallSite extends AbstractCSElement {
         @Override
         public Iterator<Edge<CSCallSite, CSMethod>> iterator() {
             Iterator<Edge<CSCallSite, CSMethod>> stored = edges.iterator();
-            CallHub[] refs = hubs;
+            CallHub[] refs = hubsNow();
             return new Iterator<>() {
                 private int hubIndex;
                 private int target;

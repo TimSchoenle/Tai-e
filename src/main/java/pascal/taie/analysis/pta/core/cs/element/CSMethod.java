@@ -298,11 +298,8 @@ public class CSMethod extends AbstractCSElement {
      * @return the number of call edges to this CS method.
      */
     public int getEdgeCount() {
-        int count = edges.size();
-        for (int h = 0; h < hubCount; ++h) {
-            count += hubs[h].visibleMembers(this);
-        }
-        return count;
+        // the hub part through the prefix cache: one rebuild per stamp
+        return hubCount == 0 ? edges.size() : edges.size() + hubPrefix()[hubCount];
     }
 
     /**

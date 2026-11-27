@@ -1411,6 +1411,10 @@ public class DefaultSolver implements Solver {
         }
         linkSeen.put(csCallee, csCallee);
         HubLink link = batchLink;
+        if (link != null && link.site() != csCallSite) {
+            throw new IllegalStateException("call hub link of " + link.site()
+                    + " offered a node of " + csCallSite);
+        }
         if (link == null) {
             checkAcceptsWork();
             link = new HubLink(csCallSite);
@@ -1777,7 +1781,12 @@ public class DefaultSolver implements Solver {
         Invoke callSite = csCallSite.getCallSite();
         CSMethod csCallee = csManager.getCSMethod(contextSelector.getEmptyContext(), callee);
         CallKind kind = CallGraphs.getCallKind(callSite);
-        if (callHubs && inCallBatch && csCallSite.isOwnPlainKind(kind)) {
+        // only the batched call site's own getter offers join its link: a
+        // static getter call reached from a plugin callback inside the
+        // batch keeps its stored edge
+        if (callHubs && inCallBatch && recvObj != null
+                && (batchLink == null || batchLink.site() == csCallSite)
+                && csCallSite.isOwnPlainKind(kind)) {
             if (!csCallSite.hasPlainEdge(kind, csCallee)) {
                 linkFresh(csCallSite, csCallee);
             }
