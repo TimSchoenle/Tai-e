@@ -81,4 +81,20 @@ public interface ContextSelector {
     default boolean isInstanceContextCallSiteFree() {
         return false;
     }
+
+    /**
+     * Whether {@link #selectContext(CSCallSite, CSObj, JMethod)} gives the
+     * same context for every receiver object at {@code callSite} calling
+     * {@code callee}, so that a solver may select the context once for all
+     * receiver objects of one call site and callee. The default is
+     * {@code false}; a selector returns {@code true} only when this holds.
+     *
+     * @param callSite the (context-sensitive) call site.
+     * @param callee   the callee.
+     * @return whether the context of this instance call is independent of
+     * the receiver object.
+     */
+    default boolean isInstanceContextReceiverFree(CSCallSite callSite, JMethod callee) {
+        return false;
+    }
 }

@@ -93,4 +93,15 @@ class SelectiveSelector implements ContextSelector {
     public boolean isInstanceContextCallSiteFree() {
         return delegate.isInstanceContextCallSiteFree();
     }
+
+    /**
+     * A callee outside the context-sensitive methods gets the empty context
+     * for every receiver object; any other callee's context is the
+     * delegate's.
+     */
+    @Override
+    public boolean isInstanceContextReceiverFree(CSCallSite callSite, JMethod callee) {
+        return !isCSMethod.test(callee)
+                || delegate.isInstanceContextReceiverFree(callSite, callee);
+    }
 }
