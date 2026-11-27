@@ -292,6 +292,28 @@ final class CallSiteEdges extends AbstractSet<Edge<CSCallSite, CSMethod>> {
         return table[findSlot(table, sources, callee, null)] != null;
     }
 
+    /**
+     * @return whether this set holds the sourced edge
+     * {@code source.edge(site, callee)}, found without an edge object: the
+     * same answer as {@link #contains} of that edge
+     * @throws NullPointerException if {@code source} is null: a null source
+     * would ask for a plain edge ({@link #containsPlain})
+     */
+    boolean containsSourced(EdgeSource source, CSMethod callee) {
+        Objects.requireNonNull(source, "source");
+        if (size == 0) {
+            return false;
+        }
+        // a sourced edge is stored as its callee with its source
+        if (table == EMPTY) {
+            return matches(single, (EdgeSource) sources, callee, source);
+        }
+        if (isDense()) {
+            return containsDense(callee, source);
+        }
+        return table[findSlot(table, sources, callee, source)] != null;
+    }
+
     @Override
     public int size() {
         return size;

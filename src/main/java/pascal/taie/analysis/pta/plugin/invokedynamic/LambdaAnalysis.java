@@ -178,13 +178,45 @@ public class LambdaAnalysis implements Plugin {
      * through a method reference whose receiver is the lambda object
      * ({@link #chainedSource}).
      */
-    private final Map<ChainKey, LambdaSource> chainedSources = Maps.newMap();
+    private final ChainedSources chainedSources = new ChainedSources();
 
     /**
      * The calls of the sources of {@link #chainedSources} that
      * {@link #callLambda} made.
      */
-    private final Set<ChainedCall> chainedCalls = new HashSet<>();
+    private final ChainedCalls chainedCalls = new ChainedCalls();
+
+    /**
+     * Option (default {@code true}) that checks each lambda call edge
+     * against the call graph before building it, and skips one the call
+     * graph already holds, as {@link DefaultSolver} does for plain edges
+     * ({@link CSCallSite#hasPlainEdge}): such an edge is a no-op when
+     * polled, so the facts and their order are unchanged. {@code false}
+     * builds and hands every edge to the solver, for the equivalence test.
+     */
+    private static final String EDGE_PREFILTER_OPTION = "lambda-edge-prefilter";
+
+    /**
+     * Whether the option {@link #EDGE_PREFILTER_OPTION} is on.
+     */
+    private boolean edgePrefilter;
+
+    /**
+     * Option (default {@code false}) that returns early from a call at a
+     * lambda invocation of a non-capturing source whose call site and
+     * source the receiver variable already has ({@link #invoInfos}): every
+     * object of the receiver's points-to set was then already handed to that
+     * pair, by the first call or by {@link #onNewPointsToSet}. The fixpoint
+     * is the same, but the skipped this updates no longer take work-list
+     * positions, so the propagation order may differ (an order change for
+     * the owner's acceptance).
+     */
+    private static final String SKIP_REPEATED_CALL_OPTION = "lambda-skip-repeated-call";
+
+    /**
+     * Whether the option {@link #SKIP_REPEATED_CALL_OPTION} is on.
+     */
+    private boolean skipRepeatedCall;
 
     /**
      * The calls of lambda objects that are receivers of a method reference
@@ -303,6 +335,8 @@ public class LambdaAnalysis implements Plugin {
                 "no class " + ClassNames.OBJECT);
         this.capturedHeapContext = isCapturedHeapContext(
                 solver.getOptions().getString(HEAP_CONTEXT_OPTION));
+        this.edgePrefilter = solver.getOptions().getBoolean(EDGE_PREFILTER_OPTION);
+        this.skipRepeatedCall = solver.getOptions().getBoolean(SKIP_REPEATED_CALL_OPTION);
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
@@ -443,7 +477,7 @@ public class LambdaAnalysis implements Plugin {
                 return;
             }
             source = chainedSource(recv, indy, samArgs);
-            if (!chainedCalls.add(new ChainedCall(csCallSite, source))) {
+            if (!chainedCalls.add(csCallSite, source)) {
                 return;
             }
         }
@@ -489,6 +523,9 @@ public class LambdaAnalysis implements Plugin {
                     // present by hasReceiver
                     csRecvVar = samArgs.get(0);
                 }
+                if (repeatedCall(csRecvVar, csCallSite, source)) {
+                    return;
+                }
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
                 ReceiverGroups<Type, CSObj> recvObjsByType = recvByType.computeIfAbsent(
                         csRecvVar, v -> groupByType(recvObjs));
@@ -501,7 +538,8 @@ public class LambdaAnalysis implements Plugin {
                             || samArgs != null);
                 }
                 addLambdaCallEdges(csCallSite, source, recvObjs, groupKnownByCallee(
-                        csCallSite, targetRef, recvObjsByType, targets));
+                        csCallSite, targetRef, recvObjsByType, targets),
+                        LambdaCounters.PATH_CALL);
                 // New objects may reach csRecvVar later, thus we store it
                 // together with information about the related Lambda invocation.
                 invoInfos.computeIfAbsent(csRecvVar, v -> new InstanceInvoInfos())
@@ -511,6 +549,38 @@ public class LambdaAnalysis implements Plugin {
                     addLambdaCallEdge(csCallSite, null, targetRef, source);
             default -> throw new AnalysisException(mh.getKind() + " is not supported");
         }
+    }
+
+    /**
+     * Counts a call at a lambda invocation whose call site and source the
+     * receiver variable {@code csRecvVar} already has, and with the option
+     * {@link #SKIP_REPEATED_CALL_OPTION} decides to skip it if its source is
+     * non-capturing and direct (no arguments of a method reference).
+     *
+     * @return whether the call is skipped
+     */
+    private boolean repeatedCall(CSVar csRecvVar, CSCallSite csCallSite, LambdaSource source) {
+        if (counters == null && !skipRepeatedCall) {
+            return false;
+        }
+        InstanceInvoInfos infos = invoInfos.get(csRecvVar);
+        if (infos == null || !infos.contains(csCallSite, source)) {
+            return false;
+        }
+        if (counters != null) {
+            counters.repeatedSiteSourceCall();
+        }
+        if (!skipRepeatedCall || source.getSamArgs() != null
+                || !source.getIndy().getArgs().isEmpty()) {
+            return false;
+        }
+        // the add of a present pair still runs: at the small set's limit it
+        // moves the set into its hashed form, which sets the iteration order
+        infos.add(csCallSite, source);
+        if (counters != null) {
+            counters.skippedSiteSourceCall();
+        }
+        return true;
     }
 
     /**
@@ -555,10 +625,10 @@ public class LambdaAnalysis implements Plugin {
     private LambdaSource chainedSource(CSObj lambdaObj, InvokeDynamic indy,
                                        List<CSVar> samArgs) {
         LambdaSource base = lambdaSource(lambdaObj, indy);
-        // the key keeps its own copy, not a view of a caller's scratch list
-        List<CSVar> args = List.copyOf(samArgs);
-        return chainedSources.computeIfAbsent(new ChainKey(base, args),
-                k -> new LambdaSource(indy, base.getContext(), args));
+        // equal (base, samArgs) give equal (indy, base context, samArgs): a
+        // base fixes its invokedynamic and context and has no arguments; a
+        // new source keeps its own copy, not a view of a caller's scratch list
+        return chainedSources.intern(indy, base.getContext(), samArgs);
     }
 
     /**
@@ -573,20 +643,6 @@ public class LambdaAnalysis implements Plugin {
                     !indy.getArgs().isEmpty() || !samArgs.isEmpty();
             default -> true;
         };
-    }
-
-    /**
-     * Key of {@link #chainedSources}: a source of a direct call and the
-     * arguments a method reference calls its lambda objects with.
-     */
-    private record ChainKey(LambdaSource base, List<CSVar> samArgs) {
-    }
-
-    /**
-     * A call site and a source of {@link #chainedSources} whose call
-     * {@link #callLambda} made.
-     */
-    private record ChainedCall(CSCallSite csCallSite, LambdaSource source) {
     }
 
     /**
@@ -789,20 +845,57 @@ public class LambdaAnalysis implements Plugin {
             // name; such a pairing cannot be called, so drop the edge.
             return;
         }
-        LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite,
-                csManager.getCSMethod(calleeCtx, callee), source);
+        CSMethod csCallee = csManager.getCSMethod(calleeCtx, callee);
         if (counters != null) {
-            counters.edgeBuilt();
+            counters.edgeOffered();
         }
         CallBlockProbe probe = solver.getCallBlockProbe();
         if (probe != null) {
             CallBlockProbe.Batch batch = probe.begin(csCallSite.getCallSite(),
                     LambdaCallEdge.probeClass(source, callee));
-            batch.offer(recvObj, callEdge.getCallee(),
+            LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
+            batch.offer(recvObj, csCallee,
                     csCallSite.getEdges().contains(callEdge) ? null : callEdge);
             probe.end(batch);
         }
-        solver.addCallEdge(callEdge);
+        offerLambdaCallEdge(csCallSite, csCallee, source, LambdaCounters.EDGE_PATH_SINGLE);
+    }
+
+    /**
+     * @return whether {@code pts} contains every object of {@code objs}.
+     */
+    private static boolean containsAll(PointsToSet pts, PointsToSet objs) {
+        for (CSObj obj : objs) {
+            if (!pts.contains(obj)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Hands the lambda call edge from {@code csCallSite} to {@code csCallee}
+     * of {@code source} to the solver, unless the prefilter
+     * ({@link #EDGE_PREFILTER_OPTION}) finds it already in the call graph:
+     * the solver would poll it as a no-op, so it is not built.
+     *
+     * @param path the edge path for the counters
+     */
+    private void offerLambdaCallEdge(CSCallSite csCallSite, CSMethod csCallee,
+                                     LambdaSource source, int path) {
+        if ((edgePrefilter || counters != null)
+                && csCallSite.hasSourcedEdge(source, csCallee)) {
+            if (counters != null) {
+                counters.edgeRedundant(path);
+            }
+            if (edgePrefilter) {
+                return;
+            }
+        }
+        if (counters != null) {
+            counters.edgeHanded();
+        }
+        solver.addCallEdge(new LambdaCallEdge(csCallSite, csCallee, source));
     }
 
     /**
@@ -1068,10 +1161,11 @@ public class LambdaAnalysis implements Plugin {
      * The map and its sets are only read, so one grouping may serve several
      * invocations whose grouping it equals. The grouping's lambda receivers
      * are queued for {@link #callLambda} ({@link #queueLambdaReceiverCalls}).
+     * {@code path} is the edge path for the counters.
      */
     private void addLambdaCallEdges(
             CSCallSite csCallSite, LambdaSource source, PointsToSet recvObjs,
-            CalleeGrouper grouping) {
+            CalleeGrouper grouping, int path) {
         Map<CSMethod, PointsToSet> receiversByCallee = grouping.receiversByCallee;
         if (verifier != null) {
             verifier.checkGrouping(csCallSite, recvObjs, targetRefOf(source), source,
@@ -1088,6 +1182,16 @@ public class LambdaAnalysis implements Plugin {
                         receiversByCallee.keySet().iterator().next().getMethod()));
         receiversByCallee.forEach((csCallee, receivers) -> {
             JMethod callee = csCallee.getMethod();
+            if (counters != null) {
+                // read before the update, without creating a points-to set;
+                // getCSVar creates the variable the update would create
+                // next, so the counters change no order
+                PointsToSet thisPts = csManager.getCSVar(csCallee.getContext(),
+                        callee.getIR().getThis()).getPointsToSet();
+                if (thisPts != null && containsAll(thisPts, receivers)) {
+                    counters.redundantThisUpdate();
+                }
+            }
             // pass receiver objects to 'this' variable of callee
             solver.addVarPointsTo(csCallee.getContext(),
                     callee.getIR().getThis(), receivers);
@@ -1096,15 +1200,15 @@ public class LambdaAnalysis implements Plugin {
             }
             if (fitsParameterCount(callee, argsToStatic, argsToInstance)) {
                 if (counters != null) {
-                    counters.edgeBuilt();
+                    counters.edgeOffered();
                 }
-                LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
                 if (batch != null) {
+                    LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
                     LambdaCallEdge unlinked = csCallSite.getEdges().contains(callEdge)
                             ? null : callEdge;
                     receivers.forEach(recvObj -> batch.offer(recvObj, csCallee, unlinked));
                 }
-                solver.addCallEdge(callEdge);
+                offerLambdaCallEdge(csCallSite, csCallee, source, path);
             }
         });
         if (probe != null && batch != null) {
@@ -1405,9 +1509,9 @@ public class LambdaAnalysis implements Plugin {
                     || !hasReceiver(indy, args)) {
                 return;
             }
-            LambdaSource expected = new LambdaSource(indy,
+            LambdaSource expected = chainedSources.find(indy,
                     capturedArgsContext(indy, recv.getContext()), args);
-            if (!chainedCalls.contains(new ChainedCall(csCallSite, expected))) {
+            if (expected == null || !chainedCalls.contains(csCallSite, expected)) {
                 throw new AnalysisException("[spd] lambda verify: " + when
                         + ": lambda receiver call of " + recv + " at " + csCallSite
                         + " by " + outer + " missing");
@@ -1564,7 +1668,7 @@ public class LambdaAnalysis implements Plugin {
             infos.forEach((csCallSite, source) -> addLambdaCallEdges(
                     csCallSite, source, pts, groupDeltaByCallee(
                             csCallSite, targetOf(targets, targetRefOf(source)), ptsByType,
-                            LambdaCounters.PATH_NEW_PTS)));
+                            LambdaCounters.PATH_NEW_PTS), LambdaCounters.PATH_NEW_PTS));
         }
         // the delta slots belong to one event at a time: a nested event
         // would have replaced them before the groupings above read them
@@ -1616,7 +1720,8 @@ public class LambdaAnalysis implements Plugin {
                     targetRef -> groupDeltaByCallee(csCallSite,
                             targetOf(targets, targetRef), ptsByType,
                             LambdaCounters.PATH_SHARED));
-            addLambdaCallEdges(csCallSite, source, pts, receiversByCallee);
+            addLambdaCallEdges(csCallSite, source, pts, receiversByCallee,
+                    LambdaCounters.PATH_SHARED);
         });
     }
 }

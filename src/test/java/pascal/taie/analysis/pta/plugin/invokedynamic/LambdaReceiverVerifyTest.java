@@ -26,6 +26,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import pascal.taie.Main;
+import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.solver.Solver;
 import pascal.taie.analysis.pta.plugin.Plugin;
 
@@ -33,7 +34,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
-import java.util.HashSet;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -153,14 +153,14 @@ class LambdaReceiverVerifyTest {
                     case NONE -> {
                     }
                     case STUCK_DRAIN -> field("drainingLambdaReceiverCalls").setBoolean(lambda, true);
-                    case LOST_CALLS -> field("chainedCalls").set(lambda, new HashSet<Object>() {
+                    case LOST_CALLS -> field("chainedCalls").set(lambda, new ChainedCalls() {
                         @Override
-                        public boolean add(Object call) {
+                        boolean add(CSCallSite csCallSite, LambdaSource source) {
                             return false;
                         }
                     });
                 }
-            } catch (ReflectiveOperationException e) {
+            } catch (ReflectiveOperationException | IllegalArgumentException e) {
                 throw new AssertionError("cannot inject " + fault, e);
             }
         }

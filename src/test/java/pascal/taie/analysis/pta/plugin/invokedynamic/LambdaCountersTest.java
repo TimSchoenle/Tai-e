@@ -79,15 +79,43 @@ public class LambdaCountersTest {
     @Test
     void countsEdgesAndTheInfosHistogram() {
         LambdaCounters c = new LambdaCounters();
-        c.edgeBuilt();
-        c.edgeBuilt();
+        c.edgeOffered();
+        c.edgeOffered();
         c.edgeNew();
-        assertEquals(2, c.edgesBuilt());
+        c.edgeHanded();
+        assertEquals(2, c.edgesOffered());
         assertEquals(1, c.edgesNew());
+        assertEquals(1, c.edgesHanded());
         String line = c.line(List.of(1, 1, 3));
         assertTrue(line.startsWith("enter_call=0/0 enter_new_pts=0/0 enter_shared=0/0 "), line);
-        assertTrue(line.contains(" edges_built=2 edges_new=1 receiver_vars=3 "), line);
+        assertTrue(line.contains(" edges_offered=2 edges_new=1 edges_handed=1 "), line);
+        assertTrue(line.contains(" receiver_vars=3 "), line);
         assertTrue(line.endsWith(" infos_per_receiver_var={[1,1]=2, [2,3]=1}"), line);
+    }
+
+    @Test
+    void countsRedundantEdgesPerPathRepeatedCallsAndRedundantThisUpdates() {
+        LambdaCounters c = new LambdaCounters();
+        c.edgeRedundant(LambdaCounters.PATH_CALL);
+        c.edgeRedundant(LambdaCounters.PATH_SHARED);
+        c.edgeRedundant(LambdaCounters.PATH_SHARED);
+        c.edgeRedundant(LambdaCounters.EDGE_PATH_SINGLE);
+        c.repeatedSiteSourceCall();
+        c.skippedSiteSourceCall();
+        c.redundantThisUpdate();
+        c.redundantThisUpdate();
+        assertEquals(1, c.redundantEdges(LambdaCounters.PATH_CALL));
+        assertEquals(0, c.redundantEdges(LambdaCounters.PATH_NEW_PTS));
+        assertEquals(2, c.redundantEdges(LambdaCounters.PATH_SHARED));
+        assertEquals(1, c.redundantEdges(LambdaCounters.EDGE_PATH_SINGLE));
+        assertEquals(1, c.repeatedSiteSourceCalls());
+        assertEquals(1, c.skippedSiteSourceCalls());
+        assertEquals(2, c.redundantThisUpdates());
+        String line = c.line(List.of());
+        assertTrue(line.contains(" edges_redundant_call=1 edges_redundant_new_pts=0"
+                + " edges_redundant_shared=2 edges_redundant_single=1"
+                + " site_source_calls_repeated=1 site_source_calls_skipped=1"
+                + " this_updates_redundant=2 "), line);
     }
 
     /**
@@ -103,8 +131,70 @@ public class LambdaCountersTest {
         assertNotNull(c, "the lambda analysis kept no counters");
         assertTrue(c.enters(LambdaCounters.PATH_CALL) > 0, "no enter counted");
         assertTrue(c.thisUpdates() > 0, "no this update counted");
-        assertTrue(c.edgesBuilt() > 0 && c.edgesNew() > 0
-                && c.edgesNew() <= c.edgesBuilt(), "edges not counted");
+        assertTrue(c.edgesOffered() > 0 && c.edgesNew() > 0
+                && c.edgesNew() <= c.edgesOffered(), "edges not counted");
+    }
+
+    /**
+     * The skip option acts on the fixture LambdaContexts under 2-obj, as the
+     * counters read, so the equivalence test (LambdaRepeatEquivalenceTest)
+     * compares runs that differ.
+     */
+    @Test
+    void skipOptionFiresOnTheFixture() {
+        String on = "lambda-edge-prefilter:true;lambda-skip-repeated-call:true;";
+        LambdaCounters c = solveWithCounters("LambdaContexts", "2-obj", on);
+        assertTrue(c.skippedSiteSourceCalls() > 0, "the skip option skipped no call");
+        LambdaCounters off = solveWithCounters("LambdaContexts", "2-obj",
+                "lambda-edge-prefilter:true;lambda-skip-repeated-call:false;");
+        assertEquals(0, off.skippedSiteSourceCalls(), "skips with the option off");
+        assertTrue(off.repeatedSiteSourceCalls() >= c.skippedSiteSourceCalls(),
+                "repeated calls counted without the option");
+    }
+
+    /**
+     * The prefilter acts on the fixture LambdaRedundantEdge under 1-call, so
+     * the equivalence test (LambdaRepeatEquivalenceTest) compares runs that
+     * differ: the second receiver object arrives as a new points-to set after
+     * the edge is in the call graph, and its re-offered edge is redundant on
+     * the new points-to set path. (On the other fixtures of that test, every
+     * offered edge the call graph does not take as new is a duplicate still
+     * on the work list, which the prefilter does not see.) The redundant
+     * edges are counted with the prefilter off as well; only with it on are
+     * they not handed to the solver.
+     */
+    @Test
+    void prefilterFiresOnTheFixture() {
+        LambdaCounters on = solveWithCounters("LambdaRedundantEdge", "1-call",
+                "lambda-edge-prefilter:true;lambda-skip-repeated-call:false;");
+        LambdaCounters off = solveWithCounters("LambdaRedundantEdge", "1-call",
+                "lambda-edge-prefilter:false;lambda-skip-repeated-call:false;");
+        String lines = "on: " + on.line(List.of()) + "; off: " + off.line(List.of());
+        assertTrue(on.redundantEdges(LambdaCounters.PATH_NEW_PTS) > 0,
+                "the prefilter found no redundant edge: " + lines);
+        assertEquals(off.edgesOffered(), on.edgesOffered(), lines);
+        assertEquals(off.edgesOffered(), off.edgesHanded(),
+                "without the prefilter an offered edge was not handed: " + lines);
+        long redundant = 0;
+        for (int path : new int[] {LambdaCounters.PATH_CALL, LambdaCounters.PATH_NEW_PTS,
+                LambdaCounters.PATH_SHARED, LambdaCounters.EDGE_PATH_SINGLE}) {
+            assertEquals(off.redundantEdges(path), on.redundantEdges(path), lines);
+            redundant += on.redundantEdges(path);
+        }
+        assertEquals(on.edgesOffered() - redundant, on.edgesHanded(),
+                "the prefilter handed a redundant edge to the solver: " + lines);
+    }
+
+    private static LambdaCounters solveWithCounters(String main, String cs, String options) {
+        Probe.counters = null;
+        Main.main("-cp", "src/test/resources/pta/lambda", "-m", main,
+                "-a", "pta=implicit-entries:false;only-app:true;handle-invokedynamic:true;"
+                        + "cs:" + cs + ";census:true;" + options + "plugins:["
+                        + Probe.class.getName() + "];");
+        LambdaCounters c = Probe.counters;
+        Probe.counters = null;
+        assertNotNull(c, "the lambda analysis kept no counters");
+        return c;
     }
 
     /**

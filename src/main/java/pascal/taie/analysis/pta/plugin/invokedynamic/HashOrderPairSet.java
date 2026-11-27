@@ -158,6 +158,26 @@ abstract class HashOrderPairSet<A, B> {
     }
 
     /**
+     * @return whether the set contains the pair {@code (a, b)}. Unlike
+     * {@link #add} of a present pair, this never moves the set into its
+     * hashed form, so it does not change the iteration order.
+     */
+    boolean contains(A a, B b) {
+        if (replay != null) {
+            return replay.contains(new Pair<>(a, b, hash(a, b)));
+        }
+        if (table == null) {
+            return indexOf(a, b) >= 0;
+        }
+        for (int e = table[spread(a, b) & (table.length - 1)]; e != 0; e = next[e - 1]) {
+            if (matches(e - 1, a, b)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * @return the number of pairs.
      */
     int size() {
