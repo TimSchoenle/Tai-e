@@ -23,29 +23,26 @@
 package pascal.taie.analysis.pta.plugin.invokedynamic;
 
 import pascal.taie.analysis.graph.callgraph.OtherEdge;
-import pascal.taie.analysis.pta.core.cs.context.Context;
 import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
 import pascal.taie.analysis.pta.core.cs.element.CSMethod;
 import pascal.taie.analysis.pta.core.cs.element.SourcedEdge;
 import pascal.taie.analysis.pta.core.solver.CallBlockProbe;
-import pascal.taie.ir.exp.Var;
 import pascal.taie.language.classes.JMethod;
-
-import java.util.List;
 
 /**
  * Represents call edge on lambda functional object.
  * The edge carries the information about invokedynamic invocation site
  * where the lambda functional object was created, as its
- * {@link LambdaSource}; call sites and callees hold the edge as that source
- * and rebuild it on read.
+ * {@link LambdaSource}, or with the option {@code lambda-shared-edges} only
+ * its {@link LambdaShape}; call sites and callees hold the edge as that
+ * source and rebuild it on read.
  */
 final class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod>
         implements SourcedEdge, CallBlockProbe.Classified {
 
-    private final LambdaSource source;
+    private final LambdaEdgeSource source;
 
-    LambdaCallEdge(CSCallSite csCallSite, CSMethod callee, LambdaSource source) {
+    LambdaCallEdge(CSCallSite csCallSite, CSMethod callee, LambdaEdgeSource source) {
         super(csCallSite, callee);
         this.source = source;
     }
@@ -61,28 +58,20 @@ final class LambdaCallEdge extends OtherEdge<CSCallSite, CSMethod>
      * instance method with a captured receiver (bound) or one dispatched on
      * the first argument the call passes (unbound)
      */
-    static CallBlockProbe.EdgeClass probeClass(LambdaSource source, JMethod callee) {
+    static CallBlockProbe.EdgeClass probeClass(LambdaEdgeSource source, JMethod callee) {
         if (callee.isConstructor()) {
             return CallBlockProbe.EdgeClass.LAMBDA_NEW;
         }
         if (callee.isStatic()) {
             return CallBlockProbe.EdgeClass.LAMBDA_STATIC;
         }
-        return source.getIndy().getArgs().isEmpty()
+        return source.capturedCount() == 0
                 ? CallBlockProbe.EdgeClass.LAMBDA_UNBOUND
                 : CallBlockProbe.EdgeClass.LAMBDA_BOUND;
     }
 
-    List<Var> getCapturedArgs() {
-        return source.getIndy().getArgs();
-    }
-
-    Context getLambdaContext() {
-        return source.getContext();
-    }
-
     @Override
-    public LambdaSource getSource() {
+    public LambdaEdgeSource getSource() {
         return source;
     }
 

@@ -25,6 +25,7 @@ package pascal.taie.analysis.pta.plugin.invokedynamic;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import pascal.taie.analysis.graph.callgraph.CallGraph;
 import pascal.taie.analysis.graph.callgraph.Edge;
 import pascal.taie.analysis.graph.flowgraph.FlowKind;
 import pascal.taie.analysis.pta.core.cs.context.Context;
@@ -63,6 +64,7 @@ import pascal.taie.language.type.Type;
 import pascal.taie.util.AnalysisException;
 import pascal.taie.util.collection.Maps;
 import pascal.taie.util.collection.MultiMap;
+import pascal.taie.util.collection.Sets;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -219,6 +221,36 @@ public class LambdaAnalysis implements Plugin {
     private boolean skipRepeatedCall;
 
     /**
+     * Option (default {@code false}) that gives a lambda call edge the
+     * identity (call site, callee, {@link LambdaShape}) instead of (call
+     * site, callee, {@link LambdaSource}): the edges of one call site and
+     * callee from sources of one shape are one edge, which adds the
+     * call-site facts. The captured variables of each source are passed to
+     * the callee by {@link #passCapturedArgs} when the edge is offered, once
+     * per source and callee, since they do not depend on the call site.
+     * Same facts at the fixpoint; the captured-variable flows enter the
+     * pointer flow graph when an edge is offered instead of when the solver
+     * polls it, so the propagation order may differ.
+     */
+    private static final String SHARED_EDGES_OPTION = "lambda-shared-edges";
+
+    /**
+     * Whether the option {@link #SHARED_EDGES_OPTION} is on.
+     */
+    private boolean sharedEdges;
+
+    /**
+     * The interned shapes of {@link #SHARED_EDGES_OPTION}.
+     */
+    private final Map<LambdaShape, LambdaShape> shapes = Maps.newMap();
+
+    /**
+     * The callees to which {@link #passCapturedArgs} passed the captured
+     * variables of each capturing source.
+     */
+    private final Map<LambdaSource, Set<CSMethod>> capturedArgsPassed = Maps.newMap();
+
+    /**
      * The calls of lambda objects that are receivers of a method reference
      * whose target their type does not dispatch, queued by
      * {@link #queueLambdaReceiverCalls}.
@@ -337,6 +369,7 @@ public class LambdaAnalysis implements Plugin {
                 solver.getOptions().getString(HEAP_CONTEXT_OPTION));
         this.edgePrefilter = solver.getOptions().getBoolean(EDGE_PREFILTER_OPTION);
         this.skipRepeatedCall = solver.getOptions().getBoolean(SKIP_REPEATED_CALL_OPTION);
+        this.sharedEdges = solver.getOptions().getBoolean(SHARED_EDGES_OPTION);
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
@@ -880,7 +913,12 @@ public class LambdaAnalysis implements Plugin {
      * @param path the edge path for the counters
      */
     private void offerLambdaCallEdge(CSCallSite csCallSite, CSMethod csCallee,
-                                     LambdaSource source, int path) {
+                                     LambdaSource lambdaSource, int path) {
+        LambdaEdgeSource source = lambdaSource;
+        if (sharedEdges) {
+            passCapturedArgs(lambdaSource, csCallee);
+            source = shapeOf(lambdaSource);
+        }
         if ((edgePrefilter || counters != null)
                 && csCallSite.hasSourcedEdge(source, csCallee)) {
             if (counters != null) {
@@ -894,6 +932,79 @@ public class LambdaAnalysis implements Plugin {
             counters.edgeHanded();
         }
         solver.addCallEdge(new LambdaCallEdge(csCallSite, csCallee, source));
+    }
+
+    /**
+     * @return the interned {@link LambdaShape} of {@code source}
+     * ({@link #SHARED_EDGES_OPTION}).
+     */
+    private LambdaShape shapeOf(LambdaSource source) {
+        LambdaShape known = source.getShape();
+        if (known != null) {
+            return known;
+        }
+        LambdaShape shape = new LambdaShape(source.capturedCount(), source.getSamArgs());
+        LambdaShape interned = shapes.putIfAbsent(shape, shape);
+        LambdaShape result = interned == null ? shape : interned;
+        source.setShape(result);
+        return result;
+    }
+
+    /**
+     * Passes the captured variables of {@code source} to the parameters of
+     * {@code csCallee} ({@link #addCapturedArgFlows}) the first time a lambda
+     * call edge of {@code source} to {@code csCallee} is offered under
+     * {@link #SHARED_EDGES_OPTION}. Done here and not when the solver polls
+     * the edge: an edge of the same call site, callee and shape from another
+     * source may already be queued, and the solver drops the equal edge
+     * without calling {@link #onNewCallEdge}.
+     */
+    private void passCapturedArgs(LambdaSource source, CSMethod csCallee) {
+        int count = source.capturedCount();
+        if (count - capturedShift(count, csCallee.getMethod()) == 0) {
+            // no captured variable goes to a parameter (none, or only the
+            // receiver, which goes to this)
+            return;
+        }
+        if (capturedArgsPassed.computeIfAbsent(source, s -> Sets.newHybridSet()).add(csCallee)) {
+            if (counters != null) {
+                counters.capturedArgsPassed();
+            }
+            addCapturedArgFlows(source, csCallee);
+        }
+    }
+
+    /**
+     * Adds the flows of the captured variables of {@code source}, read under
+     * its context, to the leading parameters of {@code csCallee}; a captured
+     * receiver of an instance method is passed to {@code this} instead, when
+     * the edge is offered ({@link #addLambdaCallEdge}).
+     */
+    private void addCapturedArgFlows(LambdaSource source, CSMethod csCallee) {
+        List<Var> capturedArgs = source.getIndy().getArgs();
+        Context lambdaContext = source.getContext();
+        Context calleeContext = csCallee.getContext();
+        JMethod target = csCallee.getMethod();
+        List<Var> targetParams = target.getIR().getParams();
+        int shiftC = capturedShift(source.capturedCount(), target);
+        for (int i = shiftC, j = 0; i < capturedArgs.size(); ++i, ++j) {
+            solver.addPFGEdge(new PointerFlowEdge(
+                    FlowKind.PARAMETER_PASSING,
+                    csManager.getCSVar(lambdaContext, capturedArgs.get(i)),
+                    csManager.getCSVar(calleeContext, targetParams.get(j))),
+                    // filter spurious objects caused by imprecise lambda objects
+                    targetParams.get(j).getType());
+        }
+    }
+
+    /**
+     * @return the number of leading captured variables not passed to
+     * parameters: 1 if {@code target} is an instance method and the lambda
+     * captured variables (the first is the receiver, passed to
+     * {@code this}), otherwise 0.
+     */
+    private static int capturedShift(int capturedCount, JMethod target) {
+        return capturedCount == 0 || target.isStatic() || target.isConstructor() ? 0 : 1;
     }
 
     /**
@@ -1282,7 +1393,39 @@ public class LambdaAnalysis implements Plugin {
     private String countersLine(LambdaCounters c) {
         List<Integer> infoCounts = new ArrayList<>();
         invoInfos.values().forEach(infos -> infoCounts.add(infos.size()));
-        return c.line(infoCounts);
+        long[] dups = sourceDupEdges();
+        return c.line(infoCounts) + " source_dup_edges=" + (dups[0] + dups[1])
+                + " source_dup_capturing=" + dups[0] + " source_dup_noncapturing=" + dups[1];
+    }
+
+    /**
+     * Counts the lambda call edges of the call graph whose call site,
+     * callee and {@link LambdaShape} an earlier edge of the same call site
+     * has with another source: the edges the option
+     * {@link #SHARED_EDGES_OPTION} does not store. One read-only walk over
+     * the call graph, for the counters only.
+     *
+     * @return the counts of capturing and of non-capturing such edges
+     */
+    private long[] sourceDupEdges() {
+        long[] dups = new long[2];
+        // per callee over its stored in-edges: creates no call site
+        Set<LambdaCallEdge> seen = new HashSet<>();
+        CallGraph<CSCallSite, CSMethod> callGraph = solver.getCallGraph();
+        callGraph.reachableMethods().forEach(csMethod -> {
+            seen.clear();
+            for (Edge<CSCallSite, CSMethod> edge : csMethod.getEdges()) {
+                if (edge instanceof LambdaCallEdge lambdaEdge) {
+                    LambdaEdgeSource source = lambdaEdge.getSource();
+                    LambdaShape shape = new LambdaShape(
+                            source.capturedCount(), source.getSamArgs());
+                    if (!seen.add(new LambdaCallEdge(edge.getCallSite(), csMethod, shape))) {
+                        ++dups[source.capturedCount() > 0 ? 0 : 1];
+                    }
+                }
+            }
+        });
+        return dups;
     }
 
     /**
@@ -1540,36 +1683,21 @@ public class LambdaAnalysis implements Plugin {
             CSCallSite csCallSite = lambdaCallEdge.getCallSite();
             CSMethod csCallee = lambdaCallEdge.getCallee();
             Context calleeContext = csCallee.getContext();
-            List<Var> capturedArgs = lambdaCallEdge.getCapturedArgs();
-            Context lambdaContext = lambdaCallEdge.getLambdaContext();
-
+            LambdaEdgeSource source = lambdaCallEdge.getSource();
+            int capturedCount = source.capturedCount();
             JMethod target = csCallee.getMethod();
-            // pass arguments captured at invokedynamic
-            int shiftC; // shift of captured arguments
-            if (capturedArgs.isEmpty()) {
-                shiftC = 0;
-            } else if (target.isStatic() || target.isConstructor()) {
-                shiftC = 0;
-            } else { // target is instance method and there is at least
-                // one capture argument, then it must be the receiver object,
-                // which has been passed to target's this variable when
-                // adding call edge. Thus, we skip it and don't pass it
-                // to target's parameters.
-                shiftC = 1;
+            // pass arguments captured at invokedynamic; under the option
+            // lambda-shared-edges the edge carries only its shape, and the
+            // offer passed them (passCapturedArgs)
+            if (source instanceof LambdaSource lambdaSource) {
+                addCapturedArgFlows(lambdaSource, csCallee);
             }
             List<Var> targetParams = target.getIR().getParams();
-            int j = 0;
-            for (int i = shiftC; i < capturedArgs.size(); ++i, ++j) {
-                solver.addPFGEdge(new PointerFlowEdge(
-                        FlowKind.PARAMETER_PASSING,
-                        csManager.getCSVar(lambdaContext, capturedArgs.get(i)),
-                        csManager.getCSVar(calleeContext, targetParams.get(j))),
-                        // filter spurious objects caused by imprecise lambda objects
-                        targetParams.get(j).getType());
-            }
+            // the actual arguments follow the captured ones passed to parameters
+            int j = capturedCount - capturedShift(capturedCount, target);
             // pass arguments from actual invocation site
             int shiftA; // shift of actual arguments
-            if (capturedArgs.isEmpty() &&
+            if (capturedCount == 0 &&
                     !target.isStatic() && !target.isConstructor()) {
                 // target is instance method and there is no any captured arguments,
                 // then the first argument at actual invocation site must be
@@ -1581,7 +1709,7 @@ public class LambdaAnalysis implements Plugin {
             }
             Invoke invoke = csCallSite.getCallSite();
             Context callerContext = csCallSite.getContext();
-            List<CSVar> forwarded = lambdaCallEdge.getSource().getSamArgs();
+            List<CSVar> forwarded = source.getSamArgs();
             if (forwarded == null) {
                 List<Var> actualArgs = invoke.getInvokeExp().getArgs();
                 for (int i = shiftA; i < actualArgs.size(); ++i, ++j) {
