@@ -94,6 +94,15 @@ class GuidedSelector extends AbstractContextSelector<Object> {
         };
     }
 
+    /**
+     * Only the variant {@code ci} selects a context that does not read the
+     * receiver object.
+     */
+    @Override
+    public boolean isInstanceContextReceiverFree(CSCallSite callSite, JMethod callee) {
+        return csMap.getOrDefault(callee, DEFAULT_CS).equals("ci");
+    }
+
     private Context selectCI() {
         return factory.getEmptyContext();
     }

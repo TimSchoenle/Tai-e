@@ -199,6 +199,107 @@ public class DefaultSolver implements Solver {
     private final boolean trivialGetters;
 
     /**
+     * How {@link #processCall} handles the receiver objects of one call site
+     * (option {@code call-batching}, px/s116 L-B).
+     */
+    private final CallBatching callBatching;
+
+    /**
+     * Batched {@link #processCall}: per receiver type of the current call
+     * site its callee, or {@link #UNRESOLVED}.
+     */
+    private final IdentityScratchMap batchTypes = new IdentityScratchMap();
+
+    /**
+     * Batched {@link #processCall}: per callee of the current call site its
+     * CS callee when the selector says its context does not depend on the
+     * receiver object, otherwise {@link #RECEIVER_DEPENDENT}.
+     */
+    private final IdentityScratchMap batchCallees = new IdentityScratchMap();
+
+    /**
+     * Batched {@link #processCall}: the distinct CS callees (callee nodes) of
+     * the current call site in first-offer order, each with the CS
+     * {@code this} variable of its callee or {@link #IGNORED_THIS}.
+     */
+    private final IdentityScratchMap batchNodes = new IdentityScratchMap();
+
+    /**
+     * Whether a batched {@link #processCall} runs; it uses the scratch maps
+     * above and must not run nested.
+     */
+    private boolean inCallBatch;
+
+    /**
+     * Plain call offers (receiver object, callee) made by {@link #processCall}
+     * in either mode, and those of them whose callee context batched
+     * {@link #processCall} took as independent of the receiver object (0
+     * with {@code per-object}); counted only when the counters are kept.
+     */
+    private long plainOffers;
+
+    private long receiverFreeOffers;
+
+    /**
+     * Callee dispatches ({@link CallGraphs#resolveCallee}) made by
+     * {@link #processCall}: one per receiver object with {@code per-object},
+     * one per receiver type and call site when batched; counted only when the
+     * counters are kept.
+     */
+    private long dispatches;
+
+    /**
+     * Offers of {@link #processCall} that checked the call edge and looked up
+     * the {@code this} variable: every offer with {@code per-object}, the
+     * first offer of each CS callee at a call site when batched; counted only
+     * when the counters are kept.
+     */
+    private long firstOffers;
+
+    private static final Object UNRESOLVED = new Object();
+
+    private static final Object RECEIVER_DEPENDENT = new Object();
+
+    private static final Object IGNORED_THIS = new Object();
+
+    /**
+     * Values of option {@code call-batching}.
+     */
+    enum CallBatching {
+        /**
+         * {@code per-object}: each receiver object resolves, selects and adds
+         * its edge alone.
+         */
+        OFF,
+        /**
+         * {@code batched}: per call site, one dispatch per receiver type, one context
+         * selection per callee whose context does not depend on the receiver
+         * ({@link ContextSelector#isInstanceContextReceiverFree}), and one
+         * edge check and this-variable lookup per CS callee. It queues no
+         * equal pending call edge twice, so the solver polls fewer work-list
+         * entries: its iteration count, and with it the cadence of the
+         * progress log and of the live census, can be lower than with
+         * {@link #OFF}, while the solver events and their order are the same.
+         */
+        ON,
+        /**
+         * {@link #ON}, and every receiver-free context is checked against
+         * the per-object selection.
+         */
+        VERIFY;
+
+        static CallBatching of(String value) {
+            return switch (value) {
+                case "per-object" -> OFF;
+                case "batched" -> ON;
+                case "verify" -> VERIFY;
+                default -> throw new ConfigException(
+                        "call-batching must be batched, per-object or verify: " + value);
+            };
+        }
+    }
+
+    /**
      * The trivial getter shape of each resolved callee, made on first use.
      */
     private final Map<JMethod, TrivialGetter> getterShapes = Maps.newMap();
@@ -405,6 +506,8 @@ public class DefaultSolver implements Solver {
                 typeSystem);
         onlyApp = options.getBoolean("only-app");
         trivialGetters = options.getBoolean("trivial-getters");
+        // read as an object: YAML turns an unquoted on/off into a boolean
+        callBatching = CallBatching.of(String.valueOf(options.get("call-batching")));
         if (trivialGetters && World.get().getOptions().isAndroidMode()) {
             // the Android models read loads in a callee's body against its
             // own this variable (OtherMiscModel), which a getter taken as a
@@ -582,6 +685,10 @@ public class DefaultSolver implements Solver {
         liveCensusClock = LiveCensusClock.of(options.getInt("census-interval"), solveStartNanos);
         blockProbe = CallBlockProbe.of(options.getString("call-block-probe"),
                 csManager.getObjectIndexer());
+        plainOffers = 0;
+        receiverFreeOffers = 0;
+        dispatches = 0;
+        firstOffers = 0;
         liveCensuses = 0;
         liveCensusNanos = 0;
         lastLiveCensus = null;
@@ -857,6 +964,10 @@ public class DefaultSolver implements Solver {
         StringBuilder line = new StringBuilder(addsLine());
         line.append("; type filters ")
                 .append(TypeFilter.statsLine(typeFilters.values(), counting));
+        line.append("; plain offers ").append(plainOffers)
+                .append(" receiver_free=").append(receiverFreeOffers)
+                .append(" dispatches=").append(dispatches)
+                .append(" first_offers=").append(firstOffers);
         if (interner != null) {
             line.append("; interner ").append(interner.formCopiesLine());
         }
@@ -1116,6 +1227,161 @@ public class DefaultSolver implements Solver {
      * @param pts  set of new discovered objects pointed by the variable.
      */
     private void processCall(CSVar recv, PointsToSet pts) {
+        if (callBatching == CallBatching.OFF) {
+            processCallPerObject(recv, pts);
+        } else {
+            processCallBatched(recv, pts);
+        }
+    }
+
+    /**
+     * {@link #processCall} with option {@code call-batching: batched} (or
+     * {@code verify}): the same
+     * steps in the same order as {@link #processCallPerObject}, leaving out
+     * only repeats whose result is already known at this call site. A
+     * receiver type dispatches once; a callee whose context the selector
+     * reports independent of the receiver object selects its context and
+     * looks up its CS callee once; a CS callee checks and adds its call edge
+     * and looks up its {@code this} variable at its first offer only (a
+     * repeated edge would be an equal pending edge, a no-op when polled
+     * after the first). Every receiver object still makes its own
+     * unresolved-call report, getter load and this-variable add, in the
+     * order of {@code pts}, so the work list gets the same entries in the
+     * same order.
+     */
+    private void processCallBatched(CSVar recv, PointsToSet pts) {
+        if (inCallBatch) {
+            throw new IllegalStateException("nested batched processCall at " + recv);
+        }
+        inCallBatch = true;
+        try {
+            Context context = recv.getContext();
+            Var var = recv.getVar();
+            for (Invoke callSite : var.getInvokes()) {
+                batchTypes.clear();
+                batchCallees.clear();
+                batchNodes.clear();
+                CSCallSite[] csCallSiteOnce = new CSCallSite[1];
+                CallBlockProbe probe = blockProbe;
+                CallBlockProbe.Batch batch = probe == null ? null
+                        : probe.begin(callSite, CallBlockProbe.EdgeClass.PLAIN);
+                pts.forEach(recvObj -> {
+                    JMethod callee = batchCallee(recvObj, callSite);
+                    if (callee == null) {
+                        plugin.onUnresolvedCall(recvObj, context, callSite);
+                        return;
+                    }
+                    CSCallSite csCallSite = csCallSiteOnce[0];
+                    if (csCallSite == null) {
+                        csCallSite = csManager.getCSCallSite(context, callSite);
+                        csCallSiteOnce[0] = csCallSite;
+                    }
+                    if (trivialGetters && inlinesGetter(csCallSite, callee, recvObj, batch)) {
+                        return;
+                    }
+                    CSMethod csCallee = batchCSCallee(csCallSite, recvObj, callee);
+                    if (batch != null) {
+                        batch.offer(recvObj, csCallee);
+                    }
+                    Object thisVar = batchNodes.get(csCallee);
+                    if (thisVar == null) {
+                        if (counting) {
+                            ++firstOffers;
+                        }
+                        CallKind kind = CallGraphs.getCallKind(callSite);
+                        if (!csCallSite.hasPlainEdge(kind, csCallee)) {
+                            addCallEdge(new Edge<>(kind, csCallSite, csCallee));
+                        }
+                        thisVar = isIgnored(callee) ? IGNORED_THIS
+                                : csManager.getCSVar(csCallee.getContext(),
+                                callee.getIR().getThis());
+                        batchNodes.put(csCallee, thisVar);
+                    }
+                    if (thisVar != IGNORED_THIS) {
+                        addPointsTo((CSVar) thisVar, recvObj);
+                    }
+                });
+                if (probe != null && batch != null) {
+                    probe.end(batch);
+                }
+            }
+        } finally {
+            batchTypes.clear();
+            batchCallees.clear();
+            batchNodes.clear();
+            inCallBatch = false;
+        }
+    }
+
+    /**
+     * @return the callee of {@code callSite} for the type of
+     * {@code recvObj}, dispatched once per type at the current call site;
+     * null if it does not resolve.
+     */
+    private @Nullable JMethod batchCallee(CSObj recvObj, Invoke callSite) {
+        Type type = recvObj.getObject().getType();
+        Object known = batchTypes.get(type);
+        if (known == null) {
+            if (counting) {
+                ++dispatches;
+            }
+            JMethod callee = CallGraphs.resolveCallee(type, callSite);
+            batchTypes.put(type, callee == null ? UNRESOLVED : callee);
+            return callee;
+        }
+        return known == UNRESOLVED ? null : (JMethod) known;
+    }
+
+    /**
+     * @return the CS callee of {@code callee} for {@code recvObj} at
+     * {@code csCallSite}: selected once per callee at the current call site
+     * when the selector reports its context independent of the receiver
+     * object, otherwise selected for this object.
+     * @throws IllegalStateException with {@code call-batching: verify}, if
+     *                               the per-object selection differs from
+     *                               the context selected once
+     */
+    private CSMethod batchCSCallee(CSCallSite csCallSite, CSObj recvObj, JMethod callee) {
+        if (counting) {
+            ++plainOffers;
+        }
+        Object known = batchCallees.get(callee);
+        if (known == null) {
+            if (contextSelector.isInstanceContextReceiverFree(csCallSite, callee)) {
+                CSMethod csCallee = csManager.getCSMethod(
+                        contextSelector.selectContext(csCallSite, recvObj, callee), callee);
+                batchCallees.put(callee, csCallee);
+                if (counting) {
+                    ++receiverFreeOffers;
+                }
+                return csCallee;
+            }
+            batchCallees.put(callee, RECEIVER_DEPENDENT);
+        } else if (known != RECEIVER_DEPENDENT) {
+            CSMethod csCallee = (CSMethod) known;
+            if (callBatching == CallBatching.VERIFY) {
+                Context perObject = contextSelector.selectContext(csCallSite, recvObj, callee);
+                if (!perObject.equals(csCallee.getContext())) {
+                    throw new IllegalStateException("call-batching verify: the selector"
+                            + " reports the context of " + callee + " at " + csCallSite
+                            + " independent of the receiver, but " + recvObj + " selects "
+                            + perObject + " instead of " + csCallee.getContext());
+                }
+            }
+            if (counting) {
+                ++receiverFreeOffers;
+            }
+            return csCallee;
+        }
+        return csManager.getCSMethod(
+                contextSelector.selectContext(csCallSite, recvObj, callee), callee);
+    }
+
+    /**
+     * {@link #processCall} with option {@code call-batching: per-object}: each
+     * receiver object on its own.
+     */
+    private void processCallPerObject(CSVar recv, PointsToSet pts) {
         Context context = recv.getContext();
         Var var = recv.getVar();
         for (Invoke callSite : var.getInvokes()) {
@@ -1127,6 +1393,9 @@ public class DefaultSolver implements Solver {
                     : probe.begin(callSite, CallBlockProbe.EdgeClass.PLAIN);
             pts.forEach(recvObj -> {
                 // resolve callee
+                if (counting) {
+                    ++dispatches;
+                }
                 JMethod callee = CallGraphs.resolveCallee(
                         recvObj.getObject().getType(), callSite);
                 if (callee != null) {
@@ -1138,6 +1407,10 @@ public class DefaultSolver implements Solver {
                     }
                     if (trivialGetters && inlinesGetter(csCallSite, callee, recvObj, batch)) {
                         return;
+                    }
+                    if (counting) {
+                        ++plainOffers;
+                        ++firstOffers;
                     }
                     Context calleeContext = contextSelector.selectContext(
                             csCallSite, recvObj, callee);

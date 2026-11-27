@@ -45,4 +45,9 @@ class KCallSelector extends KLimitingSelector<Invoke> {
         Context parent = callSite.getContext();
         return factory.append(parent, callSite.getCallSite(), limit);
     }
+
+    @Override
+    public boolean isInstanceContextReceiverFree(CSCallSite callSite, JMethod callee) {
+        return true;
+    }
 }
