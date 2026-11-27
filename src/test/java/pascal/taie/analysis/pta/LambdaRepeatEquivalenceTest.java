@@ -115,7 +115,8 @@ class LambdaRepeatEquivalenceTest {
             "LambdaMix, 2-obj", "LambdaMix, 1-call", "LambdaSharedReceiver, 1-obj",
             "LambdaSharedTargets, 1-obj", "LambdaReceiver, 2-obj", "LambdaSelfReceiver, 2-obj",
             "Streams, 1-obj", "LambdaInstanceMethod, 1-call", "LambdaConstructor, 1-call",
-            "LambdaStaticMethod, 1-call", "LambdaContexts, 2-obj"})
+            "LambdaStaticMethod, 1-call", "LambdaContexts, 2-obj",
+            "LambdaRedundantEdge, 1-call"})
     void repeatOptionsKeepTheResult(String main, String cs) {
         Snapshot off = run(main, cs,
                 "lambda-edge-prefilter:false;lambda-skip-repeated-call:false;");

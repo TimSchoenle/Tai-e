@@ -136,9 +136,7 @@ public class LambdaCountersTest {
     /**
      * The skip option acts on the fixture LambdaContexts under 2-obj, as the
      * counters read, so the equivalence test (LambdaRepeatEquivalenceTest)
-     * compares runs that differ. (The prefilter skips no edge on any fixture
-     * of that test: there, every offered edge the call graph does not take
-     * as new is a duplicate still on the work list, not in the call graph.)
+     * compares runs that differ.
      */
     @Test
     void skipOptionFiresOnTheFixture() {
@@ -150,6 +148,23 @@ public class LambdaCountersTest {
         assertEquals(0, off.skippedSiteSourceCalls(), "skips with the option off");
         assertTrue(off.repeatedSiteSourceCalls() >= c.skippedSiteSourceCalls(),
                 "repeated calls counted without the option");
+    }
+
+    /**
+     * The prefilter acts on the fixture LambdaRedundantEdge under 1-call, so
+     * the equivalence test (LambdaRepeatEquivalenceTest) compares runs that
+     * differ: the second receiver object arrives as a new points-to set after
+     * the edge is in the call graph, and its re-offered edge is redundant on
+     * the new points-to set path. (On the other fixtures of that test, every
+     * offered edge the call graph does not take as new is a duplicate still
+     * on the work list, which the prefilter does not see.)
+     */
+    @Test
+    void prefilterFiresOnTheFixture() {
+        LambdaCounters c = solveWithCounters("LambdaRedundantEdge", "1-call",
+                "lambda-edge-prefilter:true;lambda-skip-repeated-call:false;");
+        assertTrue(c.redundantEdges(LambdaCounters.PATH_NEW_PTS) > 0,
+                "the prefilter found no redundant edge: " + c.line(List.of()));
     }
 
     private static LambdaCounters solveWithCounters(String main, String cs, String options) {
