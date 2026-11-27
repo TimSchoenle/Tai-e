@@ -82,11 +82,13 @@ public class LambdaCountersTest {
         c.edgeOffered();
         c.edgeOffered();
         c.edgeNew();
+        c.edgeHanded();
         assertEquals(2, c.edgesOffered());
         assertEquals(1, c.edgesNew());
+        assertEquals(1, c.edgesHanded());
         String line = c.line(List.of(1, 1, 3));
         assertTrue(line.startsWith("enter_call=0/0 enter_new_pts=0/0 enter_shared=0/0 "), line);
-        assertTrue(line.contains(" edges_offered=2 edges_new=1 "), line);
+        assertTrue(line.contains(" edges_offered=2 edges_new=1 edges_handed=1 "), line);
         assertTrue(line.contains(" receiver_vars=3 "), line);
         assertTrue(line.endsWith(" infos_per_receiver_var={[1,1]=2, [2,3]=1}"), line);
     }
@@ -157,14 +159,30 @@ public class LambdaCountersTest {
      * the edge is in the call graph, and its re-offered edge is redundant on
      * the new points-to set path. (On the other fixtures of that test, every
      * offered edge the call graph does not take as new is a duplicate still
-     * on the work list, which the prefilter does not see.)
+     * on the work list, which the prefilter does not see.) The redundant
+     * edges are counted with the prefilter off as well; only with it on are
+     * they not handed to the solver.
      */
     @Test
     void prefilterFiresOnTheFixture() {
-        LambdaCounters c = solveWithCounters("LambdaRedundantEdge", "1-call",
+        LambdaCounters on = solveWithCounters("LambdaRedundantEdge", "1-call",
                 "lambda-edge-prefilter:true;lambda-skip-repeated-call:false;");
-        assertTrue(c.redundantEdges(LambdaCounters.PATH_NEW_PTS) > 0,
-                "the prefilter found no redundant edge: " + c.line(List.of()));
+        LambdaCounters off = solveWithCounters("LambdaRedundantEdge", "1-call",
+                "lambda-edge-prefilter:false;lambda-skip-repeated-call:false;");
+        String lines = "on: " + on.line(List.of()) + "; off: " + off.line(List.of());
+        assertTrue(on.redundantEdges(LambdaCounters.PATH_NEW_PTS) > 0,
+                "the prefilter found no redundant edge: " + lines);
+        assertEquals(off.edgesOffered(), on.edgesOffered(), lines);
+        assertEquals(off.edgesOffered(), off.edgesHanded(),
+                "without the prefilter an offered edge was not handed: " + lines);
+        long redundant = 0;
+        for (int path : new int[] {LambdaCounters.PATH_CALL, LambdaCounters.PATH_NEW_PTS,
+                LambdaCounters.PATH_SHARED, LambdaCounters.EDGE_PATH_SINGLE}) {
+            assertEquals(off.redundantEdges(path), on.redundantEdges(path), lines);
+            redundant += on.redundantEdges(path);
+        }
+        assertEquals(on.edgesOffered() - redundant, on.edgesHanded(),
+                "the prefilter handed a redundant edge to the solver: " + lines);
     }
 
     private static LambdaCounters solveWithCounters(String main, String cs, String options) {

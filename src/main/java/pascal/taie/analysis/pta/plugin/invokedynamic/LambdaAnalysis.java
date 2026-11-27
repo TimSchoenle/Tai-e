@@ -890,6 +890,9 @@ public class LambdaAnalysis implements Plugin {
                 return;
             }
         }
+        if (counters != null) {
+            counters.edgeHanded();
+        }
         solver.addCallEdge(new LambdaCallEdge(csCallSite, csCallee, source));
     }
 

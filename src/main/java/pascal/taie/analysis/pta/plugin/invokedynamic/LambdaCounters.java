@@ -46,8 +46,8 @@ import static pascal.taie.analysis.pta.pts.PointsToSetCensus.formatHistogram;
  *     repeating a callee already updated in the same event (one lambda
  *     invocation or one new points-to set);</li>
  *     <li>the lambda call edges offered to the solver (handed to it, or
- *     found already in the call graph and not built), and those the call
- *     graph took as new;</li>
+ *     found already in the call graph and not built), those handed to it,
+ *     and those the call graph took as new;</li>
  *     <li>per edge path ({@link #EDGE_PATH_NAMES}), the offered edges found
  *     already in the call graph (redundant); the calls at a lambda
  *     invocation of a call site and source already registered for the
@@ -85,6 +85,8 @@ final class LambdaCounters {
     }
 
     private long edgesOffered;
+
+    private long edgesHanded;
 
     private long edgesNew;
 
@@ -197,6 +199,14 @@ final class LambdaCounters {
         ++edgesOffered;
     }
 
+    /**
+     * Counts an offered lambda call edge that is built and handed to the
+     * solver (not skipped by the prefilter).
+     */
+    void edgeHanded() {
+        ++edgesHanded;
+    }
+
     void edgeNew() {
         ++edgesNew;
     }
@@ -219,6 +229,10 @@ final class LambdaCounters {
 
     long edgesOffered() {
         return edgesOffered;
+    }
+
+    long edgesHanded() {
+        return edgesHanded;
     }
 
     long edgesNew() {
@@ -247,6 +261,7 @@ final class LambdaCounters {
                 .append(" this_updates_repeated=").append(repeatedThisUpdates)
                 .append(" edges_offered=").append(edgesOffered)
                 .append(" edges_new=").append(edgesNew)
+                .append(" edges_handed=").append(edgesHanded)
                 .append(redundantEdgesText())
                 .append(" site_source_calls_repeated=").append(repeatedSiteSourceCalls)
                 .append(" site_source_calls_skipped=").append(skippedSiteSourceCalls)

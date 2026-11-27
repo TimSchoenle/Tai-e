@@ -31,8 +31,11 @@ import pascal.taie.analysis.pta.core.cs.element.CSCallSite;
  * {@link LambdaAnalysis}: a {@link CSCallSite} has identity equality, and
  * the sources are interned ({@link ChainedSources}). Elements are never
  * removed; there is no iteration.
+ * <p>
+ * Not final: {@code LambdaReceiverVerifyTest} overrides {@link #add} to
+ * drop every call and checks that the verify mode reports it.
  */
-final class ChainedCalls {
+class ChainedCalls {
 
     private static final int INITIAL_CAPACITY = 16;
 
