@@ -886,7 +886,8 @@ public class LambdaAnalysis implements Plugin {
         if (probe != null) {
             CallBlockProbe.Batch batch = probe.begin(csCallSite.getCallSite(),
                     LambdaCallEdge.probeClass(source, callee));
-            LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
+            LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee,
+                    handedSource(source));
             batch.offer(recvObj, csCallee,
                     csCallSite.getEdges().contains(callEdge) ? null : callEdge);
             probe.end(batch);
@@ -916,11 +917,10 @@ public class LambdaAnalysis implements Plugin {
      */
     private void offerLambdaCallEdge(CSCallSite csCallSite, CSMethod csCallee,
                                      LambdaSource lambdaSource, int path) {
-        LambdaEdgeSource source = lambdaSource;
         if (sharedEdges) {
             passCapturedArgs(lambdaSource, csCallee);
-            source = shapeOf(lambdaSource);
         }
+        LambdaEdgeSource source = handedSource(lambdaSource);
         if ((edgePrefilter || counters != null)
                 && csCallSite.hasSourcedEdge(source, csCallee)) {
             if (counters != null) {
@@ -934,6 +934,16 @@ public class LambdaAnalysis implements Plugin {
             counters.edgeHanded();
         }
         solver.addCallEdge(new LambdaCallEdge(csCallSite, csCallee, source));
+    }
+
+    /**
+     * @return the source the lambda call edges of {@code source} carry when
+     * handed to the solver: its shape under {@link #SHARED_EDGES_OPTION},
+     * else {@code source} itself. The block probe claims the edge of this
+     * source, as the solver polls that edge.
+     */
+    private LambdaEdgeSource handedSource(LambdaSource source) {
+        return sharedEdges ? shapeOf(source) : source;
     }
 
     /**
@@ -1314,7 +1324,8 @@ public class LambdaAnalysis implements Plugin {
                     counters.edgeOffered();
                 }
                 if (batch != null) {
-                    LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee, source);
+                    LambdaCallEdge callEdge = new LambdaCallEdge(csCallSite, csCallee,
+                            handedSource(source));
                     LambdaCallEdge unlinked = csCallSite.getEdges().contains(callEdge)
                             ? null : callEdge;
                     receivers.forEach(recvObj -> batch.offer(recvObj, csCallee, unlinked));

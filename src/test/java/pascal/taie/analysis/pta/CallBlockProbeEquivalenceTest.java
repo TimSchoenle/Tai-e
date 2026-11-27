@@ -260,6 +260,31 @@ public class CallBlockProbeEquivalenceTest {
     }
 
     /**
+     * The probe under the option {@code lambda-shared-edges}: a batch claims
+     * the lambda edge the analysis hands to the solver, which carries the
+     * shape of its source, so every claimed edge is polled; and the probe
+     * changes no result and no order there either.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "lambda, LambdaSharedEdges, 1-obj", "lambda, LambdaSharedEdges, 2-obj",
+            "lambda, LambdaSharedEdges, ci", "lambda, LambdaContexts, 2-obj",
+            "lambda, LambdaSharedReceiver, 1-obj", "lambda, LambdaMix, 2-obj"})
+    void probeClaimsTheSharedLambdaEdge(String dir, String main, String cs) {
+        Snapshot off = run(dir, main, cs, "none", "lambda-shared-edges:true");
+        assertTrue(off.events().size() > 0, "the solve records events");
+        for (String mode : List.of("p1", "p1b", "p1t")) {
+            Snapshot on = run(dir, main, cs, mode, "lambda-shared-edges:true");
+            assertProbeQuiet(on, mode);
+            assertEquals(off.events(), on.events(), mode + ": solver events in order");
+            assertEquals(off.edges(), on.edges(), mode + ": call edges");
+            assertEquals(off.reached(), on.reached(), mode + ": reachable methods");
+            assertEquals(off.pointsTo(), on.pointsTo(), mode + ": points-to sets");
+            assertEdgesOffered(ProbeReader.probe);
+        }
+    }
+
+    /**
      * The probe on the batched call path (option {@code call-batching},
      * px/s116 L-B) on the fixtures of {@link CallBatchingEquivalenceTest}:
      * {@code p1t} with {@code batched} gives the same solver events in the
