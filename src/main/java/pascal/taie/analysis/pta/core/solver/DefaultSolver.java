@@ -722,7 +722,7 @@ public class DefaultSolver implements Solver {
             logger.info("Call block probe: {}", blockProbe.line());
         }
         if (options.getBoolean("census")) {
-            census = SolverCensus.take(csManager);
+            census = SolverCensus.take(csManager, callGraph);
             owners = takeOwners();
         }
         if (options.getBoolean("release-solver-state")) {
@@ -747,7 +747,7 @@ public class DefaultSolver implements Solver {
         }
         logger.info("Census during the solve at {} s ({}), iteration {}",
                 (start - solveStartNanos) / NANOS_PER_SECOND, reason, iterations);
-        lastLiveCensus = SolverCensus.take(csManager);
+        lastLiveCensus = SolverCensus.take(csManager, callGraph);
         lastLiveOwners = takeOwners();
         if (counting) {
             logger.info("Work list: {}", workList.countersLine());
