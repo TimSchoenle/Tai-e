@@ -68,8 +68,10 @@ import pascal.taie.util.collection.Sets;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -158,9 +160,30 @@ public class LambdaAnalysis implements Plugin {
      * the difference, which the following {@link #onNewPointsToSet} then
      * hands to every invocation on the variable, including the new one;
      * a grouping created inside the window may list those objects twice,
-     * which repeats facts but loses none.
+     * which repeats facts but loses none. With the option
+     * {@link #SHARED_RECEIVER_GROUPS_OPTION}, variables with one points-to
+     * set object hold one grouping ({@link ReceiverGroupCache}); a grouping
+     * created inside the window then holds the difference already, and the
+     * following {@link #onNewPointsToSet} does not append it again.
      */
-    private final Map<CSVar, ReceiverGroups<Type, CSObj>> recvByType = Maps.newMap();
+    private final Map<CSVar, ReceiverGroupCache.Entry<Type, CSObj>> recvByType =
+            Maps.newMap();
+
+    /**
+     * Option to share the receiver grouping of {@link #recvByType} between
+     * the variables that hold one points-to set object (with the pta option
+     * {@code share-points-to-sets}, equal sets are one object), instead of
+     * one grouping per variable. Same facts at the fixpoint; a variable that
+     * takes over a grouping made by another variable visits its receivers in
+     * that grouping's order, so the order of the facts may differ.
+     */
+    private static final String SHARED_RECEIVER_GROUPS_OPTION = "lambda-shared-receiver-groups";
+
+    /**
+     * The groupings of {@link #recvByType}, shared by points-to set under
+     * {@link #SHARED_RECEIVER_GROUPS_OPTION}.
+     */
+    private ReceiverGroupCache<Type, CSObj> receiverGroups = new ReceiverGroupCache<>(false);
 
     /**
      * The interned sources of the lambda call edges of each invokedynamic
@@ -370,6 +393,15 @@ public class LambdaAnalysis implements Plugin {
         this.edgePrefilter = solver.getOptions().getBoolean(EDGE_PREFILTER_OPTION);
         this.skipRepeatedCall = solver.getOptions().getBoolean(SKIP_REPEATED_CALL_OPTION);
         this.sharedEdges = solver.getOptions().getBoolean(SHARED_EDGES_OPTION);
+        boolean sharedGroups = solver.getOptions().getBoolean(SHARED_RECEIVER_GROUPS_OPTION);
+        // the shared groupings rely on points-to sets that only grow; the
+        // interactive taint mode removes taint objects between its runs
+        if (sharedGroups && solver.getOptions().getBoolean("taint-interactive-mode")) {
+            throw new AnalysisException("option " + SHARED_RECEIVER_GROUPS_OPTION
+                    + " needs points-to sets that only grow: it cannot be combined"
+                    + " with taint-interactive-mode");
+        }
+        this.receiverGroups = new ReceiverGroupCache<>(sharedGroups);
         if (Boolean.getBoolean(VERIFY_PROPERTY)) {
             boolean noTimeLimit = solver.getOptions().getInt("time-limit") < 0;
             verifier = new GroupingVerifier(noTimeLimit);
@@ -561,7 +593,8 @@ public class LambdaAnalysis implements Plugin {
                 }
                 PointsToSet recvObjs = solver.getPointsToSetOf(csRecvVar);
                 ReceiverGroups<Type, CSObj> recvObjsByType = recvByType.computeIfAbsent(
-                        csRecvVar, v -> groupByType(recvObjs));
+                        csRecvVar, v -> receiverGroups.attach(recvObjs, recvObjs.size(),
+                                () -> groupByType(recvObjs))).groups();
                 ReceiverTargets targets = targetsByVar.computeIfAbsent(
                         csRecvVar, v -> new ReceiverTargets());
                 if (verifier != null) {
@@ -1230,14 +1263,25 @@ public class LambdaAnalysis implements Plugin {
      * classes for which {@link ClassHierarchy#dispatch} may find a method
      * (it requires the receiver class to be a subclass of the target's
      * declaring class).
+     * If {@code before} is not null, {@code known} is not an extension of the
+     * variable's old grouping {@code before} but another grouping
+     * ({@link ReceiverGroupCache.Advance#slotsKept}): the new types are those
+     * absent from {@code before}, their known slots are those of
+     * {@code known}, added unordered after {@link ReceiverTargets#remapKnown}.
      */
     private void matchTargets(ReceiverTargets targets, ReceiverGroups<Type, CSObj> ptsByType,
-                              ReceiverGroups<Type, CSObj> known, int knownSize) {
+                              ReceiverGroups<Type, CSObj> known, int knownSize,
+                              @Nullable ReceiverGroups<Type, CSObj> before) {
         for (int slot = 0; slot < ptsByType.keyCount(); ++slot) {
             Type type = ptsByType.keyAt(slot);
-            int knownSlot = known.slotOf(type);
-            // the known slots of a target cover the types the variable had
-            int newKnownSlot = knownSlot >= knownSize ? knownSlot : -1;
+            int newKnownSlot;
+            if (before == null) {
+                int knownSlot = known.slotOf(type);
+                // the known slots of a target cover the types the variable had
+                newKnownSlot = knownSlot >= knownSize ? knownSlot : -1;
+            } else {
+                newKnownSlot = before.slotOf(type) < 0 ? requireSlot(known, type) : -1;
+            }
             JClass receiverClass = type instanceof ClassType classType
                     ? classType.getJClass()
                     : type instanceof ArrayType ? objectClass : null;
@@ -1361,6 +1405,7 @@ public class LambdaAnalysis implements Plugin {
         lambdaObjs.clear();
         invoInfos.clear();
         recvByType.clear();
+        receiverGroups.clear();
         nonCapturingSources.clear();
         capturingSources.clear();
         chainedSources.clear();
@@ -1373,6 +1418,7 @@ public class LambdaAnalysis implements Plugin {
         checkFinish();
         logCounters();
         recvByType.clear();
+        receiverGroups.clear();
         targetsByVar.clear();
     }
 
@@ -1411,7 +1457,8 @@ public class LambdaAnalysis implements Plugin {
         invoInfos.values().forEach(infos -> infoCounts.add(infos.size()));
         long[] dups = sourceDupEdges();
         return c.line(infoCounts) + " source_dup_edges=" + (dups[0] + dups[1])
-                + " source_dup_capturing=" + dups[0] + " source_dup_noncapturing=" + dups[1];
+                + " source_dup_capturing=" + dups[0] + " source_dup_noncapturing=" + dups[1]
+                + " " + receiverGroups.countsLine();
     }
 
     /**
@@ -1676,9 +1723,15 @@ public class LambdaAnalysis implements Plugin {
         private String counts() {
             long cachedObjs = 0;
             long cachedTypes = 0;
-            for (ReceiverGroups<Type, CSObj> byType : recvByType.values()) {
-                cachedTypes += byType.keyCount();
-                cachedObjs += byType.objectCount();
+            // a grouping shared by several variables counts once
+            Set<ReceiverGroups<Type, CSObj>> seen = Collections.newSetFromMap(
+                    new IdentityHashMap<>());
+            for (ReceiverGroupCache.Entry<Type, CSObj> entry : recvByType.values()) {
+                ReceiverGroups<Type, CSObj> byType = entry.groups();
+                if (seen.add(byType)) {
+                    cachedTypes += byType.keyCount();
+                    cachedObjs += byType.objectCount();
+                }
             }
             return "calls=" + calls + " facts=" + facts + " partialCalls=" + partialCalls
                     + " partialMissing=" + partialMissing + " stateChecks=" + stateChecks
@@ -1791,14 +1844,37 @@ public class LambdaAnalysis implements Plugin {
         // invocation on this receiver variable, and appended to the
         // variable's cached grouping (present since its first invocation)
         ReceiverGroups<Type, CSObj> ptsByType = groupByType(pts);
-        ReceiverGroups<Type, CSObj> cached = Objects.requireNonNull(recvByType.get(csVar),
-                "no receiver grouping for a lambda receiver variable");
+        ReceiverGroupCache.Entry<Type, CSObj> held = Objects.requireNonNull(
+                recvByType.get(csVar), "no receiver grouping for a lambda receiver variable");
         ReceiverTargets targets = Objects.requireNonNull(targetsByVar.get(csVar),
                 "no targets for a lambda receiver variable");
-        int knownSize = cached.keyCount();
-        cached.appendAll(ptsByType);
-        long thisEvent = ++event;
-        matchTargets(targets, ptsByType, cached, knownSize);
+        ReceiverGroups<Type, CSObj> before = held.groups();
+        int knownSize = before.keyCount();
+        long thisEvent;
+        if (!receiverGroups.isShared()) {
+            before.appendAll(ptsByType);
+            thisEvent = ++event;
+            matchTargets(targets, ptsByType, before, knownSize, null);
+        } else {
+            PointsToSet varPts = solver.getPointsToSetOf(csVar);
+            ReceiverGroupCache.Advance<Type, CSObj> advance = receiverGroups.advance(
+                    held, varPts, varPts.size(), ptsByType, pts.size(),
+                    () -> groupByType(varPts));
+            ReceiverGroups<Type, CSObj> cached = advance.entry().groups();
+            if (advance.entry() != held) {
+                recvByType.put(csVar, advance.entry());
+            }
+            thisEvent = ++event;
+            if (advance.slotsKept()) {
+                matchTargets(targets, ptsByType, cached, knownSize, null);
+            } else {
+                // the grouping of another variable or a new one: the types
+                // of before and those of the difference, in other slots
+                targets.remapKnown(slot -> requireSlot(cached, before.keyAt(slot)));
+                matchTargets(targets, ptsByType, cached, knownSize, before);
+                targets.sortKnown();
+            }
+        }
         // handle the case of that new objects reach base variable
         // of lambda invocation
         if (callSiteFreeContexts && infos.size() > 1) {
@@ -1815,6 +1891,21 @@ public class LambdaAnalysis implements Plugin {
             throw new IllegalStateException("lambda receiver event " + thisEvent
                     + " interrupted by event " + event);
         }
+    }
+
+    /**
+     * @return the slot of {@code type} in {@code groups}, which holds the
+     * content of a receiver variable's points-to set
+     * @throws IllegalStateException if the type is absent: the variable's
+     *                               targets would lose receivers
+     */
+    private static int requireSlot(ReceiverGroups<Type, CSObj> groups, Type type) {
+        int slot = groups.slotOf(type);
+        if (slot < 0) {
+            throw new IllegalStateException("receiver type " + type
+                    + " missing from the shared receiver grouping");
+        }
+        return slot;
     }
 
     /**

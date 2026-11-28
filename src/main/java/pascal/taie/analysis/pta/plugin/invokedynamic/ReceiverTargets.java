@@ -29,6 +29,7 @@ import pascal.taie.util.collection.Maps;
 
 import java.util.Arrays;
 import java.util.Map;
+import java.util.function.IntUnaryOperator;
 
 /**
  * The target method references of the lambda invocations on one receiver
@@ -78,6 +79,32 @@ final class ReceiverTargets {
      */
     Target @Nullable [] declaredIn(JClass declaringClass) {
         return byDeclaringClass.get(declaringClass);
+    }
+
+    /**
+     * Maps the known slots of every target through {@code map} (old slot to
+     * new slot), for a variable whose grouping was replaced by another of
+     * the same keys and more; the lists are then unordered until
+     * {@link #sortKnown}.
+     */
+    void remapKnown(IntUnaryOperator map) {
+        for (Target target : byRef.values()) {
+            SlotList known = target.known;
+            for (int i = 0; i < known.count; ++i) {
+                known.slots[i] = map.applyAsInt(known.slots[i]);
+            }
+            known.ordered = false;
+        }
+    }
+
+    /**
+     * Sorts the known slots of every target after {@link #remapKnown} and
+     * the slots added since, dropping repeated slots.
+     */
+    void sortKnown() {
+        for (Target target : byRef.values()) {
+            target.known.sort();
+        }
     }
 
     private static Target[] concat(Target[] old, Target[] added) {
@@ -151,10 +178,17 @@ final class ReceiverTargets {
         private int count;
 
         /**
+         * False between {@link ReceiverTargets#remapKnown} and
+         * {@link ReceiverTargets#sortKnown}: slots may then come in any
+         * order.
+         */
+        private boolean ordered = true;
+
+        /**
          * Appends {@code slot} unless it is the last slot already.
          *
          * @throws IllegalStateException if {@code slot} is below the last
-         *                               slot
+         *                               slot while the list is ordered
          */
         void addLast(int slot) {
             if (count > 0) {
@@ -162,7 +196,7 @@ final class ReceiverTargets {
                 if (last == slot) {
                     return;
                 }
-                if (last > slot) {
+                if (ordered && last > slot) {
                     throw new IllegalStateException("slot " + slot + " after " + last);
                 }
             }
@@ -183,6 +217,18 @@ final class ReceiverTargets {
 
         private void clear() {
             count = 0;
+        }
+
+        private void sort() {
+            Arrays.sort(slots, 0, count);
+            int distinct = 0;
+            for (int i = 0; i < count; ++i) {
+                if (distinct == 0 || slots[distinct - 1] != slots[i]) {
+                    slots[distinct++] = slots[i];
+                }
+            }
+            count = distinct;
+            ordered = true;
         }
     }
 }
