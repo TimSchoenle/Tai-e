@@ -81,6 +81,14 @@ public final class Tests {
             Integer.getInteger("taie.test.pack-cold-sets", 0);
 
     /**
+     * The window of the pta option {@code pack-cold-deltas} that pointer
+     * analysis tests run with (system property
+     * {@code taie.test.pack-cold-deltas}); 0 leaves the option at its default.
+     */
+    private static final int PACK_COLD_DELTAS =
+            Integer.getInteger("taie.test.pack-cold-deltas", 0);
+
+    /**
      * Whether dump control-flow graphs or not.
      */
     private static final boolean DUMP_CFG = false;
@@ -220,6 +228,9 @@ public final class Tests {
         }
         if (PACK_COLD_SETS != 0) {
             ptaArgs.add("pack-cold-sets:" + PACK_COLD_SETS);
+        }
+        if (PACK_COLD_DELTAS != 0) {
+            ptaArgs.add("pack-cold-deltas:" + PACK_COLD_DELTAS);
         }
         if (processResult) {
             ptaArgs.add(GENERATE_EXPECTED_RESULTS

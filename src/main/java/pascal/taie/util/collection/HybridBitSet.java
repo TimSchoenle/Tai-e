@@ -186,6 +186,50 @@ public final class HybridBitSet<E> extends AbstractHybridSet<E>
     }
 
     /**
+     * Tells, without restoring them, whether the words of
+     * {@link #toPackedLarge} of a set of {@code expectedIndexer} hold every
+     * element of this set; the words are only read.
+     *
+     * @return {@code true} if they hold every element; {@code false} if
+     * they do not, or if this set is large but not a large sparse set of
+     * {@code expectedIndexer}, which this test does not read
+     */
+    public boolean isCoveredByPackedLarge(Indexer<E> expectedIndexer, long[] packed) {
+        if (isLargeSet) {
+            SparseBitSet sparse = largeSparseBits(expectedIndexer);
+            return sparse != null && SparseBitSet.packedContains(packed, sparse);
+        }
+        return SparseBitSet.packedContains(packed, smallIndexes(expectedIndexer));
+    }
+
+    /**
+     * {@link #isCoveredByPackedLarge(Indexer, long[])} for the snapshot of
+     * {@link #packedLargeSnapshot} of a set of {@code expectedIndexer}; the
+     * shared words are only read.
+     */
+    public boolean isCoveredByPackedLarge(Indexer<E> expectedIndexer,
+                                          SparseBitSet.PackedSnapshot snapshot) {
+        if (isLargeSet) {
+            SparseBitSet sparse = largeSparseBits(expectedIndexer);
+            return sparse != null && SparseBitSet.packedContains(snapshot, sparse);
+        }
+        return SparseBitSet.packedContains(snapshot, smallIndexes(expectedIndexer));
+    }
+
+    /**
+     * @return the indexes of the elements of this small set by
+     * {@code indexer}
+     */
+    private int[] smallIndexes(Indexer<E> indexer) {
+        int[] indexes = new int[size()];
+        int i = 0;
+        for (E e : this) {
+            indexes[i++] = indexer.getIndex(e);
+        }
+        return indexes;
+    }
+
+    /**
      * @return the sparse bit set of this set when it is a large sparse set
      * of {@code expectedIndexer} (see {@link #toPackedLarge}), else
      * {@code null}
