@@ -247,7 +247,7 @@ final class ReceiverGroupCache<K, V> {
      * @return the counts of {@link #advance} by outcome.
      */
     String countsLine() {
-        return "sharedGroupings=" + bySet.size() + " extensions=" + extensions +" joins=" + joins
+        return "sharedGroupings=" + bySet.size() + " extensions=" + extensions + " joins=" + joins
                 + " copies=" + copies + " rebuilds=" + rebuilds;
     }
 

@@ -1458,7 +1458,7 @@ public class LambdaAnalysis implements Plugin {
         long[] dups = sourceDupEdges();
         return c.line(infoCounts) + " source_dup_edges=" + (dups[0] + dups[1])
                 + " source_dup_capturing=" + dups[0] + " source_dup_noncapturing=" + dups[1]
-                + " " + receiverGroups.countsLine();
+                + (receiverGroups.isShared() ? " " + receiverGroups.countsLine() : "");
     }
 
     /**
@@ -1870,7 +1870,7 @@ public class LambdaAnalysis implements Plugin {
             } else {
                 // the grouping of another variable or a new one: the types
                 // of before and those of the difference, in other slots
-                targets.remapKnown(slot -> requireSlot(cached, before.keyAt(slot)));
+                targets.remapKnown(before, cached);
                 matchTargets(targets, ptsByType, cached, knownSize, before);
                 targets.sortKnown();
             }

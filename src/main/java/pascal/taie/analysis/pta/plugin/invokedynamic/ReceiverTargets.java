@@ -29,7 +29,6 @@ import pascal.taie.util.collection.Maps;
 
 import java.util.Arrays;
 import java.util.Map;
-import java.util.function.IntUnaryOperator;
 
 /**
  * The target method references of the lambda invocations on one receiver
@@ -82,16 +81,27 @@ final class ReceiverTargets {
     }
 
     /**
-     * Maps the known slots of every target through {@code map} (old slot to
-     * new slot), for a variable whose grouping was replaced by another of
-     * the same keys and more; the lists are then unordered until
-     * {@link #sortKnown}.
+     * Maps the known slots of every target from the variable's old grouping
+     * {@code from} to its new grouping {@code to}, which holds the keys of
+     * {@code from} and more, each possibly in another slot: a known slot
+     * becomes the slot of its key in {@code to}. The lists are then
+     * unordered until {@link #sortKnown}.
+     *
+     * @throws IllegalStateException if the key of a known slot is absent
+     *                               from {@code to}: the target would lose
+     *                               its receivers of that key
      */
-    void remapKnown(IntUnaryOperator map) {
+    <K> void remapKnown(ReceiverGroups<K, ?> from, ReceiverGroups<K, ?> to) {
         for (Target target : byRef.values()) {
             SlotList known = target.known;
             for (int i = 0; i < known.count; ++i) {
-                known.slots[i] = map.applyAsInt(known.slots[i]);
+                K key = from.keyAt(known.slots[i]);
+                int slot = to.slotOf(key);
+                if (slot < 0) {
+                    throw new IllegalStateException("key " + key + " of a known slot of "
+                            + target.ref + " missing from the new grouping");
+                }
+                known.slots[i] = slot;
             }
             known.ordered = false;
         }
