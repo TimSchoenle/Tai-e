@@ -71,6 +71,23 @@ class ColdSetPackingTest {
         assertEquals(0, off.solePacks);
     }
 
+    /**
+     * Option {@code pack-pending-deltas}: packed pending deltas, of which
+     * many merges that add nothing are answered on the packed words, give
+     * every pointer the same objects and the same call graph as unpacked
+     * deltas.
+     */
+    @Test
+    void packedPendingDeltasKeepEveryResult() {
+        Run off = run("share-points-to-sets:true;pack-pending-deltas:false;");
+        Run on = run("share-points-to-sets:true;pack-pending-deltas:true;");
+        assertEquals(off.pointers, on.pointers);
+        assertEquals(off.callEdges, on.callEdges);
+        assertEquals(0, off.workList.packedUnchangedMerges());
+        assertTrue(on.workList.packedUnchangedMerges() > 1000, on.workList.countersLine());
+        System.out.println("pack-pending-deltas " + on.workList.countersLine());
+    }
+
     @Test
     void coldWindowWithoutSharingKeepsEveryResult() {
         Run off = run("");

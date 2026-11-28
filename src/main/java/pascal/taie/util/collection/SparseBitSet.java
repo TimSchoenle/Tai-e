@@ -1867,6 +1867,166 @@ public class SparseBitSet extends AbstractBitSet
     }
 
     /**
+     * Tells whether a packed set holds every bit of {@code other} without
+     * restoring it: the words are only read.
+     *
+     * @param packed the words of {@link #toPacked()}
+     * @return {@code true} if every bit of {@code other} is set in the set
+     * that {@code packed} holds
+     */
+    public static boolean packedContains(long[] packed, SparseBitSet other) {
+        return other.isCoveredBy(new PackedReader(packed, PackedReader.TO_PACKED));
+    }
+
+    /**
+     * {@link #packedContains(long[], SparseBitSet)} for single bits.
+     *
+     * @param packed     the words of {@link #toPacked()}
+     * @param bitIndexes the bits; sorted in place
+     * @return {@code true} if every bit of {@code bitIndexes} is set in the
+     * set that {@code packed} holds
+     */
+    public static boolean packedContains(long[] packed, int[] bitIndexes) {
+        return new PackedReader(packed, PackedReader.TO_PACKED).coversBits(bitIndexes);
+    }
+
+    /**
+     * {@link #packedContains(long[], SparseBitSet)} for the words of a
+     * snapshot of {@link #packedSnapshot()}; the shared words are only read.
+     */
+    public static boolean packedContains(PackedSnapshot snapshot, SparseBitSet other) {
+        return other.isCoveredBy(new PackedReader(snapshot.words, snapshot.blocks));
+    }
+
+    /**
+     * {@link #packedContains(long[], int[])} for the words of a snapshot of
+     * {@link #packedSnapshot()}; the shared words are only read.
+     *
+     * @param bitIndexes the bits; sorted in place
+     */
+    public static boolean packedContains(PackedSnapshot snapshot, int[] bitIndexes) {
+        return new PackedReader(snapshot.words, snapshot.blocks).coversBits(bitIndexes);
+    }
+
+    /**
+     * @return {@code true} if every non-zero word of this set is covered by
+     * the word that {@code reader} reads at its index.
+     */
+    private boolean isCoveredBy(PackedReader reader) {
+        long[] words = packed;
+        if (words != null) {
+            int blocks = packedBlocks;
+            for (int h = 0; h < blocks; ++h) {
+                long header = words[h];
+                int firstWord = (int) (header >>> Integer.SIZE) << SHIFT2;
+                int mask = packedMask(header);
+                int at = blocks + packedRank(header);
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    if ((mask & (1 << w3)) != 0) {
+                        long word = words[at++];
+                        if ((word & ~reader.word(firstWord + w3)) != 0) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        for (int w1 = 0; w1 < table.length; ++w1) {
+            long[][] area = table[w1];
+            if (area == null) {
+                continue;
+            }
+            for (int w2 = 0; w2 < area.length; ++w2) {
+                long[] block = area[w2];
+                if (block == null) {
+                    continue;
+                }
+                for (int w3 = 0; w3 < LENGTH3; ++w3) {
+                    long word = block[w3];
+                    if (word != 0 && (word & ~reader.word(wordIndex(w1, w2, w3))) != 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Reads the words of packed bits, in either layout: that of
+     * {@link #toPacked()} (each header followed by its words) or that of
+     * {@link #pack()} (the headers, then the words, found by the rank in a
+     * header). The word indexes asked for do not decrease from call to
+     * call, so the reader walks the headers forward once. It never writes.
+     */
+    private static final class PackedReader {
+
+        /**
+         * {@link #blocks} for the layout of {@link #toPacked()}.
+         */
+        private static final int TO_PACKED = -1;
+
+        private final long[] words;
+
+        /**
+         * The headers of the layout of {@link #pack()}, or {@link #TO_PACKED}.
+         */
+        private final int blocks;
+
+        /**
+         * The index in {@link #words} of the current header: the first one
+         * whose block index is not below the last block asked for.
+         */
+        private int at;
+
+        private PackedReader(long[] words, int blocks) {
+            this.words = words;
+            this.blocks = blocks;
+        }
+
+        /**
+         * @param wordIndex at least the word index of the previous call
+         * @return the word at {@code wordIndex}, 0 if absent
+         */
+        private long word(int wordIndex) {
+            int blockIndex = wordIndex >> SHIFT2;
+            int end = blocks == TO_PACKED ? words.length : blocks;
+            while (at < end && (int) (words[at] >>> Integer.SIZE) < blockIndex) {
+                at += blocks == TO_PACKED ? 1 + Integer.bitCount(packedMask(words[at])) : 1;
+            }
+            if (at == end) {
+                return 0L;
+            }
+            long header = words[at];
+            if ((int) (header >>> Integer.SIZE) != blockIndex) {
+                return 0L;
+            }
+            int mask = packedMask(header);
+            int bit = 1 << level3Index(wordIndex);
+            if ((mask & bit) == 0) {
+                return 0L;
+            }
+            int first = blocks == TO_PACKED ? at + 1 : blocks + packedRank(header);
+            return words[first + Integer.bitCount(mask & (bit - 1))];
+        }
+
+        /**
+         * @param bitIndexes the bits; sorted in place
+         * @return {@code true} if every bit of {@code bitIndexes} is set
+         */
+        private boolean coversBits(int[] bitIndexes) {
+            Arrays.sort(bitIndexes);
+            for (int bitIndex : bitIndexes) {
+                if ((word(bitIndex >> SHIFT3) & (1L << bitIndex)) == 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /**
      * Index into the array of {@link #addShape(long[])}: the allocated
      * level3 blocks of an unpacked set (all-zero ones included), or the
      * block headers of a packed set.

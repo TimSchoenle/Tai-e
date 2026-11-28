@@ -104,6 +104,31 @@ public class PointsToSetFactory {
         return new HybridBitPointsToSet(HybridBitSet.ofPackedLarge(objIndexer, snapshot));
     }
 
+    /**
+     * Tells, without restoring them, whether the words of
+     * {@link #toPackedLarge} hold every object of {@code pts}; the words are
+     * only read.
+     *
+     * @return {@code true} if they hold every object; {@code false} if they
+     * do not, or if {@code pts} is not a set of this factory that the test
+     * reads (see {@link HybridBitSet#isCoveredByPackedLarge})
+     */
+    public boolean packedLargeContainsAll(long[] packed, PointsToSet pts) {
+        return pts instanceof HybridBitPointsToSet hybrid
+                && hybrid.set instanceof HybridBitSet<CSObj> set
+                && set.isCoveredByPackedLarge(objIndexer, packed);
+    }
+
+    /**
+     * {@link #packedLargeContainsAll(long[], PointsToSet)} for a snapshot of
+     * {@link #packedLargeSnapshot}; the shared words are only read.
+     */
+    public boolean packedLargeContainsAll(SparseBitSet.PackedSnapshot snapshot, PointsToSet pts) {
+        return pts instanceof HybridBitPointsToSet hybrid
+                && hybrid.set instanceof HybridBitSet<CSObj> set
+                && set.isCoveredByPackedLarge(objIndexer, snapshot);
+    }
+
     public PointsToSet make() {
         return factory.get();
     }

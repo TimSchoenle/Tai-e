@@ -171,7 +171,9 @@ class WorkListModelTest {
         assertEquals(3, workList.newEntries());
         assertEquals(2, workList.mergedEntries());
         assertEquals(1, workList.packs());
-        assertEquals(1, workList.unpacks());
+        // a's packed delta holds the small set: answered on its words
+        assertEquals(0, workList.unpacks());
+        assertEquals(1, workList.packedUnchangedMerges());
         assertSame(c, workList.pollPointer());
         assertEquals(order(large), order(workList.takePolledDelta()));
         workList.addEntry(c, small);
@@ -194,7 +196,8 @@ class WorkListModelTest {
         assertEquals("pending_pointers=0 pending_peak=3 new_entries=4"
                 + " merged_entries=3 packs=1 unpacks=1 shared_entries=0 shared_copies=0"
                 + " packed_by_reference=0 packed_copy_bytes=" + words.length * Long.BYTES
-                + " packed_reference_bytes=0 referenced_entries=0 skipped_merges=0",
+                + " packed_reference_bytes=0 referenced_entries=0 skipped_merges=0"
+                + " packed_unchanged_merges=1",
                 workList.countersLine());
     }
 
@@ -256,6 +259,84 @@ class WorkListModelTest {
     }
 
     /**
+     * A merge that adds nothing to a packed delta is answered on its words:
+     * the slot stays packed, whether its words are its own, a snapshot of a
+     * set stored packed or shared by a fan-out; a merge that adds an object
+     * restores the delta. No merge writes the words: the set behind the
+     * snapshot and the other holders of the fan-out's words keep their
+     * objects, and every polled delta equals that of the work list without
+     * packing, iteration order and form included.
+     */
+    @Test
+    void unchangedMergeIntoPackedDeltaKeepsItPacked() {
+        Pointer owned = pointers.get(0);
+        Pointer snapshotted = pointers.get(1);
+        Pointer fanA = pointers.get(2);
+        Pointer fanB = pointers.get(3);
+        CSObj extra = objects.get(1);
+        PointsToSet large = factory.make();
+        objects.forEach(large::addObject);
+        large.removeIf(o -> o == extra);
+        PointsToSet stored = large.copy();
+        packStored(stored);
+        List<CSObj> storedBefore = order(stored);
+        var snapshot = factory.packedLargeSnapshot(stored);
+        assertNotNull(snapshot);
+        PointsToSet subsetSmall = factory.make();
+        subsetSmall.addObject(objects.get(0));
+        subsetSmall.addObject(objects.get(objects.size() - 1));
+        PointsToSet subsetLarge = large.copy();
+        subsetLarge.removeIf(o -> o == objects.get(0));
+        assertTrue(factory.isLarge(subsetLarge));
+        PointsToSet adding = factory.make();
+        adding.addObject(extra);
+        WorkList packing = new WorkList(factory, true);
+        WorkList plain = new WorkList(factory, false);
+        for (WorkList workList : List.of(packing, plain)) {
+            workList.addEntry(owned, large);
+            workList.addEntry(snapshotted, stored);
+            workList.addFanOutEntry(fanA, large);
+            workList.addFanOutEntry(fanB, large);
+            workList.endFanOut();
+        }
+        assertEquals(1, packing.packedByReference());
+        assertEquals(1, packing.sharedEntries());
+        for (Pointer p : List.of(owned, snapshotted, fanA, fanB)) {
+            packing.addEntry(p, subsetSmall);
+            packing.addEntry(p, subsetLarge);
+            plain.addEntry(p, subsetSmall);
+            plain.addEntry(p, subsetLarge);
+        }
+        assertEquals(0, packing.unpacks(), "unchanged merges restore nothing");
+        assertEquals(8, packing.packedUnchangedMerges());
+        assertEquals(8, packing.mergedEntries());
+        // a changing merge restores the delta of one fan-out holder only
+        packing.addEntry(fanB, adding);
+        plain.addEntry(fanB, adding);
+        assertEquals(1, packing.unpacks());
+        assertEquals(8, packing.packedUnchangedMerges());
+        packing.addEntry(snapshotted, adding);
+        plain.addEntry(snapshotted, adding);
+        assertEquals(2, packing.unpacks());
+        assertTrue(packing.countersLine().contains(" packed_unchanged_merges=8"),
+                packing.countersLine());
+        while (!plain.isEmpty()) {
+            Pointer expected = plain.pollPointer();
+            PointsToSet expectedDelta = plain.takePolledDelta();
+            assertSame(expected, packing.pollPointer());
+            PointsToSet delta = packing.takePolledDelta();
+            assertEquals(order(expectedDelta), order(delta), expected.toString());
+            assertEquals(formProbe(expectedDelta), formProbe(delta), expected.toString());
+            boolean merged = expected == fanB || expected == snapshotted;
+            assertEquals(merged, order(delta).contains(extra), expected.toString());
+        }
+        assertTrue(packing.isEmpty());
+        assertEquals(0, plain.packedUnchangedMerges());
+        assertEquals(storedBefore, order(stored));
+        assertEquals(storedBefore, order(factory.ofPackedLarge(snapshot)));
+    }
+
+    /**
      * One fan-out stores each set once: the large set is packed once for
      * two pointers, the small set copied once for two; a merge into one
      * holder of the small set leaves the other holder's delta unchanged.
@@ -287,7 +368,9 @@ class WorkListModelTest {
         workList.addEntry(c, other);
         workList.addEntry(a, other);
         assertEquals(1, workList.sharedCopies());
-        assertEquals(1, workList.unpacks());
+        // a's packed delta holds other's object: answered on its words
+        assertEquals(0, workList.unpacks());
+        assertEquals(1, workList.packedUnchangedMerges());
         assertSame(a, workList.pollPointer());
         assertEquals(objects, order(workList.takePolledDelta()));
         assertSame(c, workList.pollPointer());
@@ -390,7 +473,8 @@ class WorkListModelTest {
                 + (packLarge ? " packs=1 unpacks=1" : " packs=0 unpacks=0")
                 + " shared_entries=2 shared_copies=1 packed_by_reference=0"
                 + " packed_copy_bytes=" + (packLarge ? words.length * Long.BYTES : 0)
-                + " packed_reference_bytes=0 referenced_entries=2 skipped_merges=1",
+                + " packed_reference_bytes=0 referenced_entries=2 skipped_merges=1"
+                + " packed_unchanged_merges=0",
                 workList.countersLine());
     }
 
@@ -515,13 +599,19 @@ class WorkListModelTest {
         workList.addFanOutEntry(b, large);
         workList.addFanOutEntry(c, large);
         assertThrows(IllegalStateException.class, workList::packColdDeltas);
-        workList.addEntry(b, small);
+        // a merge that adds an object: one that adds nothing leaves b packed
+        PointsToSet adding = factory.make();
+        adding.addObject(lowest);
+        workList.addEntry(b, adding);
         workList.endFanOut();
         workList.packColdDeltas();
         assertEquals(1, workList.coldPacks(), "a's merge left the window by b's merge");
+        PointsToSet withLowest = large.copy();
+        withLowest.addObject(lowest);
         for (Pointer expected : List.of(a, b, c)) {
             assertSame(expected, workList.pollPointer());
-            assertEquals(order(large), order(workList.takePolledDelta()));
+            assertEquals(order(expected == b ? withLowest : large),
+                    order(workList.takePolledDelta()));
         }
         assertEquals(1, workList.coldUnpacks());
         assertTrue(workList.isEmpty());
@@ -545,6 +635,7 @@ class WorkListModelTest {
         long copies = 0;
         long coldPacks = 0;
         long coldUnpacks = 0;
+        long packedUnchanged = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
             WorkList workList = new WorkList(factory, packLarge, coldWindow);
@@ -603,6 +694,13 @@ class WorkListModelTest {
             copies += workList.sharedCopies();
             coldPacks += workList.coldPacks();
             coldUnpacks += workList.coldUnpacks();
+            packedUnchanged += workList.packedUnchangedMerges();
+        }
+        if (packLarge || coldWindow > 0) {
+            // unchanged merges answered on packed words
+            assertTrue(packedUnchanged > 100, "packed unchanged merges: " + packedUnchanged);
+        } else {
+            assertEquals(0, packedUnchanged);
         }
         assertTrue(shared > 1000, "shared entries: " + shared);
         assertTrue(copies > 100, "shared copies: " + copies);
@@ -726,25 +824,34 @@ class WorkListModelTest {
         assertEquals(words.length * Long.BYTES, workList.coldPackedBytes());
         workList.packColdDeltas();
         assertEquals(1, workList.coldPacks(), "a drained window packs nothing more");
-        // b's next merge restores its words and counts the restore
+        // b's next merge that adds an object restores its words and counts the restore
+        PointsToSet adding = factory.make();
+        adding.addObject(lowest);
+        PointsToSet withLowest = large.copy();
+        withLowest.addObject(lowest);
+        long[] wordsWithLowest = factory.toPackedLarge(withLowest);
+        assertNotNull(wordsWithLowest);
         workList.addEntry(b, small);
+        assertEquals(0, workList.coldUnpacks(), "a merge that adds nothing keeps b packed");
+        workList.addEntry(b, adding);
         assertEquals(1, workList.coldUnpacks());
         assertSame(a, workList.pollPointer());
         assertEquals(order(large), order(workList.takePolledDelta()));
         // b's merge is live, a was polled: b's delta is packed again, a's entry is dropped
         workList.packColdDeltas();
         assertEquals(1, workList.coldPacks(), "the newest merge stays in the window");
-        workList.addEntry(c, small);
+        workList.addEntry(c, adding);
         workList.packColdDeltas();
         assertEquals(2, workList.coldPacks());
         assertSame(b, workList.pollPointer());
-        assertEquals(order(large), order(workList.takePolledDelta()));
+        assertEquals(order(withLowest), order(workList.takePolledDelta()));
         assertEquals(2, workList.coldUnpacks());
         assertSame(c, workList.pollPointer());
-        assertEquals(order(large), order(workList.takePolledDelta()));
+        assertEquals(order(withLowest), order(workList.takePolledDelta()));
         assertTrue(workList.isEmpty());
         assertTrue(workList.countersLine().endsWith(" cold_packs=2 cold_packed_bytes="
-                + 2 * words.length * Long.BYTES + " cold_unpacks=2"), workList.countersLine());
+                + (words.length + wordsWithLowest.length) * Long.BYTES + " cold_unpacks=2"),
+                workList.countersLine());
         assertFalse(new WorkList(factory, true).countersLine().contains("cold"));
     }
 
@@ -797,6 +904,7 @@ class WorkListModelTest {
         long copied = 0;
         long coldPacks = 0;
         long coldUnpacks = 0;
+        long packedUnchanged = 0;
         for (int seed = 0; seed < 300; ++seed) {
             Random random = new Random(seed);
             WorkList workList = new WorkList(factory, packLarge, coldWindow);
@@ -840,6 +948,13 @@ class WorkListModelTest {
             copied += workList.packs() - workList.packedByReference();
             coldPacks += workList.coldPacks();
             coldUnpacks += workList.coldUnpacks();
+            packedUnchanged += workList.packedUnchangedMerges();
+        }
+        if (packLarge || coldWindow > 0) {
+            // unchanged merges answered on packed words
+            assertTrue(packedUnchanged > 100, "packed unchanged merges: " + packedUnchanged);
+        } else {
+            assertEquals(0, packedUnchanged);
         }
         if (coldWindow > 0) {
             // merged deltas packed again, and some of them restored by a merge or poll

@@ -55,6 +55,8 @@ import java.util.function.Consumer;
  * is on and it was a large set on arrival, as the packed words of
  * {@link PointsToSetFactory#toPackedLarge}: a large delta usually holds few
  * bits per bit set block, and many deltas can wait at the same time. A
+ * merge into a packed delta that already holds every object added is
+ * answered on the packed words, which stay packed and are only read; a
  * packed delta that receives more objects is restored to a set, so merging
  * works on sets as before. A large set that is stored packed already (as a
  * set shared through a points-to set interner is) is not packed again: the
@@ -84,7 +86,8 @@ import java.util.function.Consumer;
  * <p>
  * With a cold window (option {@code pack-cold-sets}), a pending delta that
  * a merge restored or changed and that then waits for as many later merges
- * as the window holds without one of its own is packed again by
+ * that restore or change a delta as the window holds without one of its
+ * own is packed again by
  * {@link #packColdDeltas()}: it is held as the packed words of
  * {@link PointsToSetFactory#toPackedLarge}, the form a large delta takes
  * on arrival, which the next merge or the poll restores.
@@ -219,6 +222,12 @@ final class WorkList {
      * The merges skipped as the slot already held the merged set.
      */
     private long skippedMerges;
+
+    /**
+     * The merges into a packed delta that held every object added, answered
+     * on its packed words without a restore.
+     */
+    private long packedUnchangedMerges;
 
     /**
      * Whether the measurement counters below are kept; they change no
@@ -461,6 +470,16 @@ final class WorkList {
             }
             return;
         }
+        if (!(pending instanceof PointsToSet) && packedContainsAll(pending, pointsToSet)) {
+            // the packed delta holds every object added: an unchanged merge,
+            // answered on its words, which stay packed and are only read
+            ++mergedEntries;
+            ++packedUnchangedMerges;
+            if (counting) {
+                ++mergesUnchanged;
+            }
+            return;
+        }
         PointsToSet set;
         if (pending instanceof PointsToSet held) {
             if (ringShared[slot]) {
@@ -567,6 +586,17 @@ final class WorkList {
             }
         }
         return pointsToSet.copy();
+    }
+
+    /**
+     * @return whether a packed pending delta (packed words or a snapshot of
+     * them) holds every object of {@code pointsToSet}, told on its words
+     * without a restore
+     */
+    private boolean packedContainsAll(Object packed, PointsToSet pointsToSet) {
+        return packed instanceof SparseBitSet.PackedSnapshot snapshot
+                ? ptsFactory.packedLargeContainsAll(snapshot, pointsToSet)
+                : ptsFactory.packedLargeContainsAll((long[]) packed, pointsToSet);
     }
 
     /**
@@ -793,6 +823,14 @@ final class WorkList {
     }
 
     /**
+     * @return the merges into a packed delta that held every object added,
+     * answered on its packed words without a restore
+     */
+    long packedUnchangedMerges() {
+        return packedUnchangedMerges;
+    }
+
+    /**
      * @return the pending deltas packed by {@link #packColdDeltas()}
      */
     long coldPacks() {
@@ -838,6 +876,7 @@ final class WorkList {
                 + " packed_reference_bytes=" + packedReferenceBytes()
                 + " referenced_entries=" + referencedEntries
                 + " skipped_merges=" + skippedMerges
+                + " packed_unchanged_merges=" + packedUnchangedMerges
                 + cold;
         if (!counting) {
             return line;
