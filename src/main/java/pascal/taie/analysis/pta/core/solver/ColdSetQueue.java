@@ -29,7 +29,8 @@ import java.util.function.Consumer;
 
 /**
  * A first-in first-out window over the pointers whose sets were written
- * last (option {@code pack-cold-sets}). A pointer whose set is written
+ * last (options {@code pack-cold-sets} and {@code pack-cold-deltas}). A
+ * pointer whose set is written
  * enters the window; when the window holds more than its size, the oldest
  * entries leave it, and {@link #drain} hands over each pointer whose set
  * had no write since that entry, so that its owner can store the set in a

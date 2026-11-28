@@ -451,6 +451,12 @@ public class DefaultSolver implements Solver {
      */
     private final boolean counting;
 
+    /**
+     * The work list's cold window over the merged pending deltas (option
+     * {@code pack-cold-deltas}); 0 packs none again.
+     */
+    private final int coldDeltaWindow;
+
     static final String COUNTERS_PROPERTY = "taie.pta.counters";
 
     /**
@@ -528,6 +534,11 @@ public class DefaultSolver implements Solver {
         if (coldWindow < 0) {
             throw new IllegalArgumentException(
                     "pack-cold-sets must not be negative: " + coldWindow);
+        }
+        coldDeltaWindow = options.getInt("pack-cold-deltas");
+        if (coldDeltaWindow < 0) {
+            throw new IllegalArgumentException(
+                    "pack-cold-deltas must not be negative: " + coldDeltaWindow);
         }
         interner = options.getBoolean("share-points-to-sets")
                 ? new PointsToSetInterner(ptsFactory, coldWindow > 0) : null;
@@ -757,7 +768,7 @@ public class DefaultSolver implements Solver {
 
     private WorkList newWorkList() {
         return new WorkList(ptsFactory, options.getBoolean("pack-pending-deltas"),
-                counting, options.getInt("pack-cold-sets"));
+                counting, coldDeltaWindow);
     }
 
     private class TimeLimiter {
@@ -795,8 +806,9 @@ public class DefaultSolver implements Solver {
     }
 
     /**
-     * Packs the sets that left the cold windows (option
-     * {@code pack-cold-sets}). Runs only between two polls: there no
+     * Packs the sets that left the cold windows (options
+     * {@code pack-cold-sets} and {@code pack-cold-deltas}). Runs only
+     * between two polls: there no
      * caller iterates a points-to set or a pending delta, and no fan-out
      * is open.
      */

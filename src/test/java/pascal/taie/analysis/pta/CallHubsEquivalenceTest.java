@@ -236,8 +236,10 @@ public class CallHubsEquivalenceTest {
             "basic | Dispatch | 1-call |", "basic | Dispatch | 2-obj |",
             "getters | Getters | ci | trivial-getters:true",
             "getters | Getters | 1-call | trivial-getters:true",
-            "blocks | Blocks | 2-obj | share-points-to-sets:true;pack-cold-sets:4",
-            "blocks | Blocks | 1-call | share-points-to-sets:true;pack-cold-sets:4",
+            "blocks | Blocks | 2-obj | share-points-to-sets:true;pack-cold-sets:4;"
+                    + "pack-cold-deltas:4",
+            "blocks | Blocks | 1-call | share-points-to-sets:true;pack-cold-sets:4;"
+                    + "pack-cold-deltas:4",
             "blocks | Blocks | 1-call | call-batching:verify",
             "misc | Zipper | 2-obj | advanced:zipper",
             "misc | Zipper | 2-obj | advanced:scaler",

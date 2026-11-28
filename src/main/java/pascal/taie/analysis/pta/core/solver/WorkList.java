@@ -84,7 +84,7 @@ import java.util.function.Consumer;
  * into the slot that already holds that same set changes nothing and is
  * skipped.
  * <p>
- * With a cold window (option {@code pack-cold-sets}), a pending delta that
+ * With a cold window (option {@code pack-cold-deltas}), a pending delta that
  * a merge restored or changed and that then waits for as many later merges
  * that restore or change a delta as the window holds without one of its
  * own is packed again by
