@@ -80,6 +80,43 @@ final class ReceiverTargets {
         return byDeclaringClass.get(declaringClass);
     }
 
+    /**
+     * Maps the known slots of every target from the variable's old grouping
+     * {@code from} to its new grouping {@code to}, which holds the keys of
+     * {@code from} and more, each possibly in another slot: a known slot
+     * becomes the slot of its key in {@code to}. The lists are then
+     * unordered until {@link #sortKnown}.
+     *
+     * @throws IllegalStateException if the key of a known slot is absent
+     *                               from {@code to}: the target would lose
+     *                               its receivers of that key
+     */
+    <K> void remapKnown(ReceiverGroups<K, ?> from, ReceiverGroups<K, ?> to) {
+        for (Target target : byRef.values()) {
+            SlotList known = target.known;
+            for (int i = 0; i < known.count; ++i) {
+                K key = from.keyAt(known.slots[i]);
+                int slot = to.slotOf(key);
+                if (slot < 0) {
+                    throw new IllegalStateException("key " + key + " of a known slot of "
+                            + target.ref + " missing from the new grouping");
+                }
+                known.slots[i] = slot;
+            }
+            known.ordered = false;
+        }
+    }
+
+    /**
+     * Sorts the known slots of every target after {@link #remapKnown} and
+     * the slots added since, dropping repeated slots.
+     */
+    void sortKnown() {
+        for (Target target : byRef.values()) {
+            target.known.sort();
+        }
+    }
+
     private static Target[] concat(Target[] old, Target[] added) {
         Target[] all = Arrays.copyOf(old, old.length + added.length);
         System.arraycopy(added, 0, all, old.length, added.length);
@@ -151,10 +188,17 @@ final class ReceiverTargets {
         private int count;
 
         /**
+         * False between {@link ReceiverTargets#remapKnown} and
+         * {@link ReceiverTargets#sortKnown}: slots may then come in any
+         * order.
+         */
+        private boolean ordered = true;
+
+        /**
          * Appends {@code slot} unless it is the last slot already.
          *
          * @throws IllegalStateException if {@code slot} is below the last
-         *                               slot
+         *                               slot while the list is ordered
          */
         void addLast(int slot) {
             if (count > 0) {
@@ -162,7 +206,7 @@ final class ReceiverTargets {
                 if (last == slot) {
                     return;
                 }
-                if (last > slot) {
+                if (ordered && last > slot) {
                     throw new IllegalStateException("slot " + slot + " after " + last);
                 }
             }
@@ -183,6 +227,18 @@ final class ReceiverTargets {
 
         private void clear() {
             count = 0;
+        }
+
+        private void sort() {
+            Arrays.sort(slots, 0, count);
+            int distinct = 0;
+            for (int i = 0; i < count; ++i) {
+                if (distinct == 0 || slots[distinct - 1] != slots[i]) {
+                    slots[distinct++] = slots[i];
+                }
+            }
+            count = distinct;
+            ordered = true;
         }
     }
 }
